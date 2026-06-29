@@ -254,6 +254,7 @@ AmtPtpServiceTouchInputInterrupt(
 	USHORT x = 0, y = 0;
 
 	Status = STATUS_SUCCESS;
+	RtlZeroMemory(&PtpReport, sizeof(PTP_REPORT));
 	PtpReport.ReportID = REPORTID_MULTITOUCH;
 	PtpReport.IsButtonClicked = 0;
 
@@ -299,6 +300,7 @@ AmtPtpServiceTouchInputInterrupt(
 			"%!FUNC! WdfRequestRetrieveOutputMemory failed with %!STATUS!",
 			Status
 		);
+		WdfRequestComplete(Request, Status);
 		goto exit;
 	}
 
@@ -380,6 +382,7 @@ AmtPtpServiceTouchInputInterrupt(
 			"%!FUNC! WdfMemoryCopyFromBuffer failed with %!STATUS!",
 			Status
 		);
+		WdfRequestComplete(Request, Status);
 		goto exit;
 	}
 
@@ -431,6 +434,7 @@ AmtPtpServiceTouchInputInterruptType5(
 	);
 
 	Status = STATUS_SUCCESS;
+	RtlZeroMemory(&PtpReport, sizeof(PTP_REPORT));
 	PtpReport.ReportID = REPORTID_MULTITOUCH;
 	PtpReport.IsButtonClicked = 0;
 
@@ -464,6 +468,7 @@ AmtPtpServiceTouchInputInterruptType5(
 			"%!FUNC! WdfRequestRetrieveOutputBuffer failed with %!STATUS!", 
 			Status
 		);
+		WdfRequestComplete(Request, Status);
 		goto exit;
 	}
 
@@ -520,7 +525,7 @@ AmtPtpServiceTouchInputInterruptType5(
 			// The Microsoft spec says reject any input larger than 25mm. This is not ideal
 			// for Magic Trackpad 2 - so we raised the threshold a bit higher.
 			// Or maybe I used the wrong unit? IDK
-			PtpReport.Contacts[i].Confidence = (AmtRawToInteger(f_type5->TouchMinor) << 1) < 345 && 
+			PtpReport.Contacts[i].Confidence = (AmtRawToInteger(f_type5->TouchMajor) << 1) < 345 && 
 				(AmtRawToInteger(f_type5->TouchMinor) << 1) < 345;
 
 #ifdef INPUT_CONTENT_TRACE
@@ -563,6 +568,7 @@ AmtPtpServiceTouchInputInterruptType5(
 			"%!FUNC! WdfMemoryCopyFromBuffer failed with %!STATUS!", 
 			Status
 		);
+		WdfRequestComplete(Request, Status);
 		goto exit;
 	}
 

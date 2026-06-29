@@ -83,7 +83,7 @@ exit:
 		"%!FUNC! Exit"
 	);
 
-	return STATUS_SUCCESS;
+	return status;
 }
 
 VOID
@@ -161,6 +161,7 @@ AmtPtpEvtUsbInterruptPipeReadComplete(
 			"%!FUNC! WdfRequestRetrieveOutputMemory failed with %!STATUS!",
 			Status
 		);
+		WdfRequestComplete(Request, Status);
 		return;
 	}
 
@@ -239,6 +240,7 @@ AmtPtpEvtUsbInterruptPipeReadComplete(
 			"%!FUNC! WdfMemoryCopyFromBuffer failed with %!STATUS!",
 			Status
 		);
+		WdfRequestComplete(Request, Status);
 		return;
 	}
 

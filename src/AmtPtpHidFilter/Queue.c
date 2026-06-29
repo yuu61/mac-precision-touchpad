@@ -65,7 +65,7 @@ FilterEvtIoIntDeviceControl(
     PQUEUE_CONTEXT queueContext;
     PDEVICE_CONTEXT deviceContext;
     BOOLEAN requestPending = FALSE;
-	NTSTATUS status = STATUS_UNSUCCESSFUL;
+    NTSTATUS status = STATUS_UNSUCCESSFUL;
     
     UNREFERENCED_PARAMETER(InputBufferLength);
     UNREFERENCED_PARAMETER(OutputBufferLength);
@@ -73,41 +73,41 @@ FilterEvtIoIntDeviceControl(
     queueContext = PtpFilterQueueGetContext(Queue);
     deviceContext = PtpFilterGetContext(queueContext->Device);
 
-	switch (IoControlCode)
-	{
-	case IOCTL_HID_GET_DEVICE_DESCRIPTOR:
-		status = PtpFilterGetHidDescriptor(queueContext->Device, Request);
-		break;
-	case IOCTL_HID_GET_DEVICE_ATTRIBUTES:
-		status = PtpFilterGetDeviceAttribs(queueContext->Device, Request);
-		break;
-	case IOCTL_HID_GET_REPORT_DESCRIPTOR:
-		status = PtpFilterGetReportDescriptor(queueContext->Device, Request);
-		break;
-	case IOCTL_HID_GET_STRING:
-		status = PtpFilterGetStrings(queueContext->Device, Request, &requestPending);
-		break;
-	case IOCTL_HID_READ_REPORT:
+    switch (IoControlCode)
+    {
+    case IOCTL_HID_GET_DEVICE_DESCRIPTOR:
+        status = PtpFilterGetHidDescriptor(queueContext->Device, Request);
+        break;
+    case IOCTL_HID_GET_DEVICE_ATTRIBUTES:
+        status = PtpFilterGetDeviceAttribs(queueContext->Device, Request);
+        break;
+    case IOCTL_HID_GET_REPORT_DESCRIPTOR:
+        status = PtpFilterGetReportDescriptor(queueContext->Device, Request);
+        break;
+    case IOCTL_HID_GET_STRING:
+        status = PtpFilterGetStrings(queueContext->Device, Request, &requestPending);
+        break;
+    case IOCTL_HID_READ_REPORT:
         PtpFilterInputProcessRequest(queueContext->Device, Request);
-		requestPending = TRUE;
-		break;
-	case IOCTL_HID_GET_FEATURE:
-		status = PtpFilterGetHidFeatures(queueContext->Device, Request);
-		break;
-	case IOCTL_HID_SET_FEATURE:
-		status = PtpFilterSetHidFeatures(queueContext->Device, Request);
-		break;
-	case IOCTL_HID_WRITE_REPORT:
-	case IOCTL_UMDF_HID_SET_OUTPUT_REPORT:
-	case IOCTL_UMDF_HID_GET_INPUT_REPORT:
-	case IOCTL_HID_ACTIVATE_DEVICE:
-	case IOCTL_HID_DEACTIVATE_DEVICE:
-	case IOCTL_HID_SEND_IDLE_NOTIFICATION_REQUEST:
-	default:
-		status = STATUS_NOT_SUPPORTED;
-		TraceEvents(TRACE_LEVEL_WARNING, TRACE_QUEUE, "%!FUNC!: %s is not yet implemented", PtpFilterDiagnosticsIoControlGetString(IoControlCode));
-		break;
-	}
+        requestPending = TRUE;
+        break;
+    case IOCTL_HID_GET_FEATURE:
+        status = PtpFilterGetHidFeatures(queueContext->Device, Request);
+        break;
+    case IOCTL_HID_SET_FEATURE:
+        status = PtpFilterSetHidFeatures(queueContext->Device, Request);
+        break;
+    case IOCTL_HID_WRITE_REPORT:
+    case IOCTL_UMDF_HID_SET_OUTPUT_REPORT:
+    case IOCTL_UMDF_HID_GET_INPUT_REPORT:
+    case IOCTL_HID_ACTIVATE_DEVICE:
+    case IOCTL_HID_DEACTIVATE_DEVICE:
+    case IOCTL_HID_SEND_IDLE_NOTIFICATION_REQUEST:
+    default:
+        status = STATUS_NOT_SUPPORTED;
+        TraceEvents(TRACE_LEVEL_WARNING, TRACE_QUEUE, "%!FUNC!: %s is not yet implemented", PtpFilterDiagnosticsIoControlGetString(IoControlCode));
+        break;
+    }
 
     if (requestPending != TRUE)
     {

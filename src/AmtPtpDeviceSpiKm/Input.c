@@ -222,10 +222,29 @@ AmtPtpRequestCompletionRoutine(
 
 	// Write report
 	PtpReport.ReportID = REPORTID_MULTITOUCH;
-	PtpReport.ContactCount = pSpiTrackpadPacket->NumOfFingers;
+
+	// Clamp the device-reported finger count to the number we can actually store.
+	UINT8 AdjustedCount = (pSpiTrackpadPacket->NumOfFingers > 5) ? 5 : pSpiTrackpadPacket->NumOfFingers;
+
+	// Safe measurement for buffer overrun: ensure the packet is large enough to
+	// hold the fingers we are about to read (mirror the short-packet handling above).
+	if (SpiRequestLength < (LONG)(46 + AdjustedCount * sizeof(SPI_TRACKPAD_FINGER))) {
+		TraceEvents(
+			TRACE_LEVEL_ERROR,
+			TRACE_DRIVER,
+			"%!FUNC! Input too small for %d finger(s): %d < %d. Attempt to re-enable the device.",
+			AdjustedCount,
+			SpiRequestLength,
+			(LONG)(46 + AdjustedCount * sizeof(SPI_TRACKPAD_FINGER))
+		);
+
+		Status = STATUS_DEVICE_DATA_ERROR;
+		goto exit;
+	}
+
+	PtpReport.ContactCount = AdjustedCount;
 	PtpReport.IsButtonClicked = pSpiTrackpadPacket->ClickOccurred;
 
-	UINT8 AdjustedCount = (pSpiTrackpadPacket->NumOfFingers > 5) ? 5 : pSpiTrackpadPacket->NumOfFingers;
 	for (UINT8 Count = 0; Count < AdjustedCount; Count++)
 	{
 		PtpReport.Contacts[Count].ContactID = Count;

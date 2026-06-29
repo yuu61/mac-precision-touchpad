@@ -3,8 +3,6 @@
 #include "Driver.h"
 #include "Hid.tmh"
 
-#ifndef __AAPL_HID_DESCRIPTOR_H__
-#define __AAPL_HID_DESCRIPTOR_H__
 
 HID_REPORT_DESCRIPTOR AmtPtpSpiFamily1ReportDescriptor[] = {
 	AAPL_SPI_SERIES1_PTP_TLC,
@@ -102,7 +100,6 @@ CONST HID_DESCRIPTOR AmtPtpSpiFamily3bDefaultHidDescriptor = {
 	}
 };
 
-#endif
 
 _IRQL_requires_(PASSIVE_LEVEL)
 NTSTATUS
@@ -175,7 +172,7 @@ AmtPtpGetHidDescriptor(
 					"%!FUNC! WdfMemoryCopyFromBuffer failed with %!STATUS!",
 					Status
 				);
-				return Status;
+				goto exit;
 			}
 			break;
 		}
@@ -205,7 +202,7 @@ AmtPtpGetHidDescriptor(
 					"%!FUNC! WdfMemoryCopyFromBuffer failed with %!STATUS!",
 					Status
 				);
-				return Status;
+				goto exit;
 			}
 			break;
 		}
@@ -235,7 +232,7 @@ AmtPtpGetHidDescriptor(
 					"%!FUNC! WdfMemoryCopyFromBuffer failed with %!STATUS!",
 					Status
 				);
-				return Status;
+				goto exit;
 			}
 			break;
 		}
@@ -264,7 +261,7 @@ AmtPtpGetHidDescriptor(
 					"%!FUNC! WdfMemoryCopyFromBuffer failed with %!STATUS!",
 					Status
 				);
-				return Status;
+				goto exit;
 			}
 			break;
 		}
@@ -482,7 +479,7 @@ AmtPtpGetReportDescriptor(
 			TRACE_DRIVER,
 			"%!FUNC! Device HID descriptor not found"
 		);
-		return Status;
+		goto exit;
 	}
 
 	if (CopiedSize == 0)
@@ -493,7 +490,7 @@ AmtPtpGetReportDescriptor(
 			TRACE_DRIVER,
 			"%!FUNC! Device HID report length is zero"
 		);
-		return Status;
+		goto exit;
 	}
 
 	Status = WdfMemoryCopyFromBuffer(
@@ -511,7 +508,7 @@ AmtPtpGetReportDescriptor(
 			"%!FUNC! WdfMemoryCopyFromBuffer failed with %!STATUS!",
 			Status
 		);
-		return Status;
+		goto exit;
 
 	}
 
@@ -773,6 +770,18 @@ AmtPtpSetFeatures(
 				"%!FUNC! Report REPORTID_REPORTMODE is requested"
 			);
 
+			// Size sanity check
+			if (pHidPacket->reportBufferLen < sizeof(PTP_DEVICE_INPUT_MODE_REPORT))
+			{
+				Status = STATUS_INVALID_BUFFER_SIZE;
+				TraceEvents(
+					TRACE_LEVEL_ERROR,
+					TRACE_DRIVER,
+					"%!FUNC! Report buffer is too small"
+				);
+				goto exit;
+			}
+
 			PPTP_DEVICE_INPUT_MODE_REPORT DeviceInputMode = (PPTP_DEVICE_INPUT_MODE_REPORT) pHidPacket->reportBuffer;
 			switch (DeviceInputMode->Mode)
 			{
@@ -815,6 +824,18 @@ AmtPtpSetFeatures(
 				TRACE_DRIVER,
 				"%!FUNC! Report REPORTID_FUNCSWITCH is requested"
 			);
+
+			// Size sanity check
+			if (pHidPacket->reportBufferLen < sizeof(PTP_DEVICE_SELECTIVE_REPORT_MODE_REPORT))
+			{
+				Status = STATUS_INVALID_BUFFER_SIZE;
+				TraceEvents(
+					TRACE_LEVEL_ERROR,
+					TRACE_DRIVER,
+					"%!FUNC! Report buffer is too small"
+				);
+				goto exit;
+			}
 
 			PPTP_DEVICE_SELECTIVE_REPORT_MODE_REPORT InputSelection = (PPTP_DEVICE_SELECTIVE_REPORT_MODE_REPORT) pHidPacket->reportBuffer;
 			pDeviceContext->PtpReportButton = InputSelection->ButtonReport;

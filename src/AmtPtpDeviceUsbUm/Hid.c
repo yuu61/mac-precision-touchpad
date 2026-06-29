@@ -519,16 +519,31 @@ AmtPtpGetStrings(
 		return status;
 	}
 
-	WdfMemoryCopyToBuffer(
+	size_t bytesToCopy = wcharCount * sizeof(WCHAR);
+	if (bytesToCopy > actualSize) {
+		bytesToCopy = actualSize;
+	}
+
+	status = WdfMemoryCopyToBuffer(
 		memHandle,
-		0, 
-		&pStringBuffer, 
-		actualSize
+		0,
+		pStringBuffer,
+		bytesToCopy
 	);
 
+	if (!NT_SUCCESS(status)) {
+		TraceEvents(
+			TRACE_LEVEL_ERROR,
+			TRACE_DRIVER,
+			"%!FUNC! WdfMemoryCopyToBuffer failed with %!STATUS!",
+			status
+		);
+		return status;
+	}
+
 	WdfRequestSetInformation(
-		Request, 
-		actualSize
+		Request,
+		bytesToCopy
 	);
 
 	TraceEvents(
@@ -940,6 +955,11 @@ AmtPtpSetFeatures(
 				"%!FUNC! Report REPORTID_REPORTMODE is requested"
 			);
 
+			if (packet.reportBufferLen < sizeof(PTP_DEVICE_INPUT_MODE_REPORT)) {
+				status = STATUS_INVALID_BUFFER_SIZE;
+				goto exit;
+			}
+
 			PPTP_DEVICE_INPUT_MODE_REPORT devInputMode = (PPTP_DEVICE_INPUT_MODE_REPORT) packet.reportBuffer;
 
 			// Get current WellSpring mode
@@ -1046,6 +1066,11 @@ AmtPtpSetFeatures(
 				TRACE_DRIVER, 
 				"%!FUNC! Report REPORTID_FUNCSWITCH is requested"
 			);
+			if (packet.reportBufferLen < sizeof(PTP_DEVICE_SELECTIVE_REPORT_MODE_REPORT)) {
+				status = STATUS_INVALID_BUFFER_SIZE;
+				goto exit;
+			}
+
 			PPTP_DEVICE_SELECTIVE_REPORT_MODE_REPORT secInput = (PPTP_DEVICE_SELECTIVE_REPORT_MODE_REPORT) packet.reportBuffer;
 
 			deviceContext->IsButtonReportOn = secInput->ButtonReport;
@@ -1078,6 +1103,11 @@ AmtPtpSetFeatures(
 				TRACE_DRIVER,
 				"%!FUNC! Report REPORTID_UMAPP_CONF is requested"
 			);
+			if (packet.reportBufferLen < sizeof(PTP_USERMODEAPP_CONF_REPORT)) {
+				status = STATUS_INVALID_BUFFER_SIZE;
+				goto exit;
+			}
+
 			PPTP_USERMODEAPP_CONF_REPORT umConfInput = (PPTP_USERMODEAPP_CONF_REPORT) packet.reportBuffer;
 
 			// Set value
@@ -1125,6 +1155,6 @@ exit:
 		TRACE_DRIVER, 
 		"%!FUNC! Exit"
 	);
-	return STATUS_SUCCESS;
+	return status;
 
 }

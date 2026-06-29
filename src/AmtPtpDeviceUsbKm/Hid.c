@@ -1,8 +1,6 @@
 #include "Driver.h"
 #include "hid.tmh"
 
-#ifndef _AAPL_HID_DESCRIPTOR_H_
-#define _AAPL_HID_DESCRIPTOR_H_
 
 HID_REPORT_DESCRIPTOR AmtPtpT2ReportDescriptor[] = {
 	AAPL_WELLSPRING_T2_PTP_TLC,
@@ -21,7 +19,6 @@ CONST HID_DESCRIPTOR AmtPtpT2DefaultHidDescriptor = {
 	},
 };
 
-#endif
 
 _IRQL_requires_(PASSIVE_LEVEL)
 NTSTATUS
@@ -473,6 +470,16 @@ AmtPtpSetFeatures(
 				"%!FUNC! Report REPORTID_REPORTMODE is requested"
 			);
 
+			// Size sanity check
+			if (pHidPacket->reportBufferLen < sizeof(PTP_DEVICE_INPUT_MODE_REPORT)) {
+				status = STATUS_INVALID_BUFFER_SIZE;
+				TraceEvents(
+					TRACE_LEVEL_ERROR, TRACE_DRIVER,
+					"%!FUNC! Report buffer is too small"
+				);
+				goto exit;
+			}
+
 			PPTP_DEVICE_INPUT_MODE_REPORT devInputMode = (PPTP_DEVICE_INPUT_MODE_REPORT) pHidPacket->reportBuffer;
 			BOOLEAN bWellspringMode = pDeviceContext->IsWellspringModeOn;
 
@@ -522,6 +529,16 @@ AmtPtpSetFeatures(
 				TRACE_LEVEL_INFORMATION, TRACE_DRIVER,
 				"%!FUNC! Report REPORTID_FUNCSWITCH is requested"
 			);
+
+			// Size sanity check
+			if (pHidPacket->reportBufferLen < sizeof(PTP_DEVICE_SELECTIVE_REPORT_MODE_REPORT)) {
+				status = STATUS_INVALID_BUFFER_SIZE;
+				TraceEvents(
+					TRACE_LEVEL_ERROR, TRACE_DRIVER,
+					"%!FUNC! Report buffer is too small"
+				);
+				goto exit;
+			}
 
 			PPTP_DEVICE_SELECTIVE_REPORT_MODE_REPORT secInput = (PPTP_DEVICE_SELECTIVE_REPORT_MODE_REPORT) pHidPacket->reportBuffer;
 

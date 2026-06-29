@@ -214,7 +214,7 @@ PtpFilterInputRequestCompletionCallback(
 		// The Microsoft spec says reject any input larger than 25mm. This is not ideal
 		// for Magic Trackpad 2 - so we raised the threshold a bit higher.
 		// Or maybe I used the wrong unit? IDK
-		ptpOutputReport.Contacts[i].Confidence = ((signed short) (f_type5->TouchMinor) << 1) < 345 && ((signed short) (f_type5->TouchMinor) << 1) < 345;
+		ptpOutputReport.Contacts[i].Confidence = ((signed short) (f_type5->TouchMajor) << 1) < 345 && ((signed short) (f_type5->TouchMinor) << 1) < 345;
 	}
 
 	// Button

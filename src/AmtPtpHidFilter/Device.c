@@ -62,6 +62,7 @@ PtpFilterCreateDevice(
     );
     if (!NT_SUCCESS(status)) {
         TraceEvents(TRACE_LEVEL_ERROR, TRACE_DEVICE, "WdfLookasideListCreate failed: %!STATUS!", status);
+        goto exit;
     }
 
     // Initialize HID recovery timer
@@ -73,6 +74,7 @@ PtpFilterCreateDevice(
     status = WdfTimerCreate(&timerConfig, &deviceAttributes, &deviceContext->HidTransportRecoveryTimer);
     if (!NT_SUCCESS(status)) {
         TraceEvents(TRACE_LEVEL_ERROR, TRACE_DEVICE, "WdfTimerCreate failed: %!STATUS!", status);
+        goto exit;
     }
 
     // Initialize HID recovery workitem
@@ -82,6 +84,7 @@ PtpFilterCreateDevice(
     status = WdfWorkItemCreate(&workitemConfig, &deviceAttributes, &deviceContext->HidTransportRecoveryWorkItem);
     if (!NT_SUCCESS(status)) {
         TraceEvents(TRACE_LEVEL_ERROR, TRACE_DEVICE, "HidTransportRecoveryWorkItem failed: %!STATUS!", status);
+        goto exit;
     }
 
     // Set initial state
@@ -94,6 +97,7 @@ PtpFilterCreateDevice(
     status = PtpFilterIoQueueInitialize(device);
     if (!NT_SUCCESS(status)) {
         TraceEvents(TRACE_LEVEL_ERROR, TRACE_DEVICE, "PtpFilterIoQueueInitialize failed: %!STATUS!", status);
+        goto exit;
     }
 
 exit:
@@ -402,7 +406,8 @@ PtpFilterConfigureMultiTouch(
     // God-damn-it we have to configure it by ourselves :)
     pConfigIrp->UserBuffer = pHidPacket;
 
-    WDF_REQUEST_SEND_OPTIONS_INIT(&configRequestSendOptions, WDF_REQUEST_SEND_OPTION_SYNCHRONOUS);
+    WDF_REQUEST_SEND_OPTIONS_INIT(&configRequestSendOptions, WDF_REQUEST_SEND_OPTION_SYNCHRONOUS | WDF_REQUEST_SEND_OPTION_TIMEOUT);
+    WdfRequestSendOptionsSetTimeout(&configRequestSendOptions, WDF_REL_TIMEOUT_IN_SEC(5));
     if (WdfRequestSend(configRequest, deviceContext->HidIoTarget, &configRequestSendOptions) == FALSE) {
         status = WdfRequestGetStatus(configRequest);
         TraceEvents(TRACE_LEVEL_ERROR, TRACE_DEVICE, "%!FUNC! WdfRequestSend failed, Status = %!STATUS!", status);
