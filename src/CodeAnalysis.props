@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  共有の Code Analysis（静的解析）設定。
+  各ドライバ プロジェクト (.vcxproj) から PropertySheets として Import される。
+
+    <RunCodeAnalysis> : ビルドのたびに Code Analysis (PREfast /analyze) を実行する。
+    <EnablePREfast>   : ネイティブ/ドライバ向け PREfast 解析を有効化する。
+
+  ConfigurationType=Driver の KMDF プロジェクト（UsbKm / SpiKm / HidFilter）を
+  WDK 入りの環境でビルドすると、WDK のビルド統合が「Microsoft Driver
+  Recommended Rules」とドライバ向け PREfast 解析を配線し、メモリ安全・リソース
+  リーク・IRQL 違反などのドライバ特有の欠陥を検出する。ユーザーモードの
+  DynamicLibrary（UsbUm）では既定のネイティブ推奨ルールで解析される。
+
+  CodeAnalysisRuleSet は意図的に未指定。ドライバのルールセットは WDK 統合が
+  自動選択するため、ここで特定のルールセット ファイルをパス指定すると、WDK の
+  バージョン差で「ファイルが見つからない」ビルドエラーになる恐れがある。
+  なお WDK 統合が無い環境ではネイティブ推奨ルール
+  （NativeRecommendedRules.ruleset）にフォールバックするが、これも C6xxx 系の
+  メモリ安全・リーク検査を含むため目的には適う。
+  ドライバ推奨ルールが適用されているかは、WDK 環境で次のコマンドで確認できる:
+    msbuild <driver>.vcxproj /p:Configuration=Release /p:Platform=x64 -getProperty:CodeAnalysisRuleSet
+
+  検出結果は「警告」として表示され、ビルドは継続する
+  （TreatWarningAsError は設定していないため、既存の警告でビルドは止まらない）。
+  警告をすべて潰したら、エラー扱い（TreatWarningAsError）への引き上げを検討する。
+
+  注意: Microsoft.Cpp.targets の Import より前に評価される必要があるため、
+  各 vcxproj の PropertySheets ImportGroup から読み込んでいる。
+-->
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <RunCodeAnalysis>true</RunCodeAnalysis>
+    <EnablePREfast>true</EnablePREfast>
+  </PropertyGroup>
+</Project>
