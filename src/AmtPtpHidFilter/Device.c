@@ -407,7 +407,7 @@ PtpFilterConfigureMultiTouch(
     pConfigIrp->UserBuffer = pHidPacket;
 
     WDF_REQUEST_SEND_OPTIONS_INIT(&configRequestSendOptions, WDF_REQUEST_SEND_OPTION_SYNCHRONOUS | WDF_REQUEST_SEND_OPTION_TIMEOUT);
-    WdfRequestSendOptionsSetTimeout(&configRequestSendOptions, WDF_REL_TIMEOUT_IN_SEC(5));
+    WDF_REQUEST_SEND_OPTIONS_SET_TIMEOUT(&configRequestSendOptions, WDF_REL_TIMEOUT_IN_SEC(5));
     if (WdfRequestSend(configRequest, deviceContext->HidIoTarget, &configRequestSendOptions) == FALSE) {
         status = WdfRequestGetStatus(configRequest);
         TraceEvents(TRACE_LEVEL_ERROR, TRACE_DEVICE, "%!FUNC! WdfRequestSend failed, Status = %!STATUS!", status);

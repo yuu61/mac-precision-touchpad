@@ -519,7 +519,7 @@ AmtPtpSetWellspringMode(
 	// misbehaving (or malicious) device that NAKs/stalls indefinitely cannot hang
 	// the power-transition path. Mirrors PtpFilterConfigureMultiTouch in the HID filter.
 	WDF_REQUEST_SEND_OPTIONS_INIT(&sendOptions, WDF_REQUEST_SEND_OPTION_TIMEOUT);
-	WdfRequestSendOptionsSetTimeout(&sendOptions, WDF_REL_TIMEOUT_IN_SEC(5));
+	WDF_REQUEST_SEND_OPTIONS_SET_TIMEOUT(&sendOptions, WDF_REL_TIMEOUT_IN_SEC(5));
 
 	TraceEvents(
 		TRACE_LEVEL_INFORMATION,

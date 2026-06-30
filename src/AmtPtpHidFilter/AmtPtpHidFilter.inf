@@ -29,9 +29,9 @@ AmtPtpHidFilter.sys  = 1,,
 ;*****************************************
 
 [Manufacturer]
-%ManufacturerName%=Standard,NT$ARCH$.10.0
+%ManufacturerName%=Standard,NT$ARCH$.10.0...16299
 
-[Standard.NT$ARCH$.10.0]
+[Standard.NT$ARCH$.10.0...16299]
 ; Driver migration: if this user installed the old Precision Touch Driver, install the generic HID USB driver for them
 %AmtPtpHidRootDevice.DeviceDesc%=StandardUsbHid_Device, USB\Vid_05ac&Pid_0265&MI_01
 
@@ -86,6 +86,13 @@ HKR,,"LowerFilters",0x00010008,"AmtPtpHidFilter"
 KmdfService = AmtPtpHidFilter, AmtPtpHidFilter_wdfsect
 
 ; -------------- Microsoft HID KMDF driver install sections
+; NOTE (InfVerif 2084): mshidkmdf is an inbox Windows binary
+; (%10%\System32\Drivers\mshidkmdf.sys) that this package cannot redistribute, so it is
+; referenced via AddService/ServiceBinary instead of CopyFiles. InfVerif reports 2084
+; ("Service binary should reference a CopyFiles destination file") for it; this is the
+; documented "Inbox Binary" condition. Do NOT add a CopyFiles/SourceDisksFiles entry to
+; "fix" it -- that would be an invalid attempt to redistribute an OS component. The Win11-era
+; Include/Needs alternative (MsHidKmdf.inf) is avoided to keep the Windows 10 minimum.
 [mshidkmdf_Service_Inst]
 ServiceType    = 1                  ; SERVICE_KERNEL_DRIVER
 StartType      = 3                  ; SERVICE_DEMAND_START

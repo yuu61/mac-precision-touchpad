@@ -270,7 +270,7 @@ AmtPtpGetWellspringMode(
 
 	// 5-second timeout so a stalling/malicious device cannot hang the power path.
 	WDF_REQUEST_SEND_OPTIONS_INIT(&sendOptions, WDF_REQUEST_SEND_OPTION_TIMEOUT);
-	WdfRequestSendOptionsSetTimeout(&sendOptions, WDF_REL_TIMEOUT_IN_SEC(5));
+	WDF_REQUEST_SEND_OPTIONS_SET_TIMEOUT(&sendOptions, WDF_REL_TIMEOUT_IN_SEC(5));
 
 	status = STATUS_SUCCESS;
 
@@ -381,7 +381,7 @@ AmtPtpSetWellspringMode(
 
 	// 5-second timeout so a stalling/malicious device cannot hang the power path.
 	WDF_REQUEST_SEND_OPTIONS_INIT(&sendOptions, WDF_REQUEST_SEND_OPTION_TIMEOUT);
-	WdfRequestSendOptionsSetTimeout(&sendOptions, WDF_REL_TIMEOUT_IN_SEC(5));
+	WDF_REQUEST_SEND_OPTIONS_SET_TIMEOUT(&sendOptions, WDF_REL_TIMEOUT_IN_SEC(5));
 
 	TraceEvents(
 		TRACE_LEVEL_INFORMATION,

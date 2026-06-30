@@ -25,9 +25,9 @@ AmtPtpDeviceSpiKm.sys = 1,,
 AmtPtpHidFilter.sys   = 1,,
 
 [Manufacturer]
-%ManufacturerName%=Standard,NT$ARCH$
+%ManufacturerName%=Standard,NT$ARCH$.10.0...17134
 
-[Standard.NT$ARCH$]
+[Standard.NT$ARCH$.10.0...17134]
 ; Apple T2
 %AmtPtpDeviceUsbKm.DeviceDesc%=AmtPtpDeviceUsbKm_Device, USB\Vid_05ac&Pid_0273&MI_02
 %AmtPtpDeviceUsbKm.DeviceDesc%=AmtPtpDeviceUsbKm_Device, USB\Vid_05ac&Pid_0274&MI_02
@@ -111,6 +111,16 @@ AmtPtpDeviceUsbUm.dll
 AmtPtpDeviceSpiKm.sys
 
 ; Microsoft HID KMDF driver install sections
+; NOTE (InfVerif 2084): mshidkmdf, mshidumdf and WUDFRd below are inbox Windows binaries
+; (%10%\System32\Drivers\mshidkmdf.sys, %12%\mshidumdf.sys, %12%\WUDFRd.sys) that this
+; package cannot redistribute, so they are referenced via AddService/ServiceBinary instead
+; of CopyFiles. InfVerif reports 2084 ("Service binary should reference a CopyFiles
+; destination file") for them; this is the documented "Inbox Binary" condition and is a
+; non-blocking warning under Universal validation (/u). Do NOT add CopyFiles/SourceDisksFiles
+; entries for inbox binaries to "fix" 2084 -- that would be an invalid attempt to redistribute
+; OS components. The Win11-era Include/Needs alternative (MsHidKmdf.inf / WudfRd.inf) is not
+; used here because WudfRd.inf ships only on Windows 11, which would break this package's
+; Windows 10 minimum.
 [mshidkmdf_Service_Inst]
 ServiceType    = 1                  ; SERVICE_KERNEL_DRIVER
 StartType      = 3                  ; SERVICE_DEMAND_START
