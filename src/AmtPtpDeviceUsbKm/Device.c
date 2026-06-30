@@ -511,8 +511,15 @@ AmtPtpSetWellspringMode(
 	WDF_USB_CONTROL_SETUP_PACKET	setupPacket;
 	WDF_MEMORY_DESCRIPTOR			memoryDescriptor;
 	ULONG							cbTransferred;
+	WDF_REQUEST_SEND_OPTIONS		sendOptions;
 	WDFMEMORY						bufHandle = NULL;
 	unsigned char* buffer;
+
+	// Guard the synchronous control transfers below with a 5-second timeout so a
+	// misbehaving (or malicious) device that NAKs/stalls indefinitely cannot hang
+	// the power-transition path. Mirrors PtpFilterConfigureMultiTouch in the HID filter.
+	WDF_REQUEST_SEND_OPTIONS_INIT(&sendOptions, WDF_REQUEST_SEND_OPTION_TIMEOUT);
+	WdfRequestSendOptionsSetTimeout(&sendOptions, WDF_REL_TIMEOUT_IN_SEC(5));
 
 	TraceEvents(
 		TRACE_LEVEL_INFORMATION,
@@ -548,7 +555,7 @@ AmtPtpSetWellspringMode(
 	WDF_MEMORY_DESCRIPTOR_INIT_BUFFER(
 		&memoryDescriptor,
 		buffer,
-		sizeof(DeviceContext->DeviceInfo->um_size)
+		DeviceContext->DeviceInfo->um_size
 	);
 
 	WDF_USB_CONTROL_SETUP_PACKET_INIT(
@@ -566,7 +573,7 @@ AmtPtpSetWellspringMode(
 	status = WdfUsbTargetDeviceSendControlTransferSynchronously(
 		DeviceContext->UsbDevice,
 		WDF_NO_HANDLE,
-		NULL,
+		&sendOptions,
 		&setupPacket,
 		&memoryDescriptor,
 		&cbTransferred
@@ -607,7 +614,7 @@ AmtPtpSetWellspringMode(
 	status = WdfUsbTargetDeviceSendControlTransferSynchronously(
 		DeviceContext->UsbDevice,
 		WDF_NO_HANDLE,
-		NULL,
+		&sendOptions,
 		&setupPacket,
 		&memoryDescriptor,
 		&cbTransferred
@@ -633,7 +640,9 @@ cleanup:
 		"%!FUNC! Exit"
 	);
 
-	WdfObjectDelete(bufHandle);
-	bufHandle = NULL;
+	if (bufHandle != NULL) {
+		WdfObjectDelete(bufHandle);
+		bufHandle = NULL;
+	}
 	return status;
 }

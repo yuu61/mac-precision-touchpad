@@ -226,6 +226,7 @@ PtpFilterInputRequestCompletionCallback(
 	if (!NT_SUCCESS(status))
 	{
 		TraceEvents(TRACE_LEVEL_ERROR, TRACE_INPUT, "%!FUNC! WdfRequestRetrieveOutputBuffer failed with %!STATUS!", status);
+		WdfRequestComplete(ptpRequest, status);
 		WdfDeviceSetFailed(deviceContext->Device, WdfDeviceFailedAttemptRestart);
 		goto cleanup;
 	}
@@ -234,6 +235,7 @@ PtpFilterInputRequestCompletionCallback(
 	if (!NT_SUCCESS(status))
 	{
 		TraceEvents(TRACE_LEVEL_ERROR, TRACE_INPUT, "%!FUNC! WdfMemoryCopyFromBuffer failed with %!STATUS!", status);
+		WdfRequestComplete(ptpRequest, status);
 		WdfDeviceSetFailed(deviceContext->Device, WdfDeviceFailedAttemptRestart);
 		goto cleanup;
 	}

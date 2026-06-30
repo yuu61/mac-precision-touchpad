@@ -481,6 +481,7 @@ AmtPtpGetStrings(
 				TRACE_DRIVER, 
 				"%!FUNC! gets invalid string type"
 			);
+			status = STATUS_INVALID_PARAMETER;
 			return status;
 	}
 
