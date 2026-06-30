@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  共有のコンパイラ警告設定。
+  各コンパイル対象プロジェクト (.vcxproj) から PropertySheets として Import される。
+
+    <WarningLevel>Level4</WarningLevel>      : /W4。MSVC の実用上の最厳レベル。
+    <TreatWarningAsError>true</...>          : /WX。警告をすべてビルドエラー扱いにする。
+
+  なぜ /Wall ではなく /W4 か:
+    /Wall (EnableAllWarnings) は WDK のカーネルヘッダ自体が清浄でないため、
+    システムヘッダ由来の C4820（パディング）/ C4668 / C5045（Spectre）等の
+    ノイズで本物の警告が埋もれ、ドライバ開発では実用にならない。Microsoft の
+    ドライバ サンプルも /W4 を上限としており、/W4 が「実用上の最大限の厳格さ」
+    にあたる。
+
+  ItemDefinitionGroup（ClCompile のアイテム メタデータ）で指定している点に注意。
+  WarningLevel / TreatWarningAsError は ClCompile のメタデータであり、素の
+  PropertyGroup に書いても cl.exe へは渡らない。CodeAnalysis.props が
+  PropertyGroup を使うのは RunCodeAnalysis / EnablePREfast が真の MSBuild
+  プロパティだからで、こことは性質が異なる。
+
+  WPP 由来の C4214（int 以外のビットフィールド）は各 vcxproj 側で
+  DisableSpecificWarnings=4214 として個別に抑制済みのため、ここでは触れない。
+
+  Utility プロジェクト（UniversalPkg）はコンパイルを行わないため Import しない。
+
+  注意: Microsoft.Cpp.targets の Import より前に評価される必要があるため、
+  各 vcxproj の PropertySheets ImportGroup から読み込んでいる。
+-->
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <WarningLevel>Level4</WarningLevel>
+      <TreatWarningAsError>true</TreatWarningAsError>
+    </ClCompile>
+  </ItemDefinitionGroup>
+</Project>
