@@ -1,6 +1,10 @@
 #include "Driver.h"
 #include "hid.tmh"
 
+#ifdef ALLOC_PRAGMA
+#pragma alloc_text (PAGE, AmtPtpReportFeatures)
+#endif
+
 
 HID_REPORT_DESCRIPTOR AmtPtpT2ReportDescriptor[] = {
 	AAPL_WELLSPRING_T2_PTP_TLC,

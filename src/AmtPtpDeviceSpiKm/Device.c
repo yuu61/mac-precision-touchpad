@@ -19,6 +19,7 @@ Environment:
 
 #ifdef ALLOC_PRAGMA
 #pragma alloc_text (PAGE, AmtPtpDeviceSpiKmCreateDevice)
+#pragma alloc_text (PAGE, AmtPtpEvtDevicePrepareHardware)
 #endif
 
 NTSTATUS

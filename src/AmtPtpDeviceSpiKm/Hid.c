@@ -3,6 +3,14 @@
 #include "Driver.h"
 #include "Hid.tmh"
 
+#ifdef ALLOC_PRAGMA
+#pragma alloc_text (PAGE, AmtPtpGetHidDescriptor)
+#pragma alloc_text (PAGE, AmtPtpGetReportDescriptor)
+#pragma alloc_text (PAGE, AmtPtpGetStrings)
+#pragma alloc_text (PAGE, AmtPtpReportFeatures)
+#pragma alloc_text (PAGE, AmtPtpSetFeatures)
+#endif
+
 
 HID_REPORT_DESCRIPTOR AmtPtpSpiFamily1ReportDescriptor[] = {
 	AAPL_SPI_SERIES1_PTP_TLC,

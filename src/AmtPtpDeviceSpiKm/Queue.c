@@ -87,6 +87,7 @@ exit:
     return Status;
 }
 
+_IRQL_requires_(PASSIVE_LEVEL)
 PCHAR
 DbgIoControlGetString(
 	_In_ ULONG IoControlCode

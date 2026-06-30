@@ -45,6 +45,7 @@ WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(DEVICE_CONTEXT, DeviceGetContext)
 //
 // Function to initialize the device's queues and callbacks
 //
+_IRQL_requires_(PASSIVE_LEVEL)
 NTSTATUS
 AmtPtpCreateDevice(
 	_In_    WDFDRIVER       Driver,

@@ -5,6 +5,12 @@
 
 #ifdef ALLOC_PRAGMA
 #pragma alloc_text (PAGE, PtpFilterCreateDevice)
+#pragma alloc_text (PAGE, PtpFilterPrepareHardware)
+#pragma alloc_text (PAGE, PtpFilterDeviceD0Entry)
+#pragma alloc_text (PAGE, PtpFilterDeviceD0Exit)
+#pragma alloc_text (PAGE, PtpFilterSelfManagedIoInit)
+#pragma alloc_text (PAGE, PtpFilterSelfManagedIoRestart)
+#pragma alloc_text (PAGE, PtpFilterConfigureMultiTouch)
 #endif
 
 NTSTATUS

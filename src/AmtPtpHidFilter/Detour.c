@@ -3,6 +3,10 @@
 #include <Driver.h>
 #include "Detour.tmh"
 
+#ifdef ALLOC_PRAGMA
+#pragma alloc_text (PAGE, PtpFilterDetourWindowsHIDStack)
+#endif
+
 NTSTATUS
 PtpFilterDetourWindowsHIDStack(
     _In_ WDFDEVICE Device
@@ -41,6 +45,9 @@ PtpFilterDetourWindowsHIDStack(
     }
 
     // Verify if the driver extension is what we expected.
+    // C28175: reading _DRIVER_OBJECT::DriverExtension is intentional here -- this routine
+    // deliberately reaches into the HID transport driver object to install the detour.
+#pragma warning(suppress: 28175)
     if (hidTransportWdmDriverObject->DriverExtension == NULL) {
         TraceEvents(TRACE_LEVEL_ERROR, TRACE_DEVICE, "%!FUNC! DriverExtension of HID transport Driver Object is null, can't continue");
         status = STATUS_UNSUCCESSFUL;
@@ -48,6 +55,8 @@ PtpFilterDetourWindowsHIDStack(
     }
 
     // Just two more check...
+    // C28175: deliberate access to _DRIVER_OBJECT::DriverExtension (see note above).
+#pragma warning(suppress: 28175)
     hidTransportIoClientExtension = ((PDRIVER_EXTENSION_EXT)hidTransportWdmDriverObject->DriverExtension)->IoClientExtension;
     if (hidTransportIoClientExtension == NULL) {
         TraceEvents(TRACE_LEVEL_ERROR, TRACE_DEVICE, "%!FUNC! IO Extension is NULL, can't continue");
@@ -69,6 +78,9 @@ PtpFilterDetourWindowsHIDStack(
     // IRP_MJ_CREATE, IRP_MJ_CLOSE
     // For us, overriding IRP_MJ_DEVICE_CONTROL and IRP_MJ_INTERNAL_DEVICE_CONTROL might be sufficient.
     // Details: https://ligstd.visualstudio.com/Apple%20PTP%20Trackpad/_wiki/wikis/Apple-PTP-Trackpad.wiki/47/Hijack-HIDCLASS
+    // C28175: writing _DRIVER_OBJECT::MajorFunction is the whole point of the detour --
+    // we redirect the HID transport's internal IOCTL dispatch to HIDCLASS's handler.
+#pragma warning(suppress: 28175)
     hidTransportWdmDriverObject->MajorFunction[IRP_MJ_INTERNAL_DEVICE_CONTROL] = hidTransportClassExtension->MajorFunction[IRP_MJ_INTERNAL_DEVICE_CONTROL];
     TraceEvents(TRACE_LEVEL_INFORMATION, TRACE_DEVICE, "%!FUNC! IRP_MJ_INTERNAL_DEVICE_CONTROL patched");
 
