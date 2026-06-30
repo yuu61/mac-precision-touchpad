@@ -25,9 +25,11 @@ AmtPtpDeviceSpiKm.sys = 1,,
 AmtPtpHidFilter.sys   = 1,,
 
 [Manufacturer]
-%ManufacturerName%=Standard,NT$ARCH$.10.0...17134
+; Win11 (build 22000) minimum: the inbox-binary Include/Needs references below
+; (MsHidKmdf.inf, MsHidUmdf.inf, WUDFRD.inf) were introduced in build 22000.
+%ManufacturerName%=Standard,NT$ARCH$.10.0...22000
 
-[Standard.NT$ARCH$.10.0...17134]
+[Standard.NT$ARCH$.10.0...22000]
 ; Apple T2
 %AmtPtpDeviceUsbKm.DeviceDesc%=AmtPtpDeviceUsbKm_Device, USB\Vid_05ac&Pid_0273&MI_02
 %AmtPtpDeviceUsbKm.DeviceDesc%=AmtPtpDeviceUsbKm_Device, USB\Vid_05ac&Pid_0274&MI_02
@@ -110,32 +112,28 @@ AmtPtpDeviceUsbUm.dll
 [SpiKmDrivers_Dir]
 AmtPtpDeviceSpiKm.sys
 
-; Microsoft HID KMDF driver install sections
-; NOTE (InfVerif 2084): mshidkmdf, mshidumdf and WUDFRd below are inbox Windows binaries
-; (%10%\System32\Drivers\mshidkmdf.sys, %12%\mshidumdf.sys, %12%\WUDFRd.sys) that this
-; package cannot redistribute, so they are referenced via AddService/ServiceBinary instead
-; of CopyFiles. InfVerif reports 2084 ("Service binary should reference a CopyFiles
-; destination file") for them; this is the documented "Inbox Binary" condition and is a
-; non-blocking warning under Universal validation (/u). Do NOT add CopyFiles/SourceDisksFiles
-; entries for inbox binaries to "fix" 2084 -- that would be an invalid attempt to redistribute
-; OS components. The Win11-era Include/Needs alternative (MsHidKmdf.inf / WudfRd.inf) is not
-; used here because WudfRd.inf ships only on Windows 11, which would break this package's
-; Windows 10 minimum.
-[mshidkmdf_Service_Inst]
-ServiceType    = 1                  ; SERVICE_KERNEL_DRIVER
-StartType      = 3                  ; SERVICE_DEMAND_START
-ErrorControl   = 1                  ; SERVICE_ERROR_NORMAL
-ServiceBinary  = %10%\System32\Drivers\mshidkmdf.sys
+; Microsoft HID KMDF pass-through (mshidkmdf.sys) is the inbox function driver that sits
+; above each KMDF lower-filter stack below. It is an inbox Windows binary that cannot be
+; redistributed, so instead of a direct AddService/ServiceBinary it is referenced through
+; the Include/Needs MsHidKmdf.inf pattern (the MsHidKmdf.NT.* sections were introduced in
+; build 22000). This is the documented Win11+ resolution for InfVerif 2084 -- see
+; https://learn.microsoft.com/windows-hardware/drivers/devtest/inf-verif-error-2084
+; and the canonical KMDF HID minidriver sample (hid/vhidmini2 vhidmini.inx).
 
 ; PTP filter
 [AmtPtpHidFilter_MiniPortDevice.NT]
 CopyFiles=FilterDriver_Payload
+Include=MsHidKmdf.inf
+Needs=MsHidKmdf.NT
 
 [AmtPtpHidFilter_MiniPortDevice.NT.Services]
+Include=MsHidKmdf.inf
+Needs=MsHidKmdf.NT.Services
 AddService = AmtPtpHidFilter,, AmtPtpHidFilter_Service_Inst
-AddService = mshidkmdf, %SPSVCINST_ASSOCSERVICE%, mshidkmdf_Service_Inst
 
 [AmtPtpHidFilter_MiniPortDevice.NT.HW]
+Include=MsHidKmdf.inf
+Needs=MsHidKmdf.NT.HW
 AddReg=AmtPtpHidFilter_AddReg
 
 [AmtPtpHidFilter_AddReg]
@@ -158,12 +156,17 @@ KmdfLibraryVersion = $KMDFVERSION$
 ; USB KM
 [AmtPtpDeviceUsbKm_Device.NT]
 CopyFiles=PtpKmDrivers_Dir
+Include=MsHidKmdf.inf
+Needs=MsHidKmdf.NT
 
 [AmtPtpDeviceUsbKm_Device.NT.Services]
+Include=MsHidKmdf.inf
+Needs=MsHidKmdf.NT.Services
 AddService = AmtPtpDeviceUsbKm,, AmtPtpDeviceUsbKm_Service_Inst
-AddService = mshidkmdf, %SPSVCINST_ASSOCSERVICE%, mshidkmdf_Service_Inst
 
 [AmtPtpDeviceUsbKm_Device.NT.HW]
+Include=MsHidKmdf.inf
+Needs=MsHidKmdf.NT.HW
 AddReg=AmtPtpDeviceUsbKm_AddReg
 
 [AmtPtpDeviceUsbKm_AddReg]
@@ -185,15 +188,33 @@ KmdfService = AmtPtpDeviceUsbKm, AmtPtpDeviceUsbKm_wdfsect
 KmdfLibraryVersion = $KMDFVERSION$
 
 ; USB UM
+; UMDF HID minidriver stack: mshidumdf.sys is the inbox function (pass-through) driver and
+; WUDFRd.sys is the reflector installed as a lower filter. Both are inbox binaries referenced
+; via Include/Needs (MsHidUmdf.inf / WUDFRD.inf, build 22000+) -- the documented Win11+
+; resolution for InfVerif 2084, matching the canonical hid/vhidmini2 VhidminiUm.inx sample.
 [AmtPtpDeviceUsbUm_Install.NT]
 CopyFiles=PtpUmDrivers_Dir
+Include=MsHidUmdf.inf
+Needs=MsHidUmdf.NT
+Include=WUDFRD.inf
+Needs=WUDFRD_LowerFilter.NT
 
 [AmtPtpDeviceUsbUm_Install.NT.hw]
 AddReg=AmtPtpDeviceUsbUm_AddReg
+Include=MsHidUmdf.inf
+Needs=MsHidUmdf.NT.hw
+Include=WUDFRD.inf
+Needs=WUDFRD_LowerFilter.NT.hw
 
 [AmtPtpDeviceUsbUm_Install.NT.Services]
-AddService=mshidumdf, 0x000001fa, MSHIDUMDF_ServiceInstall ; flag 0x2 sets this as the service for the device
-AddService=WUDFRd,0x000001f8,WUDFRD_ServiceInstall         ; this service is installed because its a filter.
+Include=MsHidUmdf.inf
+Needs=MsHidUmdf.NT.Services
+Include=WUDFRD.inf
+Needs=WUDFRD_LowerFilter.NT.Services
+
+[AmtPtpDeviceUsbUm_Install.NT.Filters]
+Include=WUDFRD.inf
+Needs=WUDFRD_LowerFilter.NT.Filters
 
 [AmtPtpDeviceUsbUm_Install.NT.Wdf]
 UmdfDispatcher=NativeUSB
@@ -211,30 +232,24 @@ ServiceBinary=%13%\AmtPtpDeviceUsbUm.dll
 
 [AmtPtpDeviceUsbUm_AddReg]
 HKR,,FriendlyName,,%AmtPtpDeviceUsbUm.DeviceDesc%
-HKR,,"LowerFilters",0x00010008,"WUDFRd" ; FLG_ADDREG_TYPE_MULTI_SZ | FLG_ADDREG_APPEND
-
-[mshidumdf_ServiceInstall]
-ServiceType    = 1                  ; SERVICE_KERNEL_DRIVER
-StartType      = 3                  ; SERVICE_DEMAND_START
-ErrorControl   = 1                  ; SERVICE_ERROR_NORMAL
-ServiceBinary  = %12%\mshidumdf.sys
-
-[WUDFRD_ServiceInstall]
-DisplayName = %WudfRdDisplayName%
-ServiceType = 1
-StartType = 3
-ErrorControl = 1
-ServiceBinary = %12%\WUDFRd.sys
+; WUDFRd is installed and positioned as a lower filter by the WUDFRD_LowerFilter.NT.Filters
+; Needs reference above, so no manual "LowerFilters" AddReg or service-install section is
+; required (this mirrors the VhidminiUm.inx sample).
 
 ; SPI KM
 [AmtPtpDeviceSpiKm_Device.NT]
 CopyFiles=SpiKmDrivers_Dir
+Include=MsHidKmdf.inf
+Needs=MsHidKmdf.NT
 
 [AmtPtpDeviceSpiKm_Device.NT.Services]
+Include=MsHidKmdf.inf
+Needs=MsHidKmdf.NT.Services
 AddService = AmtPtpDeviceSpiKm,, AmtPtpDeviceSpiKm_Service_Inst
-AddService = mshidkmdf, %SPSVCINST_ASSOCSERVICE%, mshidkmdf_Service_Inst ;flag 0x2 sets this as the service for the device
 
 [AmtPtpDeviceSpiKm_Device.NT.HW]
+Include=MsHidKmdf.inf
+Needs=MsHidKmdf.NT.HW
 AddReg = AmtPtpDeviceSpiKm_Device.NT.AddReg
 
 [AmtPtpDeviceSpiKm_Device.NT.AddReg]

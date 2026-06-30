@@ -29,9 +29,11 @@ AmtPtpHidFilter.sys  = 1,,
 ;*****************************************
 
 [Manufacturer]
-%ManufacturerName%=Standard,NT$ARCH$.10.0...16299
+; Win11 (build 22000) minimum: the MsHidKmdf.inf Include/Needs reference below was
+; introduced in build 22000.
+%ManufacturerName%=Standard,NT$ARCH$.10.0...22000
 
-[Standard.NT$ARCH$.10.0...16299]
+[Standard.NT$ARCH$.10.0...22000]
 ; Driver migration: if this user installed the old Precision Touch Driver, install the generic HID USB driver for them
 %AmtPtpHidRootDevice.DeviceDesc%=StandardUsbHid_Device, USB\Vid_05ac&Pid_0265&MI_01
 
@@ -63,6 +65,8 @@ Needs = HID_Inst.NT.Services
 
 [AmtPtpHidFilter_MiniPortDevice.NT]
 CopyFiles=FilterDriver_Payload
+Include=MsHidKmdf.inf
+Needs=MsHidKmdf.NT
 
 [AmtPtpHidFilter_NullDevice]
 ; Nothing!
@@ -72,10 +76,13 @@ AddService = ,2    ; no value for the service name
 
 ;-------------- Service installation
 [AmtPtpHidFilter_MiniPortDevice.NT.Services]
+Include=MsHidKmdf.inf
+Needs=MsHidKmdf.NT.Services
 AddService = AmtPtpHidFilter,, AmtPtpHidFilter_Service_Inst
-AddService = mshidkmdf, %SPSVCINST_ASSOCSERVICE%, mshidkmdf_Service_Inst
 
 [AmtPtpHidFilter_MiniPortDevice.NT.HW]
+Include=MsHidKmdf.inf
+Needs=MsHidKmdf.NT.HW
 AddReg=AmtPtpHidFilter_AddReg
 
 [AmtPtpHidFilter_AddReg]
@@ -86,18 +93,11 @@ HKR,,"LowerFilters",0x00010008,"AmtPtpHidFilter"
 KmdfService = AmtPtpHidFilter, AmtPtpHidFilter_wdfsect
 
 ; -------------- Microsoft HID KMDF driver install sections
-; NOTE (InfVerif 2084): mshidkmdf is an inbox Windows binary
-; (%10%\System32\Drivers\mshidkmdf.sys) that this package cannot redistribute, so it is
-; referenced via AddService/ServiceBinary instead of CopyFiles. InfVerif reports 2084
-; ("Service binary should reference a CopyFiles destination file") for it; this is the
-; documented "Inbox Binary" condition. Do NOT add a CopyFiles/SourceDisksFiles entry to
-; "fix" it -- that would be an invalid attempt to redistribute an OS component. The Win11-era
-; Include/Needs alternative (MsHidKmdf.inf) is avoided to keep the Windows 10 minimum.
-[mshidkmdf_Service_Inst]
-ServiceType    = 1                  ; SERVICE_KERNEL_DRIVER
-StartType      = 3                  ; SERVICE_DEMAND_START
-ErrorControl   = 1                  ; SERVICE_ERROR_NORMAL
-ServiceBinary  = %10%\System32\Drivers\mshidkmdf.sys
+; mshidkmdf.sys is the inbox HID KMDF pass-through (function) driver above this lower-filter
+; miniport. It is an inbox binary that cannot be redistributed, so it is referenced via the
+; Include/Needs MsHidKmdf.inf pattern (MsHidKmdf.NT.* sections, introduced in build 22000)
+; instead of a direct AddService/ServiceBinary. This is the documented Win11+ resolution for
+; InfVerif 2084 -- see https://learn.microsoft.com/windows-hardware/drivers/devtest/inf-verif-error-2084
 
 ; -------------- AmtPtpHidFilter driver install sections
 [AmtPtpHidFilter_Service_Inst]
