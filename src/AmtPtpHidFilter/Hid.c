@@ -14,7 +14,7 @@ PtpFilterGetHidDescriptor(
 	PDEVICE_CONTEXT deviceContext;
 	size_t			hidDescriptorSize = 0;
 	WDFMEMORY       requestMemory;
-	PHID_DESCRIPTOR pSelectedHidDescriptor = NULL;
+	PHID_DESCRIPTOR selectedHidDescriptor = NULL;
 
 	TraceEvents(TRACE_LEVEL_INFORMATION, TRACE_HID, "%!FUNC! Entry");
 	deviceContext = PtpFilterGetContext(Device);
@@ -30,13 +30,13 @@ PtpFilterGetHidDescriptor(
 		{
 			TraceEvents(TRACE_LEVEL_INFORMATION, TRACE_HID, "%!FUNC! Request HID Report Descriptor for Apple Magic Trackpad 2 Family");
 			hidDescriptorSize = PtpDefaultHidDescriptorMagicTrackpad2.bLength;
-			pSelectedHidDescriptor = &PtpDefaultHidDescriptorMagicTrackpad2;
+			selectedHidDescriptor = &PtpDefaultHidDescriptorMagicTrackpad2;
 			break;
 		}
 	}
 
-	if (pSelectedHidDescriptor != NULL && hidDescriptorSize > 0) {
-		status = WdfMemoryCopyFromBuffer(requestMemory, 0, (PVOID)pSelectedHidDescriptor, hidDescriptorSize);
+	if (selectedHidDescriptor != NULL && hidDescriptorSize > 0) {
+		status = WdfMemoryCopyFromBuffer(requestMemory, 0, (PVOID)selectedHidDescriptor, hidDescriptorSize);
 		if (!NT_SUCCESS(status)) {
 			TraceEvents(TRACE_LEVEL_ERROR, TRACE_HID, "%!FUNC! WdfMemoryCopyFromBuffer failed with %!STATUS!", status);
 			goto exit;
@@ -305,8 +305,8 @@ PtpFilterSetHidFeatures(
 			goto exit;
 		}
 
-		PPTP_DEVICE_INPUT_MODE_REPORT DeviceInputMode = (PPTP_DEVICE_INPUT_MODE_REPORT)hidPacket->reportBuffer;
-		switch (DeviceInputMode->Mode)
+		PPTP_DEVICE_INPUT_MODE_REPORT deviceInputMode = (PPTP_DEVICE_INPUT_MODE_REPORT)hidPacket->reportBuffer;
+		switch (deviceInputMode->Mode)
 		{
 		case PTP_COLLECTION_MOUSE:
 		{
@@ -338,12 +338,12 @@ PtpFilterSetHidFeatures(
 			goto exit;
 		}
 
-		PPTP_DEVICE_SELECTIVE_REPORT_MODE_REPORT InputSelection = (PPTP_DEVICE_SELECTIVE_REPORT_MODE_REPORT)hidPacket->reportBuffer;
-		deviceContext->PtpReportButton = InputSelection->ButtonReport;
-		deviceContext->PtpReportTouch = InputSelection->SurfaceReport;
+		PPTP_DEVICE_SELECTIVE_REPORT_MODE_REPORT inputSelection = (PPTP_DEVICE_SELECTIVE_REPORT_MODE_REPORT)hidPacket->reportBuffer;
+		deviceContext->PtpReportButton = inputSelection->ButtonReport;
+		deviceContext->PtpReportTouch = inputSelection->SurfaceReport;
 
 		TraceEvents(TRACE_LEVEL_INFORMATION, TRACE_HID, "%!FUNC! Report REPORTID_FUNCSWITCH requested Button = %d, Surface = %d",
-			InputSelection->ButtonReport, InputSelection->SurfaceReport);
+			inputSelection->ButtonReport, inputSelection->SurfaceReport);
 		TraceEvents(TRACE_LEVEL_INFORMATION, TRACE_HID, "%!FUNC! Report REPORTID_FUNCSWITCH is fulfilled");
 		break;
 	}

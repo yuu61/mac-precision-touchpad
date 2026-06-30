@@ -90,7 +90,7 @@ PtpFilterDiagnosticsInputIssueRequest(
 
 	if (!requestStatus)
 	{
-		TraceEvents(TRACE_LEVEL_ERROR, TRACE_DEVICE, "%!FUNC! AmtPtpSpiInputRoutineWorker request failed to sent");
+		TraceEvents(TRACE_LEVEL_ERROR, TRACE_DEVICE, "%!FUNC! HID read transport request failed to send");
 		WdfTimerStart(deviceContext->HidTransportRecoveryTimer, WDF_REL_TIMEOUT_IN_US(50));
 
 		if (hidReadOutputMemory != NULL) {

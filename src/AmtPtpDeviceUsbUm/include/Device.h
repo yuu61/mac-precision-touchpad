@@ -1,5 +1,7 @@
 // Device.h: Device definitions
 
+#pragma once
+
 EXTERN_C_START
 
 // Device context struct
@@ -192,9 +194,13 @@ RequestGetHidXferPacketToWriteToDevice(
 	_Out_ HID_XFER_PACKET  *Packet
 );
 
-// Helper function for numberic operation
+// Helper function for numeric operation. Defined here (once) so every translation
+// unit that includes Device.h shares the same implementation.
 static inline INT AmtRawToInteger(
 	_In_ USHORT x
-);
+)
+{
+	return (signed short) x;
+}
 
 EXTERN_C_END

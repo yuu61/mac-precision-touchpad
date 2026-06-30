@@ -56,7 +56,7 @@ AmtPtpDeviceSpiKmQueueInitialize(
         &Queue
     );
 
-    if(!NT_SUCCESS(Status)) 
+    if (!NT_SUCCESS(Status))
 	{
         TraceEvents(TRACE_LEVEL_ERROR, TRACE_QUEUE, "WdfIoQueueCreate failed %!STATUS!", Status);
 		goto exit;

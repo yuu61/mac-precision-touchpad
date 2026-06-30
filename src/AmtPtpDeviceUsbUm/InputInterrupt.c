@@ -15,7 +15,7 @@ AmtPtpConfigContReaderForInterruptEndPoint(
 	size_t transferLength = 0;
 
 	TraceEvents(
-		TRACE_LEVEL_INFORMATION,
+		TRACE_LEVEL_VERBOSE,
 		TRACE_DRIVER,
 		"%!FUNC! Entry"
 	);
@@ -70,7 +70,7 @@ AmtPtpConfigContReaderForInterruptEndPoint(
 	}
 
 	TraceEvents(
-		TRACE_LEVEL_INFORMATION,
+		TRACE_LEVEL_VERBOSE,
 		TRACE_DRIVER,
 		"%!FUNC! Exit"
 	);
@@ -96,7 +96,7 @@ AmtPtpEvtUsbInterruptPipeReadComplete(
 	NTSTATUS        status;
 
 	TraceEvents(
-		TRACE_LEVEL_INFORMATION,
+		TRACE_LEVEL_VERBOSE,
 		TRACE_DRIVER,
 		"%!FUNC! Entry"
 	);
@@ -203,7 +203,7 @@ AmtPtpEvtUsbInterruptPipeReadComplete(
 	}
 
 	TraceEvents(
-		TRACE_LEVEL_INFORMATION,
+		TRACE_LEVEL_VERBOSE,
 		TRACE_DRIVER,
 		"%!FUNC! Exit"
 	);
@@ -243,12 +243,12 @@ AmtPtpServiceTouchInputInterrupt(
 	const struct TRACKPAD_FINGER *f;
 
 	TraceEvents(
-		TRACE_LEVEL_INFORMATION,
+		TRACE_LEVEL_VERBOSE,
 		TRACE_DRIVER,
 		"%!FUNC! Entry"
 	);
 
-	size_t raw_n, i = 0;
+	size_t rawCount, i = 0;
 	size_t headerSize = (unsigned int) DeviceContext->DeviceInfo->tp_header;
 	size_t fingerprintSize = (unsigned int) DeviceContext->DeviceInfo->tp_fsize;
 	USHORT x = 0, y = 0;
@@ -307,24 +307,24 @@ AmtPtpServiceTouchInputInterrupt(
 	// Type 2 touchpad surface report
 	if (DeviceContext->IsSurfaceReportOn) {
 		// Handles trackpad surface report here.
-		raw_n = (NumBytesTransferred - headerSize) / fingerprintSize;
-		if (raw_n >= PTP_MAX_CONTACT_POINTS) raw_n = PTP_MAX_CONTACT_POINTS;
-		PtpReport.ContactCount = (UCHAR) raw_n;
+		rawCount = (NumBytesTransferred - headerSize) / fingerprintSize;
+		if (rawCount >= PTP_MAX_CONTACT_POINTS) rawCount = PTP_MAX_CONTACT_POINTS;
+		PtpReport.ContactCount = (UCHAR) rawCount;
 
 #ifdef INPUT_CONTENT_TRACE
 		TraceEvents(
 			TRACE_LEVEL_INFORMATION,
 			TRACE_DRIVER,
 			"%!FUNC! with %llu points.",
-			raw_n
+			rawCount
 		);
 #endif
 
 		// Fingers
-		for (i = 0; i < raw_n; i++) {
+		for (i = 0; i < rawCount; i++) {
 
-			UCHAR *f_base = Buffer + headerSize + DeviceContext->DeviceInfo->tp_delta;
-			f = (const struct TRACKPAD_FINGER*) (f_base + i * fingerprintSize);
+			UCHAR *fingerBase = Buffer + headerSize + DeviceContext->DeviceInfo->tp_delta;
+			f = (const struct TRACKPAD_FINGER*) (fingerBase + i * fingerprintSize);
 
 			// Translate X and Y
 			x = (AmtRawToInteger(f->abs_x) - DeviceContext->DeviceInfo->x.min) > 0 ? 
@@ -337,7 +337,9 @@ AmtPtpServiceTouchInputInterrupt(
 			PtpReport.Contacts[i].ContactID = (UCHAR) i;
 			PtpReport.Contacts[i].X = x;
 			PtpReport.Contacts[i].Y = y;
-			PtpReport.Contacts[i].TipSwitch = (AmtRawToInteger(f->touch_major) << 1) >= 200;
+			// Match the kernel-mode driver's #269 "15/16inch dead zone" fix: a finger
+			// also counts as touching when its minor axis crosses the threshold.
+			PtpReport.Contacts[i].TipSwitch = (AmtRawToInteger(f->touch_major) << 1) >= 200 || (AmtRawToInteger(f->touch_minor) << 1) >= 150;
 			PtpReport.Contacts[i].Confidence = (AmtRawToInteger(f->touch_minor) << 1) > 0;
 
 #ifdef INPUT_CONTENT_TRACE
@@ -400,7 +402,7 @@ AmtPtpServiceTouchInputInterrupt(
 
 exit:
 	TraceEvents(
-		TRACE_LEVEL_INFORMATION,
+		TRACE_LEVEL_VERBOSE,
 		TRACE_DRIVER,
 		"%!FUNC! Exit"
 	);
@@ -428,8 +430,8 @@ AmtPtpServiceTouchInputInterruptType5(
 	const struct TRACKPAD_FINGER_TYPE5 *f_type5;
 
 	TraceEvents(
-		TRACE_LEVEL_INFORMATION, 
-		TRACE_DRIVER, 
+		TRACE_LEVEL_VERBOSE,
+		TRACE_DRIVER,
 		"%!FUNC! Entry"
 	);
 
@@ -439,7 +441,7 @@ AmtPtpServiceTouchInputInterruptType5(
 	PtpReport.IsButtonClicked = 0;
 
 	INT x, y = 0;
-	size_t raw_n, i = 0;
+	size_t rawCount, i = 0;
 	size_t headerSize = (unsigned int) DeviceContext->DeviceInfo->tp_header;
 	size_t fingerprintSize = (unsigned int) DeviceContext->DeviceInfo->tp_fsize;
 
@@ -488,24 +490,24 @@ AmtPtpServiceTouchInputInterruptType5(
 
 	// Type 5 finger report
 	if (DeviceContext->IsSurfaceReportOn) {
-		raw_n = (NumBytesTransferred - headerSize) / fingerprintSize;
-		if (raw_n >= PTP_MAX_CONTACT_POINTS) raw_n = PTP_MAX_CONTACT_POINTS;
-		PtpReport.ContactCount = (UCHAR)raw_n;
+		rawCount = (NumBytesTransferred - headerSize) / fingerprintSize;
+		if (rawCount >= PTP_MAX_CONTACT_POINTS) rawCount = PTP_MAX_CONTACT_POINTS;
+		PtpReport.ContactCount = (UCHAR)rawCount;
 
 #ifdef INPUT_CONTENT_TRACE
 		TraceEvents(
 			TRACE_LEVEL_INFORMATION,
 			TRACE_DRIVER,
 			"%!FUNC! with %llu points.",
-			raw_n
+			rawCount
 		);
 #endif
 
 		// Fingers to array
-		for (i = 0; i < raw_n; i++) {
+		for (i = 0; i < rawCount; i++) {
 
-			UCHAR *f_base = Buffer + headerSize + DeviceContext->DeviceInfo->tp_delta;
-			f = (const struct TRACKPAD_FINGER*) (f_base + i * fingerprintSize);
+			UCHAR *fingerBase = Buffer + headerSize + DeviceContext->DeviceInfo->tp_delta;
+			f = (const struct TRACKPAD_FINGER*) (fingerBase + i * fingerprintSize);
 			f_type5 = (const struct TRACKPAD_FINGER_TYPE5*) f;
 
 			USHORT tmp_x = (*((USHORT*)f_type5)) & 0x1fff;
@@ -586,18 +588,10 @@ AmtPtpServiceTouchInputInterruptType5(
 
 exit:
 	TraceEvents(
-		TRACE_LEVEL_INFORMATION, 
-		TRACE_DRIVER, 
+		TRACE_LEVEL_VERBOSE,
+		TRACE_DRIVER,
 		"%!FUNC! Exit"
 	);
 	return Status;
 
-}
-
-// Helper function for numberic operation
-static inline INT AmtRawToInteger(
-	_In_ USHORT x
-)
-{
-	return (signed short) x;
 }

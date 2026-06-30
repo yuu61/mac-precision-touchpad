@@ -1,6 +1,10 @@
 #include "driver.h"
 #include "Input.tmh"
 
+// Minimum SPI trackpad packet length: bytes of header/metadata that precede the
+// variable-length finger array. Used for the buffer-overrun guards below.
+#define SPI_TRACKPAD_PACKET_HEADER_SIZE 46
+
 VOID
 AmtPtpSpiInputRoutineWorker(
 	WDFDEVICE Device,
@@ -200,7 +204,7 @@ AmtPtpRequestCompletionRoutine(
 	pSpiTrackpadPacket = (PSPI_TRACKPAD_PACKET) WdfMemoryGetBuffer(Params->Parameters.Ioctl.Output.Buffer, NULL);
 
 	// Safe measurement for buffer overrun and device state reset
-	if (SpiRequestLength < 46) {
+	if (SpiRequestLength < SPI_TRACKPAD_PACKET_HEADER_SIZE) {
 		TraceEvents(
 			TRACE_LEVEL_ERROR,
 			TRACE_DRIVER,
@@ -217,8 +221,13 @@ AmtPtpRequestCompletionRoutine(
 		&CurrentCounter
 	);
 
-	CounterDelta = (CurrentCounter.QuadPart - pDeviceContext->LastReportTime.QuadPart) / 100;
-	pDeviceContext->LastReportTime.QuadPart = CurrentCounter.QuadPart;
+	// Atomically swap in the new timestamp and read back the previous value so that
+	// concurrent (parallel-dispatched) completions cannot race on LastReportTime.
+	LONGLONG PreviousReportTime = InterlockedExchange64(
+		(LONG64 volatile *)&pDeviceContext->LastReportTime.QuadPart,
+		CurrentCounter.QuadPart
+	);
+	CounterDelta = (CurrentCounter.QuadPart - PreviousReportTime) / 100;
 
 	// Write report
 	PtpReport.ReportID = REPORTID_MULTITOUCH;
@@ -228,14 +237,14 @@ AmtPtpRequestCompletionRoutine(
 
 	// Safe measurement for buffer overrun: ensure the packet is large enough to
 	// hold the fingers we are about to read (mirror the short-packet handling above).
-	if (SpiRequestLength < (LONG)(46 + AdjustedCount * sizeof(SPI_TRACKPAD_FINGER))) {
+	if (SpiRequestLength < (LONG)(SPI_TRACKPAD_PACKET_HEADER_SIZE + AdjustedCount * sizeof(SPI_TRACKPAD_FINGER))) {
 		TraceEvents(
 			TRACE_LEVEL_ERROR,
 			TRACE_DRIVER,
 			"%!FUNC! Input too small for %d finger(s): %d < %d. Attempt to re-enable the device.",
 			AdjustedCount,
 			SpiRequestLength,
-			(LONG)(46 + AdjustedCount * sizeof(SPI_TRACKPAD_FINGER))
+			(LONG)(SPI_TRACKPAD_PACKET_HEADER_SIZE + AdjustedCount * sizeof(SPI_TRACKPAD_FINGER))
 		);
 
 		Status = STATUS_DEVICE_DATA_ERROR;
@@ -262,7 +271,7 @@ AmtPtpRequestCompletionRoutine(
 			pSpiTrackpadPacket->Fingers[Count].TouchMinor < 2500) ? 1 : 0;
 
 		TraceEvents(
-			TRACE_LEVEL_INFORMATION,
+			TRACE_LEVEL_VERBOSE,
 			TRACE_HID_INPUT,
 			"%!FUNC! PTP Contact %d OX %d, OY %d, X %d, Y %d",
 			Count,
