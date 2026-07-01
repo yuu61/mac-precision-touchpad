@@ -56,12 +56,8 @@
     <Platform Condition="'$(Platform)' == ''">Win32</Platform>
     <RootNamespace>AmtPtpDeviceSpiKm</RootNamespace>
   </PropertyGroup>
-  <!-- They told me this: https://help.github.com/en/articles/software-in-virtual-environments-for-github-actions#windows-server-2019 -->
   <PropertyGroup>
     <WindowsTargetPlatformVersion>$(LatestTargetPlatformVersion)</WindowsTargetPlatformVersion>
-  </PropertyGroup>
-  <PropertyGroup Condition="'$(BuildEnvironment)'=='Github'">
-    <WindowsTargetPlatformVersion>10.0.19041.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
@@ -71,7 +67,6 @@
     <ConfigurationType>Driver</ConfigurationType>
     <DriverType>KMDF</DriverType>
     <DriverTargetPlatform>Universal</DriverTargetPlatform>
-    <_NT_TARGET_VERSION>0xA000004</_NT_TARGET_VERSION>
     <KMDF_VERSION_MAJOR>1</KMDF_VERSION_MAJOR>
     <KMDF_VERSION_MINOR>23</KMDF_VERSION_MINOR>
   </PropertyGroup>
@@ -82,7 +77,6 @@
     <ConfigurationType>Driver</ConfigurationType>
     <DriverType>KMDF</DriverType>
     <DriverTargetPlatform>Universal</DriverTargetPlatform>
-    <_NT_TARGET_VERSION>0xA000004</_NT_TARGET_VERSION>
     <KMDF_VERSION_MAJOR>1</KMDF_VERSION_MAJOR>
     <KMDF_VERSION_MINOR>23</KMDF_VERSION_MINOR>
   </PropertyGroup>
@@ -93,7 +87,6 @@
     <ConfigurationType>Driver</ConfigurationType>
     <DriverType>KMDF</DriverType>
     <DriverTargetPlatform>Universal</DriverTargetPlatform>
-    <_NT_TARGET_VERSION>0xA000004</_NT_TARGET_VERSION>
     <KMDF_VERSION_MAJOR>1</KMDF_VERSION_MAJOR>
     <KMDF_VERSION_MINOR>23</KMDF_VERSION_MINOR>
   </PropertyGroup>
@@ -104,7 +97,6 @@
     <ConfigurationType>Driver</ConfigurationType>
     <DriverType>KMDF</DriverType>
     <DriverTargetPlatform>Universal</DriverTargetPlatform>
-    <_NT_TARGET_VERSION>0xA000004</_NT_TARGET_VERSION>
     <KMDF_VERSION_MAJOR>1</KMDF_VERSION_MAJOR>
     <KMDF_VERSION_MINOR>23</KMDF_VERSION_MINOR>
   </PropertyGroup>
@@ -115,7 +107,6 @@
     <ConfigurationType>Driver</ConfigurationType>
     <DriverType>KMDF</DriverType>
     <DriverTargetPlatform>Universal</DriverTargetPlatform>
-    <_NT_TARGET_VERSION>0xA000004</_NT_TARGET_VERSION>
     <KMDF_VERSION_MAJOR>1</KMDF_VERSION_MAJOR>
     <KMDF_VERSION_MINOR>23</KMDF_VERSION_MINOR>
   </PropertyGroup>
@@ -126,7 +117,6 @@
     <ConfigurationType>Driver</ConfigurationType>
     <DriverType>KMDF</DriverType>
     <DriverTargetPlatform>Universal</DriverTargetPlatform>
-    <_NT_TARGET_VERSION>0xA000004</_NT_TARGET_VERSION>
     <KMDF_VERSION_MAJOR>1</KMDF_VERSION_MAJOR>
     <KMDF_VERSION_MINOR>23</KMDF_VERSION_MINOR>
   </PropertyGroup>
