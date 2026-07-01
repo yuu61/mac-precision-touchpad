@@ -2,7 +2,7 @@
 
 [![Build Status](https://ligstd.visualstudio.com/_apis/public/build/definitions/7694e0d0-94e3-4fd2-b39a-ecd261e1ba2e/22/badge)](https://ligstd.visualstudio.com/Apple%20PTP%20Trackpad/_build?definitionId=22)
 
-This project implements Windows Precision Touchpad Protocol for Apple MacBook family/Magic Trackpad 2 on Windows 10. Both USB (traditional and T2), SPI and Bluetooth trackpads are supported.
+This project implements Windows Precision Touchpad Protocol for Apple MacBook family/Magic Trackpad 2 on Windows 11. Both USB (traditional and T2), SPI and Bluetooth trackpads are supported.
 
 ## Donation?
 
@@ -50,8 +50,8 @@ choco install mac-precision-touchpad
 
 ## For developers
 
-- SPI/T2 version is kernel-mode driver, using KMDF Framework v1.23. Bluetooth driver uses KMDF Framework 1.15. Windows 10 Driver Development Kit Version 2004 or higher is required for development and testing.
-- USB version is a user-mode driver, using UMDF Framework v2.15. Windows 10 Driver Development Kit Version 2004 or higher is required for development and testing.
+- SPI/T2 version is kernel-mode driver, using KMDF Framework v1.23. Bluetooth driver uses KMDF Framework 1.15. Windows 11 WDK (build 22000 or later; latest GA is 10.0.26100, version 24H2) is required for development and testing.
+- USB version is a user-mode driver, using UMDF Framework v2.15. Windows 11 WDK (build 22000 or later; latest GA is 10.0.26100, version 24H2) is required for development and testing.
 - `ReleaseSigned` configuration is reserved for production build only, and it will be rendered as unsigned if you attempt to build using that configuration. (Historically it's signed, but due to EV certificate's requirements, the process has changed.)
 
 ## Device support
