@@ -62,8 +62,11 @@ PtpFilterCreateDevice(
         goto exit;
     }
 
-    // Initialize read buffer
-    status = WdfLookasideListCreate(WDF_NO_OBJECT_ATTRIBUTES, REPORT_BUFFER_SIZE,
+    // Initialize read buffer. Parent the lookaside list to the device so it is
+    // destroyed on device removal rather than only at driver unload.
+    WDF_OBJECT_ATTRIBUTES_INIT(&deviceAttributes);
+    deviceAttributes.ParentObject = device;
+    status = WdfLookasideListCreate(&deviceAttributes, REPORT_BUFFER_SIZE,
         NonPagedPoolNx, WDF_NO_OBJECT_ATTRIBUTES, PTP_LIST_POOL_TAG,
         &deviceContext->HidReadBufferLookaside
     );

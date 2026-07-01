@@ -79,10 +79,13 @@ AmtPtpDeviceSpiKmCreateDevice(
 		pDeviceContext->SpiDevice = Device;
 
 		//
-		// Create a list of buffers
+		// Create a list of buffers. Parent the lookaside list to the device so it is
+		// destroyed on device removal rather than only at driver unload.
 		//
+		WDF_OBJECT_ATTRIBUTES_INIT(&DeviceAttributes);
+		DeviceAttributes.ParentObject = Device;
 		Status = WdfLookasideListCreate(
-			WDF_NO_OBJECT_ATTRIBUTES,
+			&DeviceAttributes,
 			REPORT_BUFFER_SIZE,
 			NonPagedPoolNx,
 			WDF_NO_OBJECT_ATTRIBUTES,
