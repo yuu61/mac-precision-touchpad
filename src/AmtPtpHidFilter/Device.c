@@ -52,6 +52,7 @@ PtpFilterCreateDevice(
     deviceContext->WdmDeviceObject = WdfDeviceWdmGetDeviceObject(device);
     if (deviceContext->WdmDeviceObject == NULL) {
         TraceEvents(TRACE_LEVEL_ERROR, TRACE_DEVICE, "WdfDeviceWdmGetDeviceObject failed");
+        status = STATUS_UNSUCCESSFUL;
         goto exit;
     }
 
