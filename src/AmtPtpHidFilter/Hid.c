@@ -242,7 +242,13 @@ PtpFilterGetHidFeatures(
 		}
 
 		PPTP_DEVICE_HQA_CERTIFICATION_REPORT certReport = (PPTP_DEVICE_HQA_CERTIFICATION_REPORT)hidContent->reportBuffer;
-		*certReport->CertificationBlob = DEFAULT_PTP_HQA_BLOB;
+		// CertificationBlob is UCHAR[256] and DEFAULT_PTP_HQA_BLOB is a 256-byte initializer
+		// list. "*certReport->CertificationBlob = DEFAULT_PTP_HQA_BLOB" binds '=' tighter than
+		// the ',' operators, so it would write only the first byte and leave the other 255
+		// bytes of the returned report uninitialized. Copy the whole blob instead.
+		static const UCHAR DefaultPtpHqaBlob[] = { DEFAULT_PTP_HQA_BLOB };
+		C_ASSERT(sizeof(DefaultPtpHqaBlob) == sizeof(certReport->CertificationBlob));
+		RtlCopyMemory(certReport->CertificationBlob, DefaultPtpHqaBlob, sizeof(DefaultPtpHqaBlob));
 		certReport->ReportID = REPORTID_PTPHQA;
 
 		TraceEvents(TRACE_LEVEL_INFORMATION, TRACE_HID, "%!FUNC! Report REPORTID_PTPHQA is fulfilled");
