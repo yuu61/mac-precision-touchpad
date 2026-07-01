@@ -128,14 +128,18 @@ PtpFilterDiagnosticsRequestCompletionRoutine(
 		TraceEvents(TRACE_LEVEL_INFORMATION, TRACE_INPUT, "Request received with size %d", responseLength);
 	}
 
-	// Cleanup
+	// Cleanup. Capture the handles we still need before deleting the request,
+	// because the request's context is co-allocated with the request object and
+	// must not be dereferenced after WdfObjectDelete(Request).
+	WDFMEMORY requestMemory = requestContext->RequestMemory;
+	WDFDEVICE device = deviceContext->Device;
 	WdfObjectDelete(Request);
-	if (requestContext->RequestMemory != NULL) {
-		WdfObjectDelete(requestContext->RequestMemory);
+	if (requestMemory != NULL) {
+		WdfObjectDelete(requestMemory);
 	}
 
 	// Issue next request
-	PtpFilterDiagnosticsInputIssueRequest(requestContext->DeviceContext->Device);
+	PtpFilterDiagnosticsInputIssueRequest(device);
 }
 
 PCHAR

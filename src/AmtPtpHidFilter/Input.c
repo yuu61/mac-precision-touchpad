@@ -3,6 +3,10 @@
 #include <Driver.h>
 #include "Input.tmh"
 
+// Touch-major/minor raw threshold (after a <<1 scale) below which a contact is
+// considered a confident fingertip rather than a palm/large contact.
+#define PTP_FILTER_CONTACT_AXIS_MAX 345
+
 VOID
 PtpFilterInputProcessRequest(
 	_In_ WDFDEVICE Device,
@@ -131,6 +135,7 @@ PtpFilterInputRequestCompletionCallback(
 	WDFREQUEST ptpRequest;
 	PTP_REPORT ptpOutputReport;
 	WDFMEMORY  ptpRequestMemory;
+	WDFMEMORY  requestMemory;
 
 	size_t responseLength;
 	PUCHAR responseBuffer;
@@ -179,15 +184,25 @@ PtpFilterInputRequestCompletionCallback(
 		goto cleanup;
 	}
 
+	// Zero the report first so unused contact slots cannot leak uninitialized
+	// kernel stack to the user-readable HID report (mirror the USB paths).
+	RtlZeroMemory(&ptpOutputReport, sizeof(PTP_REPORT));
+
 	// Report header
 	ptpOutputReport.ReportID = REPORTID_MULTITOUCH;
 	ptpOutputReport.IsButtonClicked = 0;
 
-	// Capture current timestamp and get input delta in 100us unit
+	// Capture current timestamp and get input delta in 100us unit.
+	// Atomically swap in the new timestamp and read back the previous value so that
+	// concurrent completion routines cannot race on LastReportTime (completion
+	// routines run outside the device's synchronization scope). Mirrors the SPI driver.
 	KeQueryPerformanceCounter(&currentTSC);
-	tSCDelta = (currentTSC.QuadPart - deviceContext->LastReportTime.QuadPart) / 100;
+	LONGLONG previousReportTime = InterlockedExchange64(
+		(LONG64 volatile *)&deviceContext->LastReportTime.QuadPart,
+		currentTSC.QuadPart
+	);
+	tSCDelta = (currentTSC.QuadPart - previousReportTime) / 100;
 	ptpOutputReport.ScanTime = (tSCDelta >= 0xFF) ? 0xFF : (USHORT)tSCDelta;
-	deviceContext->LastReportTime.QuadPart = currentTSC.QuadPart;
 
 	// Report required content
 	// Touch
@@ -214,7 +229,7 @@ PtpFilterInputRequestCompletionCallback(
 		// The Microsoft spec says reject any input larger than 25mm. This is not ideal
 		// for Magic Trackpad 2 - so we raised the threshold a bit higher.
 		// Or maybe I used the wrong unit? IDK
-		ptpOutputReport.Contacts[i].Confidence = ((signed short) (f_type5->TouchMajor) << 1) < 345 && ((signed short) (f_type5->TouchMinor) << 1) < 345;
+		ptpOutputReport.Contacts[i].Confidence = ((signed short) (f_type5->TouchMajor) << 1) < PTP_FILTER_CONTACT_AXIS_MAX && ((signed short) (f_type5->TouchMinor) << 1) < PTP_FILTER_CONTACT_AXIS_MAX;
 	}
 
 	// Button
@@ -244,10 +259,13 @@ PtpFilterInputRequestCompletionCallback(
 	WdfRequestComplete(ptpRequest, status);
 
 cleanup:
-	// Cleanup
+	// Cleanup. Capture the memory handle before deleting the request, because the
+	// request's context (requestContext) is co-allocated with the request object
+	// and must not be dereferenced after WdfObjectDelete(Request).
+	requestMemory = requestContext->RequestMemory;
 	WdfObjectDelete(Request);
-	if (requestContext->RequestMemory != NULL) {
-		WdfObjectDelete(requestContext->RequestMemory);
+	if (requestMemory != NULL) {
+		WdfObjectDelete(requestMemory);
 	}
 
 	// We don't issue new request here (unless it's a spurious request - which is handled earlier) to

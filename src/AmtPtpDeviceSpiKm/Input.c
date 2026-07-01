@@ -5,6 +5,10 @@
 // variable-length finger array. Used for the buffer-overrun guards below.
 #define SPI_TRACKPAD_PACKET_HEADER_SIZE 46
 
+// Touch-contact confidence threshold: a contact whose raw major/minor axis is
+// below this value is treated as a confident fingertip rather than a palm.
+#define SPI_CONTACT_CONFIDENCE_MAX_AXIS 2500
+
 VOID
 AmtPtpSpiInputRoutineWorker(
 	WDFDEVICE Device,
@@ -176,6 +180,7 @@ AmtPtpRequestCompletionRoutine(
 	WDFREQUEST PtpRequest;
 	PTP_REPORT PtpReport;
 	WDFMEMORY PtpRequestMemory;
+	WDFMEMORY RequestMemory;
 
 	LARGE_INTEGER CurrentCounter;
 	LONGLONG CounterDelta;
@@ -229,6 +234,10 @@ AmtPtpRequestCompletionRoutine(
 	);
 	CounterDelta = (CurrentCounter.QuadPart - PreviousReportTime) / 100;
 
+	// Zero the report first so unused contact slots cannot leak uninitialized
+	// kernel stack to the user-readable HID report (mirror the USB paths).
+	RtlZeroMemory(&PtpReport, sizeof(PTP_REPORT));
+
 	// Write report
 	PtpReport.ReportID = REPORTID_MULTITOUCH;
 
@@ -267,8 +276,8 @@ AmtPtpRequestCompletionRoutine(
 		// $S = \pi * r^2$
 		// $r^2 = (Touch_{Major} * Touch_{Minor}) / 4$
 		// Using i386 in 2018 is evil
-		PtpReport.Contacts[Count].Confidence = (pSpiTrackpadPacket->Fingers[Count].TouchMajor < 2500 &&
-			pSpiTrackpadPacket->Fingers[Count].TouchMinor < 2500) ? 1 : 0;
+		PtpReport.Contacts[Count].Confidence = (pSpiTrackpadPacket->Fingers[Count].TouchMajor < SPI_CONTACT_CONFIDENCE_MAX_AXIS &&
+			pSpiTrackpadPacket->Fingers[Count].TouchMinor < SPI_CONTACT_CONFIDENCE_MAX_AXIS) ? 1 : 0;
 
 		TraceEvents(
 			TRACE_LEVEL_VERBOSE,
@@ -340,10 +349,13 @@ exit:
 	);
 
 cleanup:
-	// Clean up
+	// Clean up. Capture the memory handle before deleting the request, because the
+	// request's context (RequestContext) is co-allocated with the request object
+	// and must not be dereferenced after WdfObjectDelete(SpiRequest).
 	pSpiTrackpadPacket = NULL;
+	RequestMemory = RequestContext->RequestMemory;
 	WdfObjectDelete(SpiRequest);
-	if (RequestContext->RequestMemory != NULL) {
-		WdfObjectDelete(RequestContext->RequestMemory);
+	if (RequestMemory != NULL) {
+		WdfObjectDelete(RequestMemory);
 	}
 }

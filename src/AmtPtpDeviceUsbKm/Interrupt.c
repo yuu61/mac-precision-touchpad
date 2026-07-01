@@ -3,12 +3,17 @@
 #include "Driver.h"
 #include "Interrupt.tmh"
 
-// Helper function for numberic operation
+// Raw touch-major/minor thresholds (after a <<1 scale) at/above which a contact
+// is treated as a real fingertip (TipSwitch). Named to document the tuning point.
+#define USB_TIPSWITCH_MAJOR_THRESHOLD 200
+#define USB_TIPSWITCH_MINOR_THRESHOLD 150
+
+// Helper function for numeric operation
 static inline INT AmtRawToInteger(
-	_In_ USHORT x
+	_In_ USHORT RawValue
 )
 {
-	return (signed short)x;
+	return (signed short)RawValue;
 }
 
 _IRQL_requires_(PASSIVE_LEVEL)
@@ -210,7 +215,7 @@ AmtPtpEvtUsbInterruptPipeReadComplete(
 			PtpReport.Contacts[i].ContactID = (UCHAR) i;
 			PtpReport.Contacts[i].X = x;
 			PtpReport.Contacts[i].Y = y;
-			PtpReport.Contacts[i].TipSwitch = (AmtRawToInteger(f->touch_major) << 1) >= 200 || (AmtRawToInteger(f->touch_minor) << 1) >= 150;
+			PtpReport.Contacts[i].TipSwitch = (AmtRawToInteger(f->touch_major) << 1) >= USB_TIPSWITCH_MAJOR_THRESHOLD || (AmtRawToInteger(f->touch_minor) << 1) >= USB_TIPSWITCH_MINOR_THRESHOLD;
 			PtpReport.Contacts[i].Confidence = (AmtRawToInteger(f->touch_minor) << 1) > 0;
 		}
 	}
