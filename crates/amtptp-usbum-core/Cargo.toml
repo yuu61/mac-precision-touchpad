@@ -9,3 +9,6 @@ license = "GPL-2.0-only"
 
 [dependencies]
 ptp-hid = { path = "../ptp-hid" }
+
+[lints]
+workspace = true

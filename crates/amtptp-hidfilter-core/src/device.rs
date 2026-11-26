@@ -22,6 +22,7 @@ pub const DEVICE_VERSION: u16 = 0x0100;
 
 /// True for the two vendor IDs the driver accepts (0x05AC, 0x004C). Used by the mode switch
 /// (Device.c:308) and by the lower-read completion (Input.c:156).
+#[must_use]
 pub const fn is_apple_vendor(vendor_id: u16) -> bool {
     vendor_id == HID_VID_APPLE_USB || vendor_id == HID_VID_APPLE_BT
 }
@@ -78,6 +79,9 @@ impl Transport {
     /// The support checks of `PtpFilterConfigureMultiTouch` (Device.c:308-317), in C order: an unknown
     /// vendor ID, then a product ID other than 0x0265, give `STATUS_NOT_SUPPORTED`. Neither failure
     /// writes any device-context field.
+    ///
+    /// # Errors
+    /// Returns `STATUS_NOT_SUPPORTED` if the vendor or product ID has no supported configuration.
     pub const fn from_ids(vendor_id: u16, product_id: u16) -> Result<Self, NtStatus> {
         if !is_apple_vendor(vendor_id) {
             return Err(STATUS_NOT_SUPPORTED);
@@ -93,6 +97,7 @@ impl Transport {
     }
 
     /// The parsing parameters for this transport. They differ only in the header size.
+    #[must_use]
     pub const fn params(self) -> TransportParams {
         TransportParams {
             header_size: match self {
@@ -107,7 +112,8 @@ impl Transport {
         }
     }
 
-    /// The vendor SET_FEATURE that switches the trackpad into raw multitouch mode (Device.c:335-361).
+    /// The vendor `SET_FEATURE` that switches the trackpad into raw multitouch mode (Device.c:335-361).
+    #[must_use]
     pub const fn mode_switch(self) -> ModeSwitch {
         match self {
             Self::Usb => ModeSwitch {
@@ -133,7 +139,7 @@ pub struct ModeSwitch {
 }
 
 /// `sizeof(HID_XFER_PACKET)` on LP64: 16 bytes (`reportBuffer`@0, `reportBufferLen`@8, `reportId`@12,
-/// 3 padding bytes). GET/SET_FEATURE reject a transfer buffer shorter than this.
+/// 3 padding bytes). `GET/SET_FEATURE` reject a transfer buffer shorter than this.
 pub const HID_XFER_PACKET_LEN: usize = 16;
 /// `offsetof(HID_XFER_PACKET, reportBuffer)`.
 pub const XFER_REPORT_BUFFER_OFFSET: usize = 0;
@@ -160,8 +166,9 @@ pub struct XferBuffer {
 impl XferBuffer {
     /// Builds the zeroed packet with `reportBufferLen`, `reportId` and the report bytes. The
     /// `reportBuffer` pointer (bytes 0..8) is left 0 until [`Self::link_report_buffer`].
+    #[must_use]
     pub fn new(mode_switch: ModeSwitch) -> Self {
-        let mut bytes = [0u8; HID_XFER_PACKET_SIZE];
+        let mut bytes = [0_u8; HID_XFER_PACKET_SIZE];
         // A payload is at most 4 bytes, so the length always fits in the ULONG.
         let len = u32::try_from(mode_switch.payload.len()).unwrap_or(0);
         copy_into(
@@ -187,12 +194,13 @@ impl XferBuffer {
     }
 
     /// The 32 bytes as they are sent.
+    #[must_use]
     pub const fn as_bytes(&self) -> &[u8; HID_XFER_PACKET_SIZE] {
         &self.bytes
     }
 
     /// Pointer to the start of the buffer, for `WdfMemoryCreatePreallocated` and `Irp->UserBuffer`.
-    pub fn as_mut_ptr(&mut self) -> *mut u8 {
+    pub const fn as_mut_ptr(&mut self) -> *mut u8 {
         self.bytes.as_mut_ptr()
     }
 }
@@ -234,11 +242,11 @@ pub struct DeviceSnapshot {
     pub detour_completed: bool,
     /// `HidIoTarget != NULL` (the glue owns the handle itself).
     pub io_target_set: bool,
-    /// `PtpInputOn` (written by SET_FEATURE 0x04, never read: HF-B20).
+    /// `PtpInputOn` (written by `SET_FEATURE` 0x04, never read: HF-B20).
     pub ptp_input_on: bool,
-    /// `PtpReportTouch` (written by SET_FEATURE 0x06, never read: HF-B20).
+    /// `PtpReportTouch` (written by `SET_FEATURE` 0x06, never read: HF-B20).
     pub ptp_report_touch: bool,
-    /// `PtpReportButton` (written by SET_FEATURE 0x06, never read: HF-B20).
+    /// `PtpReportButton` (written by `SET_FEATURE` 0x06, never read: HF-B20).
     pub ptp_report_button: bool,
     /// `LastReportTime.QuadPart`: 0 or the QPC frequency (HF-B6).
     pub last_report_time: i64,
@@ -313,6 +321,7 @@ impl Default for DeviceState {
 impl DeviceState {
     /// All fields zero / FALSE: the state after `PtpFilterCreateDevice` (KMDF zero-fills the context
     /// and the C code then sets the IDs to 0 and `DeviceConfigured = FALSE` again).
+    #[must_use]
     pub const fn new() -> Self {
         Self::with(&DeviceSnapshot {
             vendor_id: 0,
@@ -343,6 +352,7 @@ impl DeviceState {
     }
 
     /// A state holding exactly the values of `s` (tests, and glue diagnostics).
+    #[must_use]
     pub const fn with(s: &DeviceSnapshot) -> Self {
         Self {
             vendor_id: AtomicU16::new(s.vendor_id),
@@ -396,8 +406,8 @@ impl DeviceState {
         self.product_id.load(Ordering::Relaxed)
     }
 
-    /// Stores `VendorID`, `ProductID` and `VersionNumber` (SelfManagedIoInit after the attributes query,
-    /// Device.c:221-223; PrepareHardware with zeros).
+    /// Stores `VendorID`, `ProductID` and `VersionNumber` (`SelfManagedIoInit` after the attributes query,
+    /// Device.c:221-223; `PrepareHardware` with zeros).
     pub fn set_ids(&self, vendor_id: u16, product_id: u16, version_number: u16) {
         self.vendor_id.store(vendor_id, Ordering::Relaxed);
         self.product_id.store(product_id, Ordering::Relaxed);
@@ -416,7 +426,7 @@ impl DeviceState {
         }
     }
 
-    /// Writes the transport parameters (ConfigureMultiTouch, before the send).
+    /// Writes the transport parameters (`ConfigureMultiTouch`, before the send).
     pub fn apply_transport_params(&self, p: &TransportParams) {
         self.input_finger_size
             .store(p.finger_size, Ordering::Relaxed);
@@ -476,7 +486,7 @@ impl DeviceState {
         self.last_report_time.swap(value, Ordering::Relaxed)
     }
 
-    /// Applies a decoded SET_FEATURE ([`crate::decode_set_feature`]).
+    /// Applies a decoded `SET_FEATURE` ([`crate::decode_set_feature`]).
     pub fn apply_feature_change(&self, change: FeatureChange) {
         match change {
             FeatureChange::None => {}

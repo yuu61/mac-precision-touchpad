@@ -11,9 +11,9 @@
 //! Which driver uses which code:
 //! - All four dispatch on the 9 `hidport.h` minidriver codes and on `IOCTL_UMDF_HID_GET_INPUT_REPORT`,
 //!   `IOCTL_UMDF_HID_SET_OUTPUT_REPORT`, mostly to complete them with `STATUS_NOT_SUPPORTED`.
-//! - UsbUm (UMDF) handles `IOCTL_UMDF_HID_GET_FEATURE` / `IOCTL_UMDF_HID_SET_FEATURE`.
+//! - `UsbUm` (UMDF) handles `IOCTL_UMDF_HID_GET_FEATURE` / `IOCTL_UMDF_HID_SET_FEATURE`.
 //! - The three KMDF drivers handle `IOCTL_HID_GET_FEATURE` / `IOCTL_HID_SET_FEATURE`.
-//! - SpiKm and HidFilter also *send* `IOCTL_HID_GET_DEVICE_ATTRIBUTES`, `IOCTL_HID_SET_FEATURE` and
+//! - `SpiKm` and `HidFilter` also *send* `IOCTL_HID_GET_DEVICE_ATTRIBUTES`, `IOCTL_HID_SET_FEATURE` and
 //!   `IOCTL_HID_READ_REPORT` down their stacks.
 
 /// `FILE_DEVICE_KEYBOARD`: the device type of every HID IOCTL.
@@ -31,26 +31,31 @@ pub const FILE_ANY_ACCESS: u32 = 0;
 
 /// `CTL_CODE(DeviceType, Function, Method, Access)` from `devioctl.h`:
 /// `(DeviceType << 16) | (Access << 14) | (Function << 2) | Method`.
+#[must_use]
 pub const fn ctl_code(device_type: u32, function: u32, method: u32, access: u32) -> u32 {
     (device_type << 16) | (access << 14) | (function << 2) | method
 }
 
 /// `HID_CTL_CODE(id)` (hidport.h): `CTL_CODE(FILE_DEVICE_KEYBOARD, id, METHOD_NEITHER, FILE_ANY_ACCESS)`.
+#[must_use]
 pub const fn hid_ctl_code(id: u32) -> u32 {
     ctl_code(FILE_DEVICE_KEYBOARD, id, METHOD_NEITHER, FILE_ANY_ACCESS)
 }
 
 /// `HID_BUFFER_CTL_CODE(id)` (hidclass.h): `CTL_CODE(FILE_DEVICE_KEYBOARD, id, METHOD_BUFFERED, FILE_ANY_ACCESS)`.
+#[must_use]
 pub const fn hid_buffer_ctl_code(id: u32) -> u32 {
     ctl_code(FILE_DEVICE_KEYBOARD, id, METHOD_BUFFERED, FILE_ANY_ACCESS)
 }
 
 /// `HID_IN_CTL_CODE(id)` (hidclass.h): `CTL_CODE(FILE_DEVICE_KEYBOARD, id, METHOD_IN_DIRECT, FILE_ANY_ACCESS)`.
+#[must_use]
 pub const fn hid_in_ctl_code(id: u32) -> u32 {
     ctl_code(FILE_DEVICE_KEYBOARD, id, METHOD_IN_DIRECT, FILE_ANY_ACCESS)
 }
 
 /// `HID_OUT_CTL_CODE(id)` (hidclass.h): `CTL_CODE(FILE_DEVICE_KEYBOARD, id, METHOD_OUT_DIRECT, FILE_ANY_ACCESS)`.
+#[must_use]
 pub const fn hid_out_ctl_code(id: u32) -> u32 {
     ctl_code(FILE_DEVICE_KEYBOARD, id, METHOD_OUT_DIRECT, FILE_ANY_ACCESS)
 }
@@ -65,7 +70,7 @@ pub const IOCTL_HID_GET_REPORT_DESCRIPTOR: u32 = hid_ctl_code(1);
 pub const IOCTL_HID_READ_REPORT: u32 = hid_ctl_code(2);
 /// `IOCTL_HID_WRITE_REPORT` (0x000B000F): write an output report. No driver supports it.
 pub const IOCTL_HID_WRITE_REPORT: u32 = hid_ctl_code(3);
-/// `IOCTL_HID_GET_STRING` (0x000B0013): get a device string (UsbUm queries USB; SpiKm/HidFilter forward).
+/// `IOCTL_HID_GET_STRING` (0x000B0013): get a device string (`UsbUm` queries USB; SpiKm/HidFilter forward).
 pub const IOCTL_HID_GET_STRING: u32 = hid_ctl_code(4);
 /// `IOCTL_HID_ACTIVATE_DEVICE` (0x000B001F). No driver supports it.
 pub const IOCTL_HID_ACTIVATE_DEVICE: u32 = hid_ctl_code(7);
@@ -79,9 +84,9 @@ pub const IOCTL_HID_SEND_IDLE_NOTIFICATION_REQUEST: u32 = hid_ctl_code(10);
 
 // ---- km/hidport.h: UMDF HID minidriver IOCTLs (METHOD_NEITHER) ----
 
-/// `IOCTL_UMDF_HID_SET_FEATURE` (0x000B0053): UMDF set-feature (UsbUm).
+/// `IOCTL_UMDF_HID_SET_FEATURE` (0x000B0053): UMDF set-feature (`UsbUm`).
 pub const IOCTL_UMDF_HID_SET_FEATURE: u32 = hid_ctl_code(20);
-/// `IOCTL_UMDF_HID_GET_FEATURE` (0x000B0057): UMDF get-feature (UsbUm).
+/// `IOCTL_UMDF_HID_GET_FEATURE` (0x000B0057): UMDF get-feature (`UsbUm`).
 pub const IOCTL_UMDF_HID_GET_FEATURE: u32 = hid_ctl_code(21);
 /// `IOCTL_UMDF_HID_SET_OUTPUT_REPORT` (0x000B005B). No driver supports it.
 pub const IOCTL_UMDF_HID_SET_OUTPUT_REPORT: u32 = hid_ctl_code(22);
@@ -94,7 +99,7 @@ pub const IOCTL_UMDF_GET_PHYSICAL_DESCRIPTOR: u32 = hid_ctl_code(24);
 // ---- shared/hidclass.h ----
 
 /// `IOCTL_HID_SET_FEATURE` (0x000B0191, `METHOD_IN_DIRECT`): KMDF set-feature with a `HID_XFER_PACKET` in
-/// `Irp->UserBuffer`. SpiKm and HidFilter also send it down to switch the device into multitouch mode.
+/// `Irp->UserBuffer`. `SpiKm` and `HidFilter` also send it down to switch the device into multitouch mode.
 pub const IOCTL_HID_SET_FEATURE: u32 = hid_in_ctl_code(100);
 /// `IOCTL_HID_SET_OUTPUT_REPORT` (0x000B0195, `METHOD_IN_DIRECT`). No driver handles it.
 pub const IOCTL_HID_SET_OUTPUT_REPORT: u32 = hid_in_ctl_code(101);
@@ -132,6 +137,7 @@ const _: () = assert!(IOCTL_HID_GET_INDEXED_STRING == 0x000B_01E2);
 ///
 /// This replaces the four C `DbgIoControlGetString` / `PtpFilterDiagnosticsIoControlGetString` tables,
 /// which are trace-only. It knows every code defined in this module, which is a superset of each C table.
+#[must_use]
 pub const fn ioctl_name(code: u32) -> &'static str {
     match code {
         IOCTL_HID_GET_DEVICE_DESCRIPTOR => "IOCTL_HID_GET_DEVICE_DESCRIPTOR",

@@ -1,5 +1,7 @@
-//! Replays `tests/fixtures/feature.txt` (140 records): GET_FEATURE / SET_FEATURE through the dispatcher,
+//! Replays `tests/fixtures/feature.txt` (140 records): `GET_FEATURE` / `SET_FEATURE` through the dispatcher,
 //! including the wire bytes and WDF call order of the wellspring mode switch.
+
+#![cfg(test)]
 
 mod common;
 
@@ -206,7 +208,7 @@ fn feature_fixture() {
     );
 }
 
-/// Re-serializes a record (for the ub_oob_read cross-check).
+/// Re-serializes a record (for the `ub_oob_read` cross-check).
 fn record_line(r: &Record) -> String {
     r.fields
         .iter()

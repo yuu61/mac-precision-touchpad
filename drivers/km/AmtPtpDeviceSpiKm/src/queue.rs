@@ -15,7 +15,7 @@ use wdk_sys::{
 use crate::device::device_context;
 use crate::{PROVIDER, hid, input, keyword};
 
-/// `AmtPtpDeviceSpiKmQueueInitialize` (Queue.c:24-88), PASSIVE_LEVEL (`PAGE`, as in C).
+/// `AmtPtpDeviceSpiKmQueueInitialize` (Queue.c:24-88), `PASSIVE_LEVEL` (`PAGE`, as in C).
 ///
 /// 1. The default queue: parallel dispatch, `PowerManaged = WdfUseDefault` (not power-managed, because the
 ///    device is a filter), only `EvtIoInternalDeviceControl`. Every other request type is forwarded down
@@ -28,7 +28,7 @@ use crate::{PROVIDER, hid, input, keyword};
 /// Neither queue has object attributes (the C `QUEUE_CONTEXT` was never used).
 ///
 /// # Safety
-/// `device` is the device being created in AddDevice; `hid_queue` points at its context's `hid_queue`
+/// `device` is the device being created in `AddDevice`; `hid_queue` points at its context's `hid_queue`
 /// field, which nothing else accesses yet.
 #[unsafe(link_section = "PAGE")]
 pub(crate) unsafe fn queue_initialize(device: WDFDEVICE, hid_queue: *mut WDFQUEUE) -> NTSTATUS {
@@ -86,7 +86,7 @@ fn trace_queue_create_failure(queue: &[u8], status: NTSTATUS) {
 }
 
 /// `AmtPtpDeviceSpiKmEvtIoInternalDeviceControl` (Queue.c:133-222): the HID-minidriver IOCTLs that
-/// mshidkmdf sends down. Runs at IRQL <= DISPATCH_LEVEL (no synchronization scope, dispatch execution
+/// mshidkmdf sends down. Runs at IRQL <= `DISPATCH_LEVEL` (no synchronization scope, dispatch execution
 /// level), so nothing reachable from here is pageable or blocks.
 ///
 /// Every request is completed exactly once here or handed on exactly once: `IOCTL_HID_READ_REPORT` to

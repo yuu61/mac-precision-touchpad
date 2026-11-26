@@ -12,7 +12,7 @@ use crate::status::{
 use crate::usb::set_wellspring_mode;
 
 /// `GUID_DEVINTERFACE_AmtPtpDevice` `{4a5064e5-7d39-41d1-a0e4-81097edce967}` (Trace.h:7-8), registered with
-/// `WdfDeviceCreateDeviceInterface(device, &guid, NULL)` in EvtDeviceAdd: `(Data1, Data2, Data3, Data4)`.
+/// `WdfDeviceCreateDeviceInterface(device, &guid, NULL)` in `EvtDeviceAdd`: `(Data1, Data2, Data3, Data4)`.
 pub const GUID_DEVINTERFACE_AMTPTP_DEVICE: (u32, u16, u16, [u8; 8]) = (
     0x4a50_64e5,
     0x7d39,
@@ -32,7 +32,7 @@ pub const CONTINUOUS_READER_NUM_PENDING_READS: u32 = 0;
 pub struct PrepareHardwareOutcome {
     /// The callback's return value.
     pub status: NtStatus,
-    /// TraceLogging event to write ([`TraceEvent::DeviceNotFound`] for an unknown PID).
+    /// `TraceLogging` event to write ([`TraceEvent::DeviceNotFound`] for an unknown PID).
     pub event: Option<TraceEvent>,
     /// Whether this call configured the continuous reader (false on a restart, UM-B16).
     pub configured_reader: bool,
@@ -58,7 +58,7 @@ impl PrepareHardwareOutcome {
 ///    order (each gets `SetNoMaximumPacketSizeCheck`) until the first **interrupt** pipe, whatever its
 ///    direction (UM-B21, P3 PRESERVED); no interrupt pipe (and no stale one) → `STATUS_INVALID_DEVICE_STATE`.
 /// 5. Configure the continuous reader with the row's transfer length — **only once** (UM-B16, P2 FIXED:
-///    the C code reconfigures it on every PrepareHardware, which WDF rejects with
+///    the C code reconfigures it on every `PrepareHardware`, which WDF rejects with
 ///    `STATUS_INVALID_DEVICE_STATE`, so the device never restarts after a PnP stop/start). Failure: that
 ///    status.
 /// 6. `IsButtonReportOn = IsSurfaceReportOn = TRUE`; return success.
@@ -90,15 +90,16 @@ pub fn prepare_hardware<T: UsbTargetSetup>(
         return PrepareHardwareOutcome::status(status);
     }
 
-    let mut configured_reader = false;
-    if !state.reader_configured() {
+    let configured_reader = if state.reader_configured() {
+        false
+    } else {
         let status = usb.configure_continuous_reader(cfg.tp_type.reader_transfer_length());
         if !nt_success(status) {
             return PrepareHardwareOutcome::status(status);
         }
         state.set_reader_configured(true);
-        configured_reader = true;
-    }
+        true
+    };
 
     state.set_button_report_on(true);
     state.set_surface_report_on(true);
@@ -141,7 +142,7 @@ pub struct D0EntryOutcome {
 ///
 /// 1. If `IsButtonReportOn || IsWellspringModeOn`: `SetWellspringMode(TRUE)`; a failure is ignored
 ///    (UM-B10, P3 PRESERVED gate).
-/// 2. `PerfCounter = QueryPerformanceCounter()` (the only place the ScanTime base is set, UM-B12).
+/// 2. `PerfCounter = QueryPerformanceCounter()` (the only place the `ScanTime` base is set, UM-B12).
 /// 3. `WdfIoTargetStart` on the interrupt pipe; its status is the return value.
 pub fn d0_entry<T, F>(
     state: &DeviceState,
@@ -152,15 +153,14 @@ where
     T: ControlPipe + InterruptPipeTarget,
     F: FnOnce() -> i64,
 {
-    let mode_switch_status = if state.is_button_report_on() || state.is_wellspring_mode_on() {
-        Some(match state.config() {
-            Some(cfg) => set_wellspring_mode(state, cfg, io, true),
-            // P2: C would dereference DeviceInfo == NULL; D0Entry never runs without a config row.
-            None => STATUS_INVALID_DEVICE_STATE,
-        })
-    } else {
-        None
-    };
+    let mode_switch_status =
+        (state.is_button_report_on() || state.is_wellspring_mode_on()).then(|| {
+            match state.config() {
+                Some(cfg) => set_wellspring_mode(state, cfg, io, true),
+                // P2: C would dereference DeviceInfo == NULL; D0Entry never runs without a config row.
+                None => STATUS_INVALID_DEVICE_STATE,
+            }
+        });
     state.set_perf_counter(query_performance_counter());
     let status = io.start();
     D0EntryOutcome {
@@ -171,7 +171,7 @@ where
 
 /// `AmtPtpEvtDeviceD0Exit`: `WdfIoTargetStop(.., WdfIoTargetCancelSentIo)`, then
 /// `SetWellspringMode(FALSE)`, whose status is **returned** (UM-B9, P3 PRESERVED: a failed transfer, e.g.
-/// on surprise removal, fails D0Exit).
+/// on surprise removal, fails `D0Exit`).
 pub fn d0_exit<T>(state: &DeviceState, io: &mut T) -> NtStatus
 where
     T: ControlPipe + InterruptPipeTarget,

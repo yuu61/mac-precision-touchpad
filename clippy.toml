@@ -1,0 +1,14 @@
+# Test fixtures use direct assertions and indexing so failures point to the
+# violated test contract. Driver and core production paths retain these lints.
+allow-expect-in-tests = true
+allow-indexing-slicing-in-tests = true
+allow-panic-in-tests = true
+allow-unwrap-in-tests = true
+
+absolute-paths-max-segments = 3
+# Replay tests keep assertions for each fixture sequence together.
+cognitive-complexity-threshold = 55
+too-many-lines-threshold = 180
+# Transitive WDK build dependencies require different major versions.
+allowed-duplicate-crates = ["syn"]
+doc-valid-idents = ["..", "AmtPtp", "HID", "IOCTL", "KMDF", "NTSTATUS", "PnP", "PTP", "SPI", "UMDF", "USB", "WDK", "WDF", "WinUSB"]

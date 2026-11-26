@@ -38,7 +38,7 @@ pub const HIDCLASS_CLIENT_ID: [u8; 9] = *b"HIDCLASS\0";
 /// `strncmp("HIDCLASS", client_id, 9) == 0`, reading the client ID one byte at a time through `read`
 /// and stopping at the first mismatch or after the matching NUL, so it touches exactly the bytes
 /// `strncmp` touches (`HIDCLASS\0junk` matches; `HIDCLASSX` does not).
-pub fn client_id_matches(mut read: impl FnMut(usize) -> u8) -> bool {
+pub fn client_id_matches<F: FnMut(usize) -> u8>(mut read: F) -> bool {
     for (index, expected) in HIDCLASS_CLIENT_ID.iter().enumerate() {
         let actual = read(index);
         if actual != *expected {

@@ -1,4 +1,4 @@
-//! Locating the WDK packaging tools (stampinf, Inf2Cat, InfVerif, signtool).
+//! Locating the WDK packaging tools (stampinf, `Inf2Cat`, `InfVerif`, signtool).
 //!
 //! Kits root: `WDK_ROOT` (xtask-only override), else `WDKContentRoot`, else
 //! `MicrosoftKitRoot\Windows Kits\<WDKKitVersion, default 10.0>`, else the
@@ -10,15 +10,15 @@
 //! After the `WDK_*` overrides this is the order wdk-build 0.6.0 uses
 //! (`detect_wdk_content_root`, utils.rs:32-100; `detect_windows_sdk_version`,
 //! utils.rs:334-336), so by default the packaging tools come from the kit the
-//! driver binaries are compiled against, and an eWDK / NuGet shell (which sets
-//! `WDKContentRoot` and `Version_Number` and has no KitsRoot10) works.
+//! driver binaries are compiled against, and an eWDK / `NuGet` shell (which sets
+//! `WDKContentRoot` and `Version_Number` and has no `KitsRoot10`) works.
 //! `WDK_ROOT` / `WDK_VERSION` steer only the packaging tools: wdk-build never
 //! reads them. They are not exported to the driver builds either: wdk-build
 //! emits no `rerun-if-env-changed`, so a change would leave stale wdk-sys
 //! bindings in the driver target dirs.
 //!
 //! Tool locations differ per tool (WDK 10.0.28000): stampinf in
-//! `bin\<ver>\{x64,x86,arm64}`, Inf2Cat only in `bin\<ver>\x86`, InfVerif in
+//! `bin\<ver>\{x64,x86,arm64}`, `Inf2Cat` only in `bin\<ver>\x86`, `InfVerif` in
 //! `Tools\<ver>\{x64,arm64}` (older kits: `bin\<ver>\<arch>`), signtool in
 //! `bin\<ver>\<arch>`.
 
@@ -54,7 +54,7 @@ pub struct Tools {
 }
 
 /// Host-architecture tool directories, most preferred first.
-fn host_arch_dirs() -> &'static [&'static str] {
+const fn host_arch_dirs() -> &'static [&'static str] {
     if cfg!(target_arch = "aarch64") {
         &["arm64", "x64", "x86"]
     } else {
@@ -63,12 +63,12 @@ fn host_arch_dirs() -> &'static [&'static str] {
 }
 
 impl Wdk {
-    pub fn locate() -> Result<Wdk, String> {
+    pub fn locate() -> Result<Self, String> {
         let var = |name: &str| env::var_os(name);
         let root = kits_root(&var)?;
         let version = match explicit_version(&var) {
             Some((name, v)) => {
-                let w = Wdk {
+                let w = Self {
                     root: root.clone(),
                     version: v.clone(),
                 };
@@ -83,14 +83,14 @@ impl Wdk {
             }
             None => newest_version_with_stampinf(&root)?,
         };
-        Ok(Wdk { root, version })
+        Ok(Self { root, version })
     }
 
     fn bin_dir(&self) -> PathBuf {
         self.root.join("bin").join(&self.version)
     }
 
-    fn find_in(&self, base: &Path, file: &str) -> Option<PathBuf> {
+    fn find_in(base: &Path, file: &str) -> Option<PathBuf> {
         host_arch_dirs()
             .iter()
             .map(|a| base.join(a).join(file))
@@ -98,7 +98,7 @@ impl Wdk {
     }
 
     fn find_in_bin(&self, file: &str) -> Option<PathBuf> {
-        self.find_in(&self.bin_dir(), file)
+        Self::find_in(&self.bin_dir(), file)
     }
 
     fn missing(&self, tool: &str, searched: &[PathBuf]) -> String {
@@ -121,19 +121,17 @@ impl Wdk {
         let tools = self.root.join("Tools").join(&self.version);
         let stampinf = self
             .find_in_bin("stampinf.exe")
-            .ok_or_else(|| self.missing("stampinf.exe", std::slice::from_ref(&bin)))?;
+            .ok_or_else(|| self.missing("stampinf.exe", core::slice::from_ref(&bin)))?;
         // Inf2Cat ships only as an x86 binary.
-        let inf2cat = [bin.join("x86").join("Inf2Cat.exe")]
-            .into_iter()
+        let inf2cat = core::iter::once(bin.join("x86").join("Inf2Cat.exe"))
             .chain(
                 host_arch_dirs()
                     .iter()
                     .map(|a| bin.join(a).join("Inf2Cat.exe")),
             )
             .find(|p| p.is_file())
-            .ok_or_else(|| self.missing("Inf2Cat.exe", std::slice::from_ref(&bin)))?;
-        let infverif = self
-            .find_in(&tools, "infverif.exe")
+            .ok_or_else(|| self.missing("Inf2Cat.exe", core::slice::from_ref(&bin)))?;
+        let infverif = Self::find_in(&tools, "infverif.exe")
             .or_else(|| self.find_in_bin("infverif.exe"))
             .ok_or_else(|| self.missing("infverif.exe", &[tools.clone(), bin.clone()]))?;
         Ok(Tools {

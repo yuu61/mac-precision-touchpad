@@ -15,26 +15,27 @@ const fn hex(value: u32) -> NtStatus {
 
 /// `STATUS_SUCCESS` (0x00000000).
 pub const STATUS_SUCCESS: NtStatus = hex(0x0000_0000);
-/// `STATUS_INVALID_DEVICE_REQUEST` (0xC0000010): GET/SET_FEATURE with a NULL `Irp->UserBuffer`.
+/// `STATUS_INVALID_DEVICE_REQUEST` (0xC0000010): `GET/SET_FEATURE` with a NULL `Irp->UserBuffer`.
 pub const STATUS_INVALID_DEVICE_REQUEST: NtStatus = hex(0xC000_0010);
-/// `STATUS_BUFFER_TOO_SMALL` (0xC0000023): the `HID_XFER_PACKET` length check of GET/SET_FEATURE, and the
+/// `STATUS_BUFFER_TOO_SMALL` (0xC0000023): the `HID_XFER_PACKET` length check of `GET/SET_FEATURE`, and the
 /// status `WdfMemoryCopyFromBuffer` / `WdfRequestRetrieveOutputBuffer` return for a short output buffer.
 pub const STATUS_BUFFER_TOO_SMALL: NtStatus = hex(0xC000_0023);
-/// `STATUS_DATA_ERROR` (0xC000003E): READ_REPORT completed for a packet with more than 5 finger blocks.
+/// `STATUS_DATA_ERROR` (0xC000003E): `READ_REPORT` completed for a packet with more than 5 finger blocks.
 pub const STATUS_DATA_ERROR: NtStatus = hex(0xC000_003E);
 /// `STATUS_UNKNOWN_REVISION` (0xC0000058): unknown trackpad type in the reader configuration (dead, and
 /// masked by spec B9).
 pub const STATUS_UNKNOWN_REVISION: NtStatus = hex(0xC000_0058);
 /// `STATUS_NOT_SUPPORTED` (0xC00000BB): unhandled IOCTLs, unknown feature report IDs, input mode 0.
 pub const STATUS_NOT_SUPPORTED: NtStatus = hex(0xC000_00BB);
-/// `STATUS_CANCELLED` (0xC0000120): what WDF completes still-queued READ_REPORTs with on cancel/purge.
+/// `STATUS_CANCELLED` (0xC0000120): what WDF completes still-queued `READ_REPORTs` with on cancel/purge.
 pub const STATUS_CANCELLED: NtStatus = hex(0xC000_0120);
-/// `STATUS_INVALID_DEVICE_STATE` (0xC0000184): no interrupt pipe found in PrepareHardware.
+/// `STATUS_INVALID_DEVICE_STATE` (0xC0000184): no interrupt pipe found in `PrepareHardware`.
 pub const STATUS_INVALID_DEVICE_STATE: NtStatus = hex(0xC000_0184);
 /// `STATUS_INVALID_BUFFER_SIZE` (0xC0000206): feature report buffer too small (caps < 3, HQA < 257).
 pub const STATUS_INVALID_BUFFER_SIZE: NtStatus = hex(0xC000_0206);
 
 /// `NT_SUCCESS(status)`: `status >= 0`.
+#[must_use]
 pub const fn nt_success(status: NtStatus) -> bool {
     status >= 0
 }
@@ -52,6 +53,7 @@ pub struct Completion {
 impl Completion {
     /// A completion with `Information = 0`, which is what every C handler leaves when it does not call
     /// `WdfRequestSetInformation`.
+    #[must_use]
     pub const fn status(status: NtStatus) -> Self {
         Self {
             status,
@@ -60,6 +62,7 @@ impl Completion {
     }
 
     /// `STATUS_SUCCESS` with `Information = information`.
+    #[must_use]
     pub const fn success(information: usize) -> Self {
         Self {
             status: STATUS_SUCCESS,

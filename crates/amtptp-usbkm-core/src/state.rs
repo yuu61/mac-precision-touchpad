@@ -1,6 +1,6 @@
 //! The hardware-independent part of the C `DEVICE_CONTEXT` (Device.h:25-47).
 //!
-//! The C context has no locking: `AmtPtpEvtUsbInterruptPipeReadComplete` (≤ DISPATCH_LEVEL), the I/O
+//! The C context has no locking: `AmtPtpEvtUsbInterruptPipeReadComplete` (≤ `DISPATCH_LEVEL`), the I/O
 //! dispatcher and the PnP/power callbacks read and write plain fields concurrently. In Rust that is a data
 //! race, so every field here is an atomic with `Relaxed` ordering (port policy P2: "atomics with the same
 //! semantics"; on x64/ARM64 byte and aligned-qword accesses are what the C compiler emits anyway).
@@ -42,12 +42,12 @@ pub struct UsbDeviceIds {
 /// `PtpReportTouch` / `PtpReportButton`: gates of contact and button parsing in the reader completion.
 ///
 /// Both are TRUE in every reachable state: they are set at device creation and at the end of every
-/// successful PrepareHardware, and nothing ever clears them (selective reporting is ignored, spec B15).
+/// successful `PrepareHardware`, and nothing ever clears them (selective reporting is ignored, spec B15).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InputGates {
-    /// `PtpReportTouch`: parse contacts (and apply the more-than-5-fingers DATA_ERROR check).
+    /// `PtpReportTouch`: parse contacts (and apply the more-than-5-fingers `DATA_ERROR` check).
     pub report_touch: bool,
-    /// `PtpReportButton`: report the button byte. Also the (always true) condition of the D0Entry mode
+    /// `PtpReportButton`: report the button byte. Also the (always true) condition of the `D0Entry` mode
     /// switch.
     pub report_button: bool,
 }
@@ -67,7 +67,7 @@ pub struct DeviceStateSnapshot {
     pub usb_device_created: bool,
     /// Cached device-descriptor fields.
     pub ids: UsbDeviceIds,
-    /// Index into [`CONFIG_TABLE`] (`None` = `DeviceInfo == NULL`, before the first PrepareHardware).
+    /// Index into [`CONFIG_TABLE`] (`None` = `DeviceInfo == NULL`, before the first `PrepareHardware`).
     pub config_index: Option<usize>,
     /// `UsbDeviceTraits`.
     pub usb_device_traits: u32,
@@ -106,6 +106,7 @@ const _: () = assert!(CONFIG_TABLE.len() < u8::MAX as usize);
 
 impl DeviceState {
     /// The all-zero state that `WdfDeviceCreate` gives the C context (WDF zero-initializes contexts).
+    #[must_use]
     pub const fn new() -> Self {
         Self {
             usb_device_created: AtomicBool::new(false),
@@ -124,6 +125,7 @@ impl DeviceState {
 
     /// A state with the given field values (tests, or restoring a snapshot). The driver starts from
     /// [`DeviceState::new`] followed by [`DeviceState::on_device_create`].
+    #[must_use]
     pub fn from_snapshot(s: DeviceStateSnapshot) -> Self {
         let state = Self::new();
         state.restore(s);
@@ -170,7 +172,7 @@ impl DeviceState {
         self.set_input_gates_on();
     }
 
-    /// Sets both input gates (CreateDevice and the end of PrepareHardware).
+    /// Sets both input gates (`CreateDevice` and the end of `PrepareHardware`).
     pub(crate) fn set_input_gates_on(&self) {
         self.report_button.store(true, RELAXED);
         self.report_touch.store(true, RELAXED);
@@ -185,7 +187,7 @@ impl DeviceState {
         self.usb_device_created.store(true, RELAXED);
     }
 
-    /// The cached device-descriptor fields (all zero before the first PrepareHardware, which is what
+    /// The cached device-descriptor fields (all zero before the first `PrepareHardware`, which is what
     /// `IOCTL_HID_GET_DEVICE_ATTRIBUTES` then reports).
     pub fn usb_device_ids(&self) -> UsbDeviceIds {
         UsbDeviceIds {
@@ -211,7 +213,7 @@ impl DeviceState {
         self.usb_device_traits.store(traits, RELAXED);
     }
 
-    /// Index of the selected config row, `None` before the first PrepareHardware (`DeviceInfo == NULL`).
+    /// Index of the selected config row, `None` before the first `PrepareHardware` (`DeviceInfo == NULL`).
     pub fn config_index(&self) -> Option<usize> {
         match self.config_slot.load(RELAXED) {
             0 => None,
@@ -231,8 +233,8 @@ impl DeviceState {
 
     /// The selected config row (`DeviceInfo`).
     ///
-    /// Before the first PrepareHardware the C pointer is NULL and every reader of it would crash; that
-    /// cannot happen (the reader and the mode switch only run after PrepareHardware). This returns the
+    /// Before the first `PrepareHardware` the C pointer is NULL and every reader of it would crash; that
+    /// cannot happen (the reader and the mode switch only run after `PrepareHardware`). This returns the
     /// fallback row in that case instead of failing.
     pub fn config(&self) -> &'static Bcm5974Config {
         self.config_index()
@@ -272,7 +274,7 @@ impl DeviceState {
         }
     }
 
-    /// `LastReportTime.QuadPart`: written only by D0Entry, with the value `KeQueryPerformanceCounter`
+    /// `LastReportTime.QuadPart`: written only by `D0Entry`, with the value `KeQueryPerformanceCounter`
     /// stores in its out-parameter (the QPC *frequency*, spec B1).
     pub fn last_report_time(&self) -> i64 {
         self.last_report_time.load(RELAXED)

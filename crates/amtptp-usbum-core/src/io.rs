@@ -9,33 +9,48 @@
 use crate::status::NtStatus;
 use crate::usb::SetupPacket;
 
-/// A WDFREQUEST of the default queue (device control) or of the manual READ_REPORT queue, as seen by
+/// A WDFREQUEST of the default queue (device control) or of the manual `READ_REPORT` queue, as seen by
 /// the HID handlers.
 ///
 /// Every method may be called more than once (WDF returns the same memory object each time).
 pub trait HidRequest {
     /// `WdfRequestRetrieveInputMemory` + `WdfMemoryGetBuffer`: the input buffer, or the framework's
     /// failure status (WDF fails a zero-length buffer with `STATUS_BUFFER_TOO_SMALL`).
+    ///
+    /// # Errors
+    /// Returns the WDF failure status if the input memory cannot be retrieved.
     fn input_memory(&mut self) -> Result<&[u8], NtStatus>;
 
     /// `WdfRequestRetrieveOutputMemory` + `WdfMemoryGetBuffer(.., &length)`: only the length.
     ///
-    /// Used where the C code never touches the output bytes: SET_FEATURE takes the report ID from the
+    /// Used where the C code never touches the output bytes: `SET_FEATURE` takes the report ID from the
     /// output length (the mshidumdf convention; the buffer itself is not accessible), and the descriptor
-    /// and READ_REPORT paths retrieve the memory before copying into it. The glue must not create a
+    /// and `READ_REPORT` paths retrieve the memory before copying into it. The glue must not create a
     /// slice over the buffer here.
+    ///
+    /// # Errors
+    /// Returns the WDF failure status if the output memory cannot be retrieved.
     fn output_memory_len(&mut self) -> Result<usize, NtStatus>;
 
-    /// `WdfRequestRetrieveOutputMemory` + `WdfMemoryGetBuffer`: the writable output buffer (GET_FEATURE
+    /// `WdfRequestRetrieveOutputMemory` + `WdfMemoryGetBuffer`: the writable output buffer (`GET_FEATURE`
     /// writes the report in place).
+    ///
+    /// # Errors
+    /// Returns the WDF failure status if the output memory cannot be retrieved.
     fn output_memory(&mut self) -> Result<&mut [u8], NtStatus>;
 
     /// `WdfRequestRetrieveOutputMemory` + `WdfMemoryCopyFromBuffer(memory, 0, src, src.len())`. Returns the
     /// framework's status (WDF fails when `src` is longer than the buffer).
+    ///
+    /// # Errors
+    /// Returns the WDF failure status if the copy cannot complete.
     fn copy_to_output_memory(&mut self, src: &[u8]) -> Result<(), NtStatus>;
 
     /// `WdfRequestRetrieveOutputBuffer(request, minimum_len, &buffer, &length)`: the whole output buffer
     /// (`length` bytes, at least `minimum_len`), or the framework's failure status.
+    ///
+    /// # Errors
+    /// Returns the WDF failure status if the buffer cannot be retrieved or is too short.
     fn output_buffer(&mut self, minimum_len: usize) -> Result<&mut [u8], NtStatus>;
 }
 
@@ -47,6 +62,9 @@ pub trait ReadQueue {
 
     /// `WdfIoQueueRetrieveNextRequest`. An empty queue gives the framework's status
     /// (`STATUS_NO_MORE_ENTRIES`).
+    ///
+    /// # Errors
+    /// Returns the WDF failure status if the queue is empty or cannot supply a request.
     fn retrieve_next_request(&mut self) -> Result<Self::Request, NtStatus>;
 
     /// `WdfRequestSetInformation(request, information)` + `WdfRequestComplete(request, status)`.
@@ -65,13 +83,16 @@ pub trait ControlPipe {
     fn send_control_transfer(&mut self, setup: &SetupPacket, data: &mut [u8; 4]) -> NtStatus;
 }
 
-/// `WdfUsbTargetDeviceAllocAndQueryString` (GET_STRING).
+/// `WdfUsbTargetDeviceAllocAndQueryString` (`GET_STRING`).
 pub trait UsbStringSource {
     /// The string memory: `NumCharacters * 2` bytes of UTF-16LE. The glue should delete the WDFMEMORY
     /// when this value is dropped (the C driver leaks it, UM-B7).
     type String: AsRef<[u8]>;
 
     /// Queries string descriptor `string_index` in language `language_id` from the device.
+    ///
+    /// # Errors
+    /// Returns the WDF failure status if allocation or the USB descriptor query fails.
     fn alloc_and_query_string(
         &mut self,
         string_index: u8,
@@ -94,17 +115,23 @@ pub enum PipeType {
     Interrupt,
 }
 
-/// The WDF USB objects PrepareHardware works with (WDFUSBDEVICE, interface 0, its pipes, the
+/// The WDF USB objects `PrepareHardware` works with (WDFUSBDEVICE, interface 0, its pipes, the
 /// continuous reader).
 pub trait UsbTargetSetup {
     /// `if (ctx.UsbDevice == NULL) WdfUsbTargetDeviceCreate(..)`: creates the USB target device once and
     /// reuses it on later calls. Returns the create failure status.
+    ///
+    /// # Errors
+    /// Returns the WDF failure status if the USB device cannot be created.
     fn create_usb_device_if_needed(&mut self) -> Result<(), NtStatus>;
 
     /// `WdfUsbTargetDeviceGetDeviceDescriptor`.
     fn device_descriptor(&mut self) -> crate::state::UsbDeviceDescriptor;
 
     /// `WDF_USB_DEVICE_INFORMATION_INIT` + `WdfUsbTargetDeviceRetrieveInformation`: the `Traits`.
+    ///
+    /// # Errors
+    /// Returns the WDF failure status if the USB traits cannot be retrieved.
     fn retrieve_device_traits(&mut self) -> Result<u32, NtStatus>;
 
     /// `WdfUsbTargetDeviceGetInterface(UsbDevice, 0)` (stored as `UsbInterface`) and

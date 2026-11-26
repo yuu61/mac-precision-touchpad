@@ -1,9 +1,9 @@
-//! Hardware-independent logic of the AmtPtpHidFilter (KMDF, Bluetooth Magic Trackpad 2) driver.
+//! Hardware-independent logic of the `AmtPtpHidFilter` (KMDF, Bluetooth Magic Trackpad 2) driver.
 //!
 //! The C driver (`src/AmtPtpHidFilter`) is a KMDF lower filter below mshidkmdf on a HID collection of
 //! the Magic Trackpad 2. It answers the HID minidriver IOCTLs with a synthetic Precision Touchpad
 //! identity, handles the PTP feature reports in software, switches the trackpad into raw multitouch
-//! mode with a vendor SET_FEATURE, and turns each raw Apple report into one 50-byte PTP input report.
+//! mode with a vendor `SET_FEATURE`, and turns each raw Apple report into one 50-byte PTP input report.
 //!
 //! This crate holds all of that logic with the C driver's exact observable behaviour, plus the port policy
 //! P2 safety fixes. It has no WDK dependency: framework calls go through the [`FilterIo`],

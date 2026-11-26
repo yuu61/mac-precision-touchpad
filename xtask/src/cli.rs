@@ -9,8 +9,8 @@ Commands:
   build      Build the driver workspaces drivers/km (KMDF) and drivers/um (UMDF).
   package    Build, then assemble, stamp, catalog, verify (and optionally sign)
              the driver package(s) under target/package/<arch>/<inf-name>/.
-  test       cargo test in the host workspace, then cargo clippy -D warnings in
-             the host workspace, drivers/km and drivers/um.
+  test       Run host tests and strict Clippy checks across all three
+             workspaces, including the shared driver support crates.
   help       Show this text.
 
 Options (build, package):
@@ -57,44 +57,44 @@ pub enum Arch {
 }
 
 impl Arch {
-    pub const ALL: [Arch; 2] = [Arch::X64, Arch::Arm64];
+    pub const ALL: [Self; 2] = [Self::X64, Self::Arm64];
 
     /// Name used on the command line and in `target/package/<arch>`.
-    pub fn name(self) -> &'static str {
+    pub const fn name(self) -> &'static str {
         match self {
-            Arch::X64 => "x64",
-            Arch::Arm64 => "arm64",
+            Self::X64 => "x64",
+            Self::Arm64 => "arm64",
         }
     }
 
-    pub fn triple(self) -> &'static str {
+    pub const fn triple(self) -> &'static str {
         match self {
-            Arch::X64 => "x86_64-pc-windows-msvc",
-            Arch::Arm64 => "aarch64-pc-windows-msvc",
+            Self::X64 => "x86_64-pc-windows-msvc",
+            Self::Arm64 => "aarch64-pc-windows-msvc",
         }
     }
 
     /// Value for `stampinf -a` (replaces `$ARCH$`, e.g. `NTamd64.10.0...16299`).
-    pub fn stampinf_arch(self) -> &'static str {
+    pub const fn stampinf_arch(self) -> &'static str {
         match self {
-            Arch::X64 => "amd64",
-            Arch::Arm64 => "arm64",
+            Self::X64 => "amd64",
+            Self::Arm64 => "arm64",
         }
     }
 
     /// `Inf2Cat /os:` list: every Windows 10/11 release from 1709 (RS3, the
     /// KMDF 1.23 / INF `NT$ARCH$.10.0...16299` floor) on, as accepted by the
-    /// WDK 10.0.28000 Inf2Cat (`Inf2Cat /?`). x64 also lists the server ids
-    /// at or above that floor (ServerRS5 = 2019, ServerFE = 2022, 2025);
-    /// Server2016_X64 (1607) is below the floor and Server10_X64 is the
+    /// WDK 10.0.28000 `Inf2Cat` (`Inf2Cat /?`). x64 also lists the server ids
+    /// at or above that floor (`ServerRS5` = 2019, `ServerFE` = 2022, 2025);
+    /// `Server2016_X64` (1607) is below the floor and `Server10_X64` is the
     /// generic pre-1709 id, so both are omitted. ARM64 is client only.
-    pub fn inf2cat_os(self) -> &'static str {
+    pub const fn inf2cat_os(self) -> &'static str {
         match self {
-            Arch::X64 => {
+            Self::X64 => {
                 "10_RS3_X64,10_RS4_X64,10_RS5_X64,ServerRS5_X64,10_19H1_X64,10_VB_X64,\
                  ServerFE_X64,10_CO_X64,10_NI_X64,10_GE_X64,Server2025_X64"
             }
-            Arch::Arm64 => {
+            Self::Arm64 => {
                 "10_RS3_ARM64,10_RS4_ARM64,10_RS5_ARM64,10_19H1_ARM64,10_VB_ARM64,\
                  10_CO_ARM64,10_NI_ARM64,10_GE_ARM64"
             }
@@ -102,11 +102,11 @@ impl Arch {
     }
 
     /// The architecture xtask itself runs on (default for `--arch`).
-    pub fn host() -> Arch {
+    pub const fn host() -> Self {
         if cfg!(target_arch = "aarch64") {
-            Arch::Arm64
+            Self::Arm64
         } else {
-            Arch::X64
+            Self::X64
         }
     }
 }
@@ -264,7 +264,7 @@ fn parse_options(args: &[String], package: bool) -> Result<Options, String> {
     Ok(o)
 }
 
-/// DriverVer version: four dot-separated 16-bit numbers.
+/// `DriverVer` version: four dot-separated 16-bit numbers.
 pub fn validate_driver_version(v: &str) -> Result<(), String> {
     let parts: Vec<&str> = v.split('.').collect();
     let ok = parts.len() == 4
@@ -334,20 +334,20 @@ mod tests {
 
     #[test]
     fn rejects_bad_input() {
-        assert!(parse(&s(&["build", "--inf", "universal"])).is_err());
-        assert!(parse(&s(&["build", "--arch", "x86"])).is_err());
-        assert!(parse(&s(&["build", "--arch"])).is_err());
-        assert!(parse(&s(&["package", "--sign"])).is_err());
-        assert!(parse(&s(&["package", "--bogus"])).is_err());
-        assert!(parse(&s(&["test", "--release"])).is_err());
-        assert!(parse(&s(&["frobnicate"])).is_err());
+        parse(&s(&["build", "--inf", "universal"])).unwrap_err();
+        parse(&s(&["build", "--arch", "x86"])).unwrap_err();
+        parse(&s(&["build", "--arch"])).unwrap_err();
+        parse(&s(&["package", "--sign"])).unwrap_err();
+        parse(&s(&["package", "--bogus"])).unwrap_err();
+        parse(&s(&["test", "--release"])).unwrap_err();
+        parse(&s(&["frobnicate"])).unwrap_err();
     }
 
     #[test]
     fn driver_version_validation() {
-        assert!(validate_driver_version("0.0.0.0").is_ok());
-        assert!(validate_driver_version("19.0.0.200").is_ok());
-        assert!(validate_driver_version("65535.65535.65535.65535").is_ok());
+        validate_driver_version("0.0.0.0").unwrap();
+        validate_driver_version("19.0.0.200").unwrap();
+        validate_driver_version("65535.65535.65535.65535").unwrap();
         assert!(validate_driver_version("65536.0.0.0").is_err());
         assert!(validate_driver_version("1.2.3").is_err());
         assert!(validate_driver_version("1.2.3.4.5").is_err());

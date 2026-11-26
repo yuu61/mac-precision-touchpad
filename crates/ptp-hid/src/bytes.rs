@@ -31,6 +31,7 @@ pub(crate) const fn take<const N: usize>(src: &[u8]) -> Option<([u8; N], &[u8])>
 /// `N` must equal `A + B`. That is checked at compile time with an inline `const` assertion, so a wrong
 /// length is a build error, never a runtime panic. Usable in `const` and `static` initializers, e.g.
 /// `const D: [u8; 5] = concat(&[1, 2], &[3, 4, 5]);`.
+#[must_use]
 pub const fn concat<const A: usize, const B: usize, const N: usize>(
     a: &[u8; A],
     b: &[u8; B],
@@ -39,11 +40,11 @@ pub const fn concat<const A: usize, const B: usize, const N: usize>(
         assert!(
             A + B == N,
             "concat: output length must equal the sum of the input lengths"
-        )
+        );
     };
-    let mut out = [0u8; N];
+    let mut out = [0_u8; N];
     let rest = put(&mut out, a);
-    let _ = put(rest, b);
+    put(rest, b);
     out
 }
 
@@ -66,34 +67,34 @@ mod tests {
 
     #[test]
     fn put_writes_prefix_and_returns_tail() {
-        let mut buf = [0u8; 4];
+        let mut buf = [0_u8; 4];
         let rest = put(&mut buf, &[1, 2]);
         assert_eq!(rest.len(), 2);
         let rest = put(rest, &[3, 4]);
-        assert!(rest.is_empty());
+        assert_eq!(rest, []);
         assert_eq!(buf, [1, 2, 3, 4]);
     }
 
     #[test]
     fn put_too_short_writes_nothing() {
-        let mut buf = [9u8; 2];
+        let mut buf = [9_u8; 2];
         let rest = put(&mut buf, &[1, 2, 3]);
-        assert!(rest.is_empty());
+        assert_eq!(rest, []);
         assert_eq!(buf, [9, 9]);
     }
 
     #[test]
     fn take_splits_or_fails() {
-        assert_eq!(take::<2>(&[1, 2, 3]), Some(([1, 2], &[3u8][..])));
+        assert_eq!(take::<2>(&[1, 2, 3]), Some(([1, 2], &[3_u8][..])));
         assert_eq!(take::<3>(&[1, 2]), None);
     }
 
     #[test]
     fn write_prefix_leaves_tail_untouched() {
-        let mut buf = [0xAAu8; 4];
+        let mut buf = [0xAA_u8; 4];
         assert_eq!(write_prefix(&mut buf, &[1, 2]), Ok(()));
         assert_eq!(buf, [1, 2, 0xAA, 0xAA]);
-        let mut short = [0xAAu8; 1];
+        let mut short = [0xAA_u8; 1];
         assert_eq!(write_prefix(&mut short, &[1, 2]), Err(BufferTooSmall));
         assert_eq!(short, [0xAA]);
     }

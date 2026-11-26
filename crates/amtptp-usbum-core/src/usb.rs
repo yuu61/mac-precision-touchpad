@@ -17,9 +17,9 @@ use crate::io::ControlPipe;
 use crate::state::DeviceState;
 use crate::status::{NtStatus, STATUS_SUCCESS, nt_success};
 
-/// `BCM5974_WELLSPRING_MODE_READ_REQUEST_ID`: HID class GET_REPORT.
+/// `BCM5974_WELLSPRING_MODE_READ_REQUEST_ID`: HID class `GET_REPORT`.
 pub const BCM5974_WELLSPRING_MODE_READ_REQUEST_ID: u8 = 1;
-/// `BCM5974_WELLSPRING_MODE_WRITE_REQUEST_ID`: HID class SET_REPORT.
+/// `BCM5974_WELLSPRING_MODE_WRITE_REQUEST_ID`: HID class `SET_REPORT`.
 pub const BCM5974_WELLSPRING_MODE_WRITE_REQUEST_ID: u8 = 9;
 
 /// Length of the mode-switch data stage on the wire: `sizeof(int)` (UM-B1).
@@ -52,6 +52,7 @@ pub struct SetupPacket {
 
 impl SetupPacket {
     /// The 8 bytes on the wire (little-endian fields).
+    #[must_use]
     pub const fn to_bytes(self) -> [u8; 8] {
         let [v0, v1] = self.w_value.to_le_bytes();
         let [i0, i1] = self.w_index.to_le_bytes();
@@ -60,6 +61,7 @@ impl SetupPacket {
     }
 
     /// Whether this is a device-to-host (IN) transfer.
+    #[must_use]
     pub const fn is_device_to_host(self) -> bool {
         self.bm_request_type & BM_REQUEST_DEVICE_TO_HOST != 0
     }
@@ -86,12 +88,14 @@ const fn mode_switch_setup(
     }
 }
 
-/// The GET_REPORT setup packet of a row: `A1 01 <um_req_val> <um_req_idx> 04 00`.
+/// The `GET_REPORT` setup packet of a row: `A1 01 <um_req_val> <um_req_idx> 04 00`.
+#[must_use]
 pub const fn wellspring_mode_read_setup(cfg: &Bcm5974Config) -> SetupPacket {
     mode_switch_setup(cfg, true, BCM5974_WELLSPRING_MODE_READ_REQUEST_ID)
 }
 
-/// The SET_REPORT setup packet of a row: `21 09 <um_req_val> <um_req_idx> 04 00`.
+/// The `SET_REPORT` setup packet of a row: `21 09 <um_req_val> <um_req_idx> 04 00`.
+#[must_use]
 pub const fn wellspring_mode_write_setup(cfg: &Bcm5974Config) -> SetupPacket {
     mode_switch_setup(cfg, false, BCM5974_WELLSPRING_MODE_WRITE_REQUEST_ID)
 }
@@ -103,7 +107,7 @@ fn switch_index(cfg: &Bcm5974Config) -> usize {
     usize::try_from(cfg.um.um_switch_idx).unwrap_or(usize::MAX)
 }
 
-/// Sends the GET_REPORT into `buffer` and returns its status (Device.c:300-341 / :403-444).
+/// Sends the `GET_REPORT` into `buffer` and returns its status (Device.c:300-341 / :403-444).
 fn read_mode_register<C: ControlPipe>(
     cfg: &Bcm5974Config,
     control: &mut C,
@@ -114,9 +118,12 @@ fn read_mode_register<C: ControlPipe>(
 
 /// `AmtPtpGetWellspringMode`: whether the device reports raw multitouch mode.
 ///
-/// TYPE3 returns `Ok(true)` without I/O. Otherwise one GET_REPORT into a zeroed 4-byte buffer; on
+/// TYPE3 returns `Ok(true)` without I/O. Otherwise one `GET_REPORT` into a zeroed 4-byte buffer; on
 /// success the result is `buffer[um_switch_idx] == um_switch_on`. A failed transfer returns its status.
 /// `cbTransferred` is not checked (as in C).
+///
+/// # Errors
+/// Returns the failure status of the USB control transfer.
 pub fn get_wellspring_mode<C: ControlPipe>(
     cfg: &Bcm5974Config,
     control: &mut C,
@@ -124,7 +131,7 @@ pub fn get_wellspring_mode<C: ControlPipe>(
     if cfg.tp_type == TrackpadType::Type3 {
         return Ok(true);
     }
-    let mut buffer = [0u8; MODE_SWITCH_TRANSFER_LEN];
+    let mut buffer = [0_u8; MODE_SWITCH_TRANSFER_LEN];
     let status = read_mode_register(cfg, control, &mut buffer);
     if !nt_success(status) {
         return Err(status);
@@ -136,9 +143,9 @@ pub fn get_wellspring_mode<C: ControlPipe>(
 
 /// `AmtPtpSetWellspringMode`: read-modify-write of the device's mode register.
 ///
-/// TYPE3: stores `enable` in `IsWellspringModeOn` and returns success (no I/O). Otherwise: GET_REPORT into
+/// TYPE3: stores `enable` in `IsWellspringModeOn` and returns success (no I/O). Otherwise: `GET_REPORT` into
 /// a zeroed 4-byte buffer (failure: return its status, flag unchanged); set `buffer[um_switch_idx]` to
-/// `(u8) um_switch_on` or `(u8) um_switch_off`; SET_REPORT of the same 4 bytes (failure: return its status,
+/// `(u8) um_switch_on` or `(u8) um_switch_off`; `SET_REPORT` of the same 4 bytes (failure: return its status,
 /// flag unchanged); then `IsWellspringModeOn = enable`.
 pub fn set_wellspring_mode<C: ControlPipe>(
     state: &DeviceState,
@@ -150,7 +157,7 @@ pub fn set_wellspring_mode<C: ControlPipe>(
         state.set_wellspring_mode_on(enable);
         return STATUS_SUCCESS;
     }
-    let mut buffer = [0u8; MODE_SWITCH_TRANSFER_LEN];
+    let mut buffer = [0_u8; MODE_SWITCH_TRANSFER_LEN];
     let status = read_mode_register(cfg, control, &mut buffer);
     if !nt_success(status) {
         return status;

@@ -1,10 +1,12 @@
-//! Replays `power.txt`: 12 event sequences over D0Entry, SelfManagedIoInit/Restart, the recovery timer,
-//! upstream reads, lower completions, D0Exit and framework cancellation.
+//! Replays `power.txt`: 12 event sequences over `D0Entry`, SelfManagedIoInit/Restart, the recovery timer,
+//! upstream reads, lower completions, `D0Exit` and framework cancellation.
 //!
 //! The core makes every driver decision ([`DeviceRuntime`]); this test is the framework model: the FIFO
 //! `HidQueue`, the list of in-flight lower reads, the timer's armed/due state, and the WDF failures the
 //! record injects (`wdf=`). After each step the snapshot (`out_*`), the completed request and its bytes,
 //! the completion statuses in `ops` and the number of `KeQueryPerformanceCounter` calls are compared.
+
+#![cfg(test)]
 
 mod common;
 
@@ -90,16 +92,16 @@ impl Framework {
 
 /// The `pkt1` lower buffer: n=1, click=1, X=100, Y=2000, Pressure=30, TouchMajor=800, TouchMinor=600.
 fn pkt1() -> Vec<u8> {
-    let mut b = vec![0u8; LOWER_READ_BUFFER_LEN];
+    let mut b = vec![0_u8; LOWER_READ_BUFFER_LEN];
     b[0] = 2;
     b[1] = 1;
     b[30] = 1;
     let f = 46;
-    b[f + 4..f + 6].copy_from_slice(&100i16.to_le_bytes());
-    b[f + 6..f + 8].copy_from_slice(&2000i16.to_le_bytes());
-    b[f + 18..f + 20].copy_from_slice(&800i16.to_le_bytes());
-    b[f + 20..f + 22].copy_from_slice(&600i16.to_le_bytes());
-    b[f + 26..f + 28].copy_from_slice(&30i16.to_le_bytes());
+    b[f + 4..f + 6].copy_from_slice(&100_i16.to_le_bytes());
+    b[f + 6..f + 8].copy_from_slice(&2000_i16.to_le_bytes());
+    b[f + 18..f + 20].copy_from_slice(&800_i16.to_le_bytes());
+    b[f + 20..f + 22].copy_from_slice(&600_i16.to_le_bytes());
+    b[f + 26..f + 28].copy_from_slice(&30_i16.to_le_bytes());
     b
 }
 
@@ -126,7 +128,7 @@ fn completions_in_ops(ops: &str) -> Vec<(String, NtStatus, usize)> {
         .map(|a| {
             let a = a.strip_suffix(')').expect("paren");
             let mut it = a.split(',');
-            let label = it.next().expect("label").to_string();
+            let label = it.next().expect("label").to_owned();
             let status = hex_status(it.next().expect("status"));
             let info = it
                 .next()
@@ -194,7 +196,7 @@ fn power_sequences() {
                 "-".into()
             }
             "READ_REPORT" => {
-                let label = args.split(',').next().expect("label").to_string();
+                let label = args.split(',').next().expect("label").to_owned();
                 let outlen: usize = arg(args, "outlen").parse().unwrap();
                 fw.outputs.insert(label.clone(), prefill(outlen));
                 // WdfRequestForwardToIoQueue succeeds in every power record.
@@ -205,7 +207,7 @@ fn power_sequences() {
                 "queued".into()
             }
             "LowerReadComplete" => {
-                let label = args.split(',').next().expect("label").to_string();
+                let label = args.split(',').next().expect("label").to_owned();
                 let pos = fw
                     .inflight
                     .iter()
@@ -242,7 +244,7 @@ fn power_sequences() {
                 format!("{:08x}", ret as u32)
             }
             "FrameworkCancelsQueued" => {
-                let label = args.to_string();
+                let label = args.to_owned();
                 assert_eq!(fw.hidq.front(), Some(&label), "{ctx}: oldest is cancelled");
                 fw.hidq.pop_front();
                 "-".into()

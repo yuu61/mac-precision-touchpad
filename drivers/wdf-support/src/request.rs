@@ -27,13 +27,13 @@
 //! (`WdfRequestCreate`) are never completed; they are deleted with
 //! `WdfObjectDelete` and must not be wrapped in [`Request`].
 //!
-//! All methods are callable at IRQL <= DISPATCH_LEVEL (KMDF) and in UMDF.
+//! All methods are callable at IRQL <= `DISPATCH_LEVEL` (KMDF) and in UMDF.
 
 use core::mem::ManuallyDrop;
 
 use wdk_sys::{
-    _WDF_REQUEST_SEND_OPTIONS_FLAGS, NT_SUCCESS, NTSTATUS, ULONG, ULONG_PTR, WDF_REQUEST_PARAMETERS,
-    WDFIOTARGET, WDFQUEUE, WDFREQUEST, call_unsafe_wdf_function_binding,
+    _WDF_REQUEST_SEND_OPTIONS_FLAGS, NT_SUCCESS, NTSTATUS, ULONG, ULONG_PTR,
+    WDF_REQUEST_PARAMETERS, WDFIOTARGET, WDFQUEUE, WDFREQUEST, call_unsafe_wdf_function_binding,
 };
 
 use crate::init::{request_parameters_init, request_send_options_init};
@@ -82,7 +82,10 @@ impl Request {
     /// - No other code completes, forwards or sends it while this `Request`
     ///   exists (i.e. at most one `Request` per handle).
     pub const unsafe fn from_raw(handle: WDFREQUEST, drop_status: NTSTATUS) -> Self {
-        Self { handle, drop_status }
+        Self {
+            handle,
+            drop_status,
+        }
     }
 
     /// The raw handle, for WDF calls that do not transfer ownership
@@ -108,7 +111,11 @@ impl Request {
         // SAFETY: `self.handle` is a valid owned request (from_raw contract);
         // `parameters` is an initialized WDF_REQUEST_PARAMETERS with Size set.
         unsafe {
-            call_unsafe_wdf_function_binding!(WdfRequestGetParameters, self.handle, &raw mut parameters);
+            call_unsafe_wdf_function_binding!(
+                WdfRequestGetParameters,
+                self.handle,
+                &raw mut parameters
+            );
         }
         parameters
     }
@@ -145,7 +152,12 @@ impl Request {
         let handle = self.into_raw();
         // SAFETY: as in `complete`.
         unsafe {
-            call_unsafe_wdf_function_binding!(WdfRequestCompleteWithInformation, handle, status, information);
+            call_unsafe_wdf_function_binding!(
+                WdfRequestCompleteWithInformation,
+                handle,
+                status,
+                information
+            );
         }
     }
 
@@ -163,19 +175,24 @@ impl Request {
     pub unsafe fn forward_to_io_queue(self, queue: WDFQUEUE) -> Result<(), Rejected> {
         // SAFETY: valid owned request (from_raw contract); `queue` is a valid
         // queue handle (caller contract).
-        let status = unsafe { call_unsafe_wdf_function_binding!(WdfRequestForwardToIoQueue, self.handle, queue) };
+        let status = unsafe {
+            call_unsafe_wdf_function_binding!(WdfRequestForwardToIoQueue, self.handle, queue)
+        };
         if NT_SUCCESS(status) {
-            let _ = self.into_raw();
+            let _transferred = self.into_raw();
             Ok(())
         } else {
-            Err(Rejected { request: self, status })
+            Err(Rejected {
+                request: self,
+                status,
+            })
         }
     }
 
     /// Passes the request down unchanged:
     /// `WdfRequestFormatRequestUsingCurrentType(Request)`, then `WdfRequestSend`
     /// with `WDF_REQUEST_SEND_OPTION_SEND_AND_FORGET` (the filter-forwarding
-    /// pattern of AmtPtpHidFilter and AmtPtpDeviceSpiKm).
+    /// pattern of `AmtPtpHidFilter` and `AmtPtpDeviceSpiKm`).
     ///
     /// On success the target completes the request; the driver must not touch
     /// it again. On failure the driver still owns it.
@@ -189,21 +206,29 @@ impl Request {
     /// of the request's device).
     pub unsafe fn send_and_forget(self, target: WDFIOTARGET) -> Result<(), Rejected> {
         // SAFETY: valid owned request (from_raw contract).
-        unsafe { call_unsafe_wdf_function_binding!(WdfRequestFormatRequestUsingCurrentType, self.handle) };
+        unsafe {
+            call_unsafe_wdf_function_binding!(WdfRequestFormatRequestUsingCurrentType, self.handle);
+        };
         let mut options = request_send_options_init(
             // Small non-negative enum constant (0x8), as in the C macro use.
             _WDF_REQUEST_SEND_OPTIONS_FLAGS::WDF_REQUEST_SEND_OPTION_SEND_AND_FORGET as ULONG,
         );
         // SAFETY: valid owned request, formatted above; `target` is a valid
         // I/O target (caller contract); `options` is initialized.
-        let sent = unsafe { call_unsafe_wdf_function_binding!(WdfRequestSend, self.handle, target, &raw mut options) };
+        let sent = unsafe {
+            call_unsafe_wdf_function_binding!(WdfRequestSend, self.handle, target, &raw mut options)
+        };
         if sent != 0 {
-            let _ = self.into_raw();
+            let _transferred = self.into_raw();
             Ok(())
         } else {
             // SAFETY: the send failed, so the request is still ours and valid.
-            let status = unsafe { call_unsafe_wdf_function_binding!(WdfRequestGetStatus, self.handle) };
-            Err(Rejected { request: self, status })
+            let status =
+                unsafe { call_unsafe_wdf_function_binding!(WdfRequestGetStatus, self.handle) };
+            Err(Rejected {
+                request: self,
+                status,
+            })
         }
     }
 }

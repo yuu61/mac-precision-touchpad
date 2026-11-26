@@ -44,6 +44,7 @@ pub enum InternalIoctl {
 pub const NOT_SUPPORTED_STATUS: NtStatus = STATUS_NOT_SUPPORTED;
 
 /// Classifies an internal IOCTL code exactly like the C `switch (IoControlCode)`.
+#[must_use]
 pub const fn classify_internal_ioctl(io_control_code: u32) -> InternalIoctl {
     match io_control_code {
         IOCTL_HID_GET_DEVICE_DESCRIPTOR => InternalIoctl::GetDeviceDescriptor,

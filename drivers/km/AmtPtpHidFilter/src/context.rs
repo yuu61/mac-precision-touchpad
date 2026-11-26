@@ -22,9 +22,9 @@ use wdk_sys::{
 /// the C code reads and writes them without locks from up to five concurrent contexts, port policy P2).
 ///
 /// The handles are atomics too: the context becomes visible to WDF as soon as it is written in the
-/// create path, and AddDevice and the detour store handles into it afterwards. No `&mut` to the
+/// create path, and `AddDevice` and the detour store handles into it afterwards. No `&mut` to the
 /// context is ever formed after its initializing `ptr.write`. Every handle except the I/O target is
-/// stored once during AddDevice, before the device can receive any callback, so `Relaxed` suffices;
+/// stored once during `AddDevice`, before the device can receive any callback, so `Relaxed` suffices;
 /// the I/O target is stored in `EvtDeviceSelfManagedIoInit` and published with `Release`/`Acquire`.
 pub(crate) struct DeviceContext {
     /// `WdmDeviceObject`: our own WDM device object (`WdfDeviceWdmGetDeviceObject`).
@@ -33,13 +33,13 @@ pub(crate) struct DeviceContext {
     device: AtomicPtr<WDFDEVICE__>,
     /// `HidReadQueue`: manual queue of parked upper `IOCTL_HID_READ_REPORT` requests.
     hid_read_queue: AtomicPtr<WDFQUEUE__>,
-    /// `HidReadBufferLookaside`: 1024-byte NonPagedPoolNx buffers for lower reads.
+    /// `HidReadBufferLookaside`: 1024-byte `NonPagedPoolNx` buffers for lower reads.
     hid_read_buffer_lookaside: AtomicPtr<WDFLOOKASIDE__>,
     /// `HidIoTarget`: the default (local) I/O target, set by the detour; NULL before it.
     hid_io_target: AtomicPtr<WDFIOTARGET__>,
     /// `HidTransportRecoveryTimer`: one-shot passive-level retry timer.
     hid_transport_recovery_timer: AtomicPtr<WDFTIMER__>,
-    /// `HidTransportRecoveryWorkItem`: re-issues a lower read at PASSIVE_LEVEL.
+    /// `HidTransportRecoveryWorkItem`: re-issues a lower read at `PASSIVE_LEVEL`.
     hid_transport_recovery_work_item: AtomicPtr<WDFWORKITEM__>,
     /// Every other `DEVICE_CONTEXT` member.
     pub(crate) state: DeviceState,
@@ -125,7 +125,7 @@ impl DeviceContext {
 ///
 /// # Safety
 /// `device` must be a live WDFDEVICE created by this driver's device-add (so it carries an
-/// initialized `DEVICE_CONTEXT`), called at IRQL <= DISPATCH_LEVEL. The reference must not outlive
+/// initialized `DEVICE_CONTEXT`), called at IRQL <= `DISPATCH_LEVEL`. The reference must not outlive
 /// the device; every caller uses it only for the duration of one WDF callback on that device (or of
 /// an object parented to it).
 pub(crate) unsafe fn device_context<'a>(device: WDFDEVICE) -> &'a DeviceContext {

@@ -16,8 +16,8 @@
 //! | `allocate_transfer_buffer` | `WdfMemoryCreate(WDF_NO_OBJECT_ATTRIBUTES, NonPagedPoolNx, 'PTPC', 4, ..)` (Device.c:530; P2 B3/B27) |
 //! | `control_transfer` | `WdfUsbTargetDeviceSendControlTransferSynchronously(UsbDevice, WDF_NO_HANDLE, NULL, ..)` (Device.c:566, 607) |
 //!
-//! IRQL: everything here is PASSIVE_LEVEL (PrepareHardware, D0Entry, D0Exit, and SET_FEATURE, which
-//! hidclass sends at PASSIVE_LEVEL). None of it is in a `PAGE` section, because D0Entry/D0Exit and the
+//! IRQL: everything here is `PASSIVE_LEVEL` (`PrepareHardware`, `D0Entry`, `D0Exit`, and `SET_FEATURE`, which
+//! hidclass sends at `PASSIVE_LEVEL`). None of it is in a `PAGE` section, because D0Entry/D0Exit and the
 //! I/O path call it from non-paged code (as in C).
 
 use core::ptr::{self, NonNull};
@@ -57,7 +57,7 @@ const TRANSFER_LENGTH: ULONG = {
     WELLSPRING_DATA_LEN as ULONG
 };
 
-/// The device's WDF USB objects for one PnP/power callback or one SET_FEATURE request.
+/// The device's WDF USB objects for one PnP/power callback or one `SET_FEATURE` request.
 pub(crate) struct UsbIo<'a> {
     device: WDFDEVICE,
     context: &'a DeviceContext,
@@ -68,7 +68,7 @@ pub(crate) struct UsbIo<'a> {
 
 impl<'a> UsbIo<'a> {
     /// # Safety
-    /// `device` is the live `WDFDEVICE` that owns `context`; the caller runs at PASSIVE_LEVEL whenever it
+    /// `device` is the live `WDFDEVICE` that owns `context`; the caller runs at `PASSIVE_LEVEL` whenever it
     /// calls a method that sends a synchronous request (control transfers, select config, target stop).
     pub(crate) const unsafe fn new(device: WDFDEVICE, context: &'a DeviceContext) -> Self {
         Self {
@@ -143,15 +143,13 @@ impl ControlTransfer for UsbIo<'_> {
             );
             return Err(status);
         }
-        match NonNull::new(buffer.cast::<[u8; WELLSPRING_DATA_LEN]>()) {
-            Some(buffer) => Ok(TransferBuffer { memory, buffer }),
-            None => {
-                // Impossible: WdfMemoryCreate succeeded without a buffer. Release the object.
-                // SAFETY: `memory` was just created by WdfMemoryCreate and is not used afterwards.
-                unsafe { call_unsafe_wdf_function_binding!(WdfObjectDelete, memory.cast()) };
-                Err(STATUS_INSUFFICIENT_RESOURCES)
-            }
-        }
+        let Some(buffer) = NonNull::new(buffer.cast::<[u8; WELLSPRING_DATA_LEN]>()) else {
+            // Impossible: WdfMemoryCreate succeeded without a buffer. Release the object.
+            // SAFETY: `memory` was just created by WdfMemoryCreate and is not used afterwards.
+            unsafe { call_unsafe_wdf_function_binding!(WdfObjectDelete, memory.cast()) };
+            return Err(STATUS_INSUFFICIENT_RESOURCES);
+        };
+        Ok(TransferBuffer { memory, buffer })
     }
 
     fn control_transfer(
@@ -407,7 +405,10 @@ impl UsbHardware for UsbIo<'_> {
             // SAFETY: `pipe` was just returned by WdfUsbInterfaceGetConfiguredPipe for the current
             // selection, so it is a live WDFUSBPIPE.
             unsafe {
-                call_unsafe_wdf_function_binding!(WdfUsbTargetPipeSetNoMaximumPacketSizeCheck, pipe)
+                call_unsafe_wdf_function_binding!(
+                    WdfUsbTargetPipeSetNoMaximumPacketSizeCheck,
+                    pipe
+                );
             };
         }
     }
@@ -507,13 +508,13 @@ impl UsbHardware for UsbIo<'_> {
 
 /// `WdfUsbTargetPipeGetIoTarget(Pipe)`: a `FORCEINLINE` in `wdfusb.h` (not in the WDF function table)
 /// whose body is `return (WDFIOTARGET) Pipe;`.
-fn pipe_io_target(pipe: WDFUSBPIPE) -> WDFIOTARGET {
+const fn pipe_io_target(pipe: WDFUSBPIPE) -> WDFIOTARGET {
     pipe.cast::<WDFIOTARGET__>()
 }
 
 /// `KeQueryPerformanceCounter(&x)` as the C calls it (Device.c:319, Interrupt.c:177): the return value
 /// (the counter) is discarded and `x` (the **frequency** out-parameter) is used. Spec B1, preserved: this
-/// is why ScanTime is always 0. Callable at any IRQL.
+/// is why `ScanTime` is always 0. Callable at any IRQL.
 pub(crate) fn query_performance_counter_out() -> i64 {
     let mut frequency = LARGE_INTEGER::default();
     // SAFETY: `frequency` is a valid out-parameter; KeQueryPerformanceCounter is callable at any IRQL.

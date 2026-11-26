@@ -1,5 +1,7 @@
-//! Replays `tests/fixtures/ioctl.txt` (61 records): dispatcher routing for every code, READ_REPORT
-//! pend / forward failure, FIFO service of pended reads, EvtIoStop, ReadersFailed.
+//! Replays `tests/fixtures/ioctl.txt` (61 records): dispatcher routing for every code, `READ_REPORT`
+//! pend / forward failure, FIFO service of pended reads, `EvtIoStop`, `ReadersFailed`.
+
+#![cfg(test)]
 
 mod common;
 
@@ -60,7 +62,7 @@ fn replay_route(r: &Record) -> &'static str {
             let report_id = num(r.req("xfer_report_id")) as u8;
             let outlen = num(r.req("outlen")) as usize;
             let inlen = num(r.req("inlen")) as usize;
-            let mut buf = [0u8; 8];
+            let mut buf = [0_u8; 8];
             let mut irp_read = false;
             let completion = if route == InternalIoctl::GetFeature {
                 get_feature(outlen, || {
@@ -113,7 +115,7 @@ fn replay_route(r: &Record) -> &'static str {
     }
 }
 
-/// The FIFO records are one scenario: three READ_REPORTs (50 bytes of 0xcc) pended, then four 1-finger
+/// The FIFO records are one scenario: three `READ_REPORTs` (50 bytes of 0xcc) pended, then four 1-finger
 /// packets, one per record; each record shows all three requests after its packet. The device is PID
 /// 0x027a (the outputs use x.min -6243 / y.max 7685).
 struct Fifo {
@@ -141,7 +143,7 @@ impl Fifo {
             && let Some(i) = self.queue.pop_front()
         {
             let (buf, done) = &mut self.reqs[i];
-            *done = Some(complete_read_report(&result, Ok(&mut buf[..])));
+            *done = Some(complete_read_report(&result, Ok(&mut **buf)));
         }
     }
 
@@ -149,17 +151,14 @@ impl Fifo {
         let id = r.id();
         for (i, (buf, done)) in self.reqs.iter().enumerate() {
             let req = kv(r.req(&format!("req{}", i + 1)));
-            match done {
-                Some(c) => {
-                    assert_eq!(req["completed"], "1", "{id} req{}", i + 1);
-                    assert_eq!(status(&req["status"]), c.status, "{id}");
-                    assert_eq!(num(&req["info"]) as usize, c.information, "{id}");
-                    assert_eq!(req["queued"], "0", "{id}");
-                }
-                None => {
-                    assert_eq!(req["completed"], "0", "{id} req{}", i + 1);
-                    assert_eq!(req["queued"], "1", "{id}");
-                }
+            if let Some(c) = done {
+                assert_eq!(req["completed"], "1", "{id} req{}", i + 1);
+                assert_eq!(status(&req["status"]), c.status, "{id}");
+                assert_eq!(num(&req["info"]) as usize, c.information, "{id}");
+                assert_eq!(req["queued"], "0", "{id}");
+            } else {
+                assert_eq!(req["completed"], "0", "{id} req{}", i + 1);
+                assert_eq!(req["queued"], "1", "{id}");
             }
             assert_eq!(
                 to_hex(buf),

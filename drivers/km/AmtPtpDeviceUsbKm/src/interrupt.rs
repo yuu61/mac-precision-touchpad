@@ -1,16 +1,16 @@
 //! The continuous reader's callbacks (Interrupt.c:89-264).
 //!
-//! `AmtPtpEvtUsbInterruptPipeReadComplete` runs at IRQL <= DISPATCH_LEVEL for every packet of the
+//! `AmtPtpEvtUsbInterruptPipeReadComplete` runs at IRQL <= `DISPATCH_LEVEL` for every packet of the
 //! interrupt pipe: nothing reachable from here is paged, blocks or allocates.
 //!
 //! Order (C → here):
-//! 1. length gate → [`input::process_packet`] returns `Discard`: drop the packet, the InputQueue is not
+//! 1. length gate → [`input::process_packet`] returns `Discard`: drop the packet, the `InputQueue` is not
 //!    touched;
 //! 2. `WdfMemoryGetBuffer(Buffer)` (the C calls it after the gate; it has no side effect);
 //! 3. `WdfIoQueueRetrieveNextRequest(InputQueue)`; none → the packet is lost;
 //! 4. `WdfRequestRetrieveOutputMemory`; failure → C leaks the request (B6), here it is completed with
 //!    that status (P2);
-//! 5. `KeQueryPerformanceCounter(&x)` → ScanTime (always 0, B1). The call is made before step 1 here
+//! 5. `KeQueryPerformanceCounter(&x)` → `ScanTime` (always 0, B1). The call is made before step 1 here
 //!    (`process_packet` needs it); it has no observable effect;
 //! 6. more than 5 fingers → `WdfRequestComplete(STATUS_DATA_ERROR)` (B8);
 //! 7. `WdfMemoryCopyFromBuffer(mem, 0, report, 50)`; failure → C leaks the request (B7), here it is
@@ -38,7 +38,7 @@ use crate::usb::query_performance_counter_out;
 
 /// `AmtPtpEvtUsbInterruptPipeReadComplete` (Interrupt.c:89-250): `EvtUsbTargetPipeReadComplete` of the
 /// continuous reader. `context` is the device context given at reader configuration. IRQL <=
-/// DISPATCH_LEVEL, non-paged.
+/// `DISPATCH_LEVEL`, non-paged.
 pub(crate) unsafe extern "C" fn evt_usb_interrupt_pipe_read_complete(
     _pipe: WDFUSBPIPE,
     buffer: WDFMEMORY,
@@ -174,7 +174,7 @@ pub(crate) unsafe extern "C" fn evt_usb_interrupt_pipe_read_complete(
 
 /// `AmtPtpEvtUsbInterruptReadersFailed` (Interrupt.c:252-264): `EvtUsbTargetPipeReadersFailed`. Returns
 /// TRUE ("reset the pipe and restart the readers"), whatever the status; the framework retries
-/// indefinitely. IRQL <= DISPATCH_LEVEL.
+/// indefinitely. IRQL <= `DISPATCH_LEVEL`.
 pub(crate) unsafe extern "C" fn evt_usb_interrupt_readers_failed(
     _pipe: WDFUSBPIPE,
     status: NTSTATUS,

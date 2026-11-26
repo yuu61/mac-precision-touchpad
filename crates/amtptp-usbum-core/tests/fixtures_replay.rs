@@ -12,6 +12,8 @@
 //!   mode switch. The port uses a 4-byte stack buffer (UM-B1/B5 P2), so there is no allocation.
 //! - `prev`/`target` (D0 records): only traced.
 
+#![cfg(test)]
+
 mod common;
 
 use std::collections::{BTreeMap, HashMap};
@@ -28,7 +30,7 @@ use amtptp_usbum_core::pnp::{
     CONTINUOUS_READER_NUM_PENDING_READS, GUID_DEVINTERFACE_AMTPTP_DEVICE, READERS_FAILED_RESULT,
     d0_entry, d0_exit, prepare_hardware,
 };
-use amtptp_usbum_core::state::{DeviceState, UsbDeviceDescriptor};
+use amtptp_usbum_core::state::{DeviceState, StateSnapshot, UsbDeviceDescriptor};
 use amtptp_usbum_core::status::{STATUS_INVALID_DEVICE_STATE, STATUS_SUCCESS};
 use common::{
     FAKE_DECIDED, FakeQueue, FakeReq, FakeStrings, FakeUsb, Rec, check_dev2, fake_decided, fixture,
@@ -79,7 +81,16 @@ impl Tally {
         skipped: &[(&'static str, usize)],
         fake_decided: usize,
     ) {
-        println!("{file}: {self:?}");
+        println!("{file}: {} records", self.total);
+        for (label, counts) in [
+            ("P2", &self.p2),
+            ("skipped", &self.skipped),
+            ("notes", &self.notes),
+        ] {
+            for (reason, count) in counts {
+                println!("  {label}: {reason} = {count}");
+            }
+        }
         assert_eq!(self.total, total, "{file}: record count");
         let p2: BTreeMap<_, _> = p2.iter().copied().collect();
         assert_eq!(self.p2, p2, "{file}: P2-fixed groups");
@@ -113,8 +124,8 @@ fn pid_of(rec: &Rec<'_>) -> u16 {
     rec.u("pid") as u16
 }
 
-/// The glue's `EvtIoDeviceControl` for everything but READ_REPORT. `None` = forwarded to the
-/// InputQueue (pending).
+/// The glue's `EvtIoDeviceControl` for everything but `READ_REPORT`. `None` = forwarded to the
+/// `InputQueue` (pending).
 fn dispatch(
     state: &DeviceState,
     code: u32,
@@ -364,7 +375,7 @@ fn ioctl_routing() {
         tally.total += 1;
         let case = rec.case();
         let state = device(pid_of(&rec), 0x05ac, 0x0105, (1, 2, 3));
-        state.restore(&Default::default());
+        state.restore(&StateSnapshot::default());
         let mut req = ioctl_request(&rec);
         let mut usb = FakeUsb::default();
         let mut strings = FakeStrings::new();
@@ -461,7 +472,7 @@ fn packets() -> HashMap<String, Vec<u8>> {
 }
 
 /// Runs one `Input` record (input files and sequences) on `state`/`usb` and checks everything it
-/// records. `lengths` are the pending READ_REPORT output lengths.
+/// records. `lengths` are the pending `READ_REPORT` output lengths.
 fn run_input(
     rec: &Rec<'_>,
     state: &DeviceState,
@@ -744,7 +755,7 @@ fn sequences() {
 // wire.txt
 // =================================================================================================
 
-/// The fake USB configuration of a PrepareHardware record (pipe layouts by case name, README
+/// The fake USB configuration of a `PrepareHardware` record (pipe layouts by case name, README
 /// "pipe-selection variants").
 fn prepare_usb(rec: &Rec<'_>, restart: bool) -> FakeUsb {
     use PipeType::{Bulk, Control, Interrupt, Isochronous};
@@ -793,7 +804,6 @@ fn lifecycle() {
         tally.total += 1;
         let case = rec.case();
         match rec.s("op") {
-            "DriverEntry" | "EvtDriverContextCleanup" | "EvtIoStop" => tally.skip(GLUE_ONLY),
             "EvtDeviceAdd" if case == "deviceadd" => {
                 let (d1, d2, d3, d4) = GUID_DEVINTERFACE_AMTPTP_DEVICE;
                 let guid = format!(
@@ -803,7 +813,9 @@ fn lifecycle() {
                 );
                 assert_eq!(guid, rec.s("devif"), "{case}: device interface GUID");
             }
-            "EvtDeviceAdd" => tally.skip(GLUE_ONLY),
+            "DriverEntry" | "EvtDriverContextCleanup" | "EvtIoStop" | "EvtDeviceAdd" => {
+                tally.skip(GLUE_ONLY);
+            }
             "EvtUsbTargetPipeReadersFailed" => {
                 assert_eq!(rec.flag("ret"), READERS_FAILED_RESULT, "{case}");
             }
@@ -850,7 +862,7 @@ fn lifecycle() {
                     "{case}: traits"
                 );
                 assert_eq!(rec.flag("usbdev"), usb.usb_created, "{case}: UsbDevice");
-                let nomaxpkt = if usb.pipes.as_ref().is_some_and(|p| p.is_empty()) {
+                let nomaxpkt = if usb.pipes.as_ref().is_some_and(std::vec::Vec::is_empty) {
                     "-".to_owned()
                 } else {
                     usb.visited

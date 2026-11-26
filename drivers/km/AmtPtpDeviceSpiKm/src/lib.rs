@@ -1,4 +1,4 @@
-//! AmtPtpDeviceSpiKm: KMDF Precision Touchpad driver for Apple SPI trackpads (C: `src/AmtPtpDeviceSpiKm`).
+//! `AmtPtpDeviceSpiKm`: KMDF Precision Touchpad driver for Apple SPI trackpads (C: `src/AmtPtpDeviceSpiKm`).
 //!
 //! A KMDF **lower filter** under `mshidkmdf.sys` on Apple's SPI HID child (`SPI\VID_05ac&PID_xxxx&MI_02`).
 //! It answers the HID-minidriver internal IOCTLs itself, with a synthetic identity (VID 0x8910 and its own
@@ -22,13 +22,12 @@
 //! - [`input`]: the read path: upstream reads, lower reads and their completion routine (Input.c).
 //!
 //! Code placement mirrors the C `#pragma alloc_text`: `DriverEntry` in `INIT`; device add, device
-//! creation, queue creation and the driver cleanup in `PAGE` (all PASSIVE_LEVEL only). Everything that can
-//! run at DISPATCH_LEVEL, and every PnP/power callback, is non-paged.
+//! creation, queue creation and the driver cleanup in `PAGE` (all `PASSIVE_LEVEL` only). Everything that can
+//! run at `DISPATCH_LEVEL`, and every PnP/power callback, is non-paged.
 //!
 //! Deliberate differences from the C driver are recorded in `docs/rust-port/spikm.md`.
 #![no_std]
 
-#[cfg(not(test))]
 extern crate wdk_panic; // #[panic_handler]: a panic is a bugcheck (0x52504E43).
 
 mod device;
@@ -52,17 +51,7 @@ tlg::define_provider!(
     id("9b319d80-fe25-41e4-80ef-7d8528f7f1b5")
 );
 
-/// Event keywords: the C WPP flag bits (Trace.h), so a session can filter the same categories.
-mod keyword {
-    /// `TRACE_DRIVER`: driver and device lifetime, PnP/power, the mode switch.
-    pub(crate) const DRIVER: u64 = 0x1;
-    /// `TRACE_DEVICE`: the lower read requests.
-    pub(crate) const DEVICE: u64 = 0x2;
-    /// `TRACE_QUEUE`: queues and IOCTL dispatch.
-    pub(crate) const QUEUE: u64 = 0x4;
-    /// `TRACE_HID_INPUT`: input report conversion.
-    pub(crate) const HID_INPUT: u64 = 0x8;
-}
+mod keyword;
 
 /// Driver entry point (C `DriverEntry`, Driver.c:26-98), called by `FxDriverEntry`
 /// (WdfDriverEntry.lib, the image entry point) after the KMDF 1.23 runtime is bound.
@@ -122,7 +111,7 @@ pub unsafe extern "system" fn driver_entry(
 }
 
 /// `AmtPtpDeviceSpiKmEvtDriverContextCleanup` (Driver.c:151-179): the `EvtCleanupCallback` of the WDF
-/// driver object. Runs at PASSIVE_LEVEL when the driver unloads (the C `WPP_CLEANUP` site).
+/// driver object. Runs at `PASSIVE_LEVEL` when the driver unloads (the C `WPP_CLEANUP` site).
 #[unsafe(link_section = "PAGE")]
 unsafe extern "C" fn evt_driver_context_cleanup(_driver_object: WDFOBJECT) {
     wdk::paged_code!();
@@ -135,7 +124,7 @@ unsafe extern "C" fn evt_driver_context_cleanup(_driver_object: WDFOBJECT) {
     PROVIDER.unregister();
 }
 
-/// `AmtPtpDeviceSpiKmEvtDeviceAdd` (Driver.c:100-149), PASSIVE_LEVEL.
+/// `AmtPtpDeviceSpiKmEvtDeviceAdd` (Driver.c:100-149), `PASSIVE_LEVEL`.
 ///
 /// `WdfFdoInitSetFilter`, then [`device::create_device`]. The C code also called
 /// `WdfPdoInitAllowForwardingRequestToParent`, a PDO-only DDI that has no effect on a filter FDO's

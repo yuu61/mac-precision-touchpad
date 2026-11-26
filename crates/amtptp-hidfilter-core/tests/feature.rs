@@ -1,5 +1,7 @@
-//! Replays `fixtures/feature.txt`: GET/SET_FEATURE for all 256 report IDs, every SET payload byte
+//! Replays `fixtures/feature.txt`: `GET/SET_FEATURE` for all 256 report IDs, every SET payload byte
 //! for 0x04 and 0x06, size and NULL edges, and the spec D.5 rows.
+
+#![cfg(test)]
 
 mod common;
 

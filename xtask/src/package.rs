@@ -11,7 +11,7 @@
 //! target/package/<arch>/AmtPtpHidFilter.symbols/ AmtPtpHidFilter.pdb
 //! ```
 //!
-//! The `.symbols` directories sit outside the package directories so Inf2Cat
+//! The `.symbols` directories sit outside the package directories so `Inf2Cat`
 //! does not see them. Each is emptied together with its package, so its PDBs
 //! always match that package's binaries. Both hold an `AmtPtpHidFilter.pdb`,
 //! because both packages ship `AmtPtpHidFilter.sys` and may be built at
@@ -70,13 +70,13 @@ pub enum InfKind {
 }
 
 impl InfKind {
-    pub const ALL: [InfKind; 2] = [InfKind::Universal, InfKind::HidFilter];
+    pub const ALL: [Self; 2] = [Self::Universal, Self::HidFilter];
 
     /// INF/CAT base name and package directory name.
-    pub fn name(self) -> &'static str {
+    pub const fn name(self) -> &'static str {
         match self {
-            InfKind::Universal => "AmtPtpDevice",
-            InfKind::HidFilter => "AmtPtpHidFilter",
+            Self::Universal => "AmtPtpDevice",
+            Self::HidFilter => "AmtPtpHidFilter",
         }
     }
 
@@ -87,10 +87,10 @@ impl InfKind {
     }
 
     /// Must match the INF's `[SourceDisksFiles]`.
-    fn binaries(self) -> &'static [Binary] {
+    const fn binaries(self) -> &'static [Binary] {
         match self {
-            InfKind::Universal => &[USB_KM, USB_UM, SPI_KM, HID_FILTER],
-            InfKind::HidFilter => &[HID_FILTER],
+            Self::Universal => &[USB_KM, USB_UM, SPI_KM, HID_FILTER],
+            Self::HidFilter => &[HID_FILTER],
         }
     }
 }
@@ -285,12 +285,12 @@ fn package_one(cx: &Context<'_>, arch: Arch, inf: InfKind) -> Result<(), String>
 
     // 7. Sign the catalog.
     if let (Some(signtool), Some(args)) = (&cx.signtool, &opts.sign) {
-        sign(signtool, args, std::slice::from_ref(&cat))?;
+        sign(signtool, args, core::slice::from_ref(&cat))?;
     }
     Ok(())
 }
 
-/// Inf2Cat writes the catalog name in lower case (`amtptpdevice.cat`). The
+/// `Inf2Cat` writes the catalog name in lower case (`amtptpdevice.cat`). The
 /// file system is case-insensitive, so that already works; rename it to the
 /// INF's `CatalogFile` spelling anyway so the package reads consistently.
 fn catalog_with_inf_case(pkg: &Path, cat_file: &str) -> Result<PathBuf, String> {
@@ -327,15 +327,15 @@ fn sign(signtool: &Path, args: &[String], files: &[PathBuf]) -> Result<(), Strin
     process::run_redacted(&mut cmd, "signtool sign", &["/p", "-p"])
 }
 
-/// IMAGE_DLLCHARACTERISTICS_FORCE_INTEGRITY (winnt.h).
+/// `IMAGE_DLLCHARACTERISTICS_FORCE_INTEGRITY` (winnt.h).
 const FORCE_INTEGRITY: u16 = 0x0080;
 
 /// wdk-build 0.6.0 (lib.rs:1305) links every driver with `/INTEGRITYCHECK`.
 /// link.exe cannot undo that: `/INTEGRITYCHECK:NO` is ignored (LNK4056) and
 /// still sets the flag. The C AmtPtpDeviceUsbUm.dll never had
-/// FORCE_INTEGRITY (shipped binary: DllCharacteristics 0x4160), and with the
+/// `FORCE_INTEGRITY` (shipped binary: `DllCharacteristics` 0x4160), and with the
 /// flag an unsigned or test-signed UMDF DLL fails to load with 577 (P1).
-/// So clear the bit in the packaged copy, before signtool and Inf2Cat hash it.
+/// So clear the bit in the packaged copy, before signtool and `Inf2Cat` hash it.
 /// The KM `.sys` images keep it: signatures are enforced for them anyway, and
 /// their non-zero PE checksum would have to be recomputed.
 fn clear_force_integrity(path: &Path) -> Result<(), String> {
@@ -345,31 +345,36 @@ fn clear_force_integrity(path: &Path) -> Result<(), String> {
 }
 
 fn clear_force_integrity_bytes(img: &mut [u8]) -> Result<(), String> {
-    let u16_at = |img: &[u8], o: usize| img.get(o..o + 2).map(|b| u16::from_le_bytes([b[0], b[1]]));
-    let u32_at = |img: &[u8], o: usize| {
-        img.get(o..o + 4)
-            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-    };
-    if img.get(0..2) != Some(b"MZ".as_slice()) {
+    if !img.starts_with(b"MZ") {
         return Err("not a PE image (no MZ)".into());
     }
-    let pe = u32_at(img, 0x3C).ok_or("truncated DOS header")? as usize;
-    if img.get(pe..pe + 4) != Some(b"PE\0\0".as_slice()) {
+    let pe = u32::from_le_bytes(
+        *img.get(0x3C..)
+            .and_then(<[u8]>::first_chunk)
+            .ok_or("truncated DOS header")?,
+    ) as usize;
+    let pe_header = img.get_mut(pe..).ok_or("no PE signature")?;
+    if !pe_header.starts_with(b"PE\0\0") {
         return Err("no PE signature".into());
     }
-    let opt = pe + 24; // after the signature (4) and IMAGE_FILE_HEADER (20)
-    if u16_at(img, opt) != Some(0x20B) {
+    // The optional header follows the 4-byte signature and 20-byte file header.
+    let optional = pe_header.get_mut(24..).ok_or("not a PE32+ image")?;
+    if optional
+        .first_chunk()
+        .map(|magic| u16::from_le_bytes(*magic))
+        != Some(0x20B)
+    {
         return Err("not a PE32+ image".into());
     }
     // A non-zero CheckSum would also have to be recomputed; the UMDF link sets none.
-    if u32_at(img, opt + 64) != Some(0) {
+    if optional.get(64..68) != Some([0; 4].as_slice()) {
         return Err("non-zero PE CheckSum; clearing FORCE_INTEGRITY would leave it stale".into());
     }
-    let off = opt + 70; // DllCharacteristics
-    let dc = u16_at(img, off).ok_or("truncated optional header")?;
-    img.get_mut(off..off + 2)
-        .ok_or("truncated optional header")?
-        .copy_from_slice(&(dc & !FORCE_INTEGRITY).to_le_bytes());
+    let characteristics = optional
+        .get_mut(70..)
+        .and_then(<[u8]>::first_chunk_mut)
+        .ok_or("truncated optional header")?;
+    *characteristics = (u16::from_le_bytes(*characteristics) & !FORCE_INTEGRITY).to_le_bytes();
     Ok(())
 }
 
@@ -419,8 +424,8 @@ fn unreplaced_token(line: &str) -> Option<&str> {
     })
 }
 
-/// Sanity-check stampinf's output: every keyword replaced, DriverVer and
-/// CatalogFile set, framework versions as requested.
+/// Sanity-check stampinf's output: every keyword replaced, `DriverVer` and
+/// `CatalogFile` set, framework versions as requested.
 fn check_stamped(text: &str, kmdf: &str, umdf: &str, cat: &str) -> Result<(), String> {
     let mut problems = Vec::new();
     let mut driver_ver = None;
@@ -479,7 +484,7 @@ fn print_tree(dir: &Path) -> Result<(), String> {
                 println!("  {indent}{name}/");
                 walk(&path, depth + 1)?;
             } else {
-                let len = e.metadata().map(|m| m.len()).unwrap_or(0);
+                let len = e.metadata().map_or(0, |m| m.len());
                 println!("  {indent}{name:<28} {len:>9}");
             }
         }
@@ -551,13 +556,13 @@ mod tests {
         }
     }
 
-    /// Minimal PE32+ header: e_lfanew = 0x40, optional header at 0x58.
+    /// Minimal PE32+ header: `e_lfanew` = 0x40, optional header at 0x58.
     fn pe32plus(dll_characteristics: u16, checksum: u32) -> Vec<u8> {
-        let mut img = vec![0u8; 0x100];
+        let mut img = vec![0_u8; 0x100];
         img[0..2].copy_from_slice(b"MZ");
-        img[0x3C..0x40].copy_from_slice(&0x40u32.to_le_bytes());
+        img[0x3C..0x40].copy_from_slice(&0x40_u32.to_le_bytes());
         img[0x40..0x44].copy_from_slice(b"PE\0\0");
-        img[0x58..0x5A].copy_from_slice(&0x20Bu16.to_le_bytes());
+        img[0x58..0x5A].copy_from_slice(&0x20B_u16.to_le_bytes());
         img[0x58 + 64..0x58 + 68].copy_from_slice(&checksum.to_le_bytes());
         img[0x58 + 70..0x58 + 72].copy_from_slice(&dll_characteristics.to_le_bytes());
         img
@@ -593,7 +598,7 @@ mod tests {
         no_pe[0x41] = b'X';
         assert!(clear_force_integrity_bytes(&mut no_pe).is_err());
         let mut pe32 = pe32plus(0x01E0, 0);
-        pe32[0x58..0x5A].copy_from_slice(&0x10Bu16.to_le_bytes());
+        pe32[0x58..0x5A].copy_from_slice(&0x10B_u16.to_le_bytes());
         assert!(clear_force_integrity_bytes(&mut pe32).is_err());
         let mut truncated = pe32plus(0x01E0, 0);
         truncated.truncate(0x58 + 71);

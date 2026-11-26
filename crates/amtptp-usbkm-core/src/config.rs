@@ -27,6 +27,7 @@ pub enum TrackpadType {
 
 impl TrackpadType {
     /// `HEADER_TYPEn` in bytes (AppleDefinition.h:30-34).
+    #[must_use]
     pub const fn header(self) -> i32 {
         match self {
             Self::Type1 => 26,
@@ -38,6 +39,7 @@ impl TrackpadType {
     }
 
     /// `FSIZE_TYPEn`, the size of one finger block in bytes (AppleDefinition.h:47-51).
+    #[must_use]
     pub const fn finger_size(self) -> i32 {
         match self {
             Self::Type1 | Self::Type2 | Self::Type3 => 28,
@@ -47,6 +49,7 @@ impl TrackpadType {
     }
 
     /// `BUTTON_TYPEn`, the offset of the button byte (AppleDefinition.h:37-41).
+    #[must_use]
     pub const fn button(self) -> i32 {
         match self {
             Self::Type1 => 0,
@@ -58,6 +61,7 @@ impl TrackpadType {
     }
 
     /// `DELTA_TYPEn`, the offset from a finger block to its `TRACKPAD_FINGER` struct (AppleDefinition.h:54-58).
+    #[must_use]
     pub const fn delta(self) -> i32 {
         match self {
             Self::Type4 => 2,
@@ -69,7 +73,7 @@ impl TrackpadType {
 /// `MAX_FINGERS` (AppleDefinition.h:72): finger blocks per packet the reader buffer is sized for.
 pub const MAX_FINGERS: usize = 16;
 /// `MAX_FINGER_ORIENTATION` (AppleDefinition.h:73).
-pub const MAX_FINGER_ORIENTATION: i32 = 16384;
+pub const MAX_FINGER_ORIENTATION: i32 = 0x4000;
 /// `USB_VENDOR_ID_APPLE` (AppleDefinition.h:3). Not compared at runtime.
 pub const USB_VENDOR_ID_APPLE: u16 = 0x05AC;
 /// `USB_DEVICE_ID_DEFAULT_FALLBACK` (AppleDefinition.h:10): `identification` of row 0.
@@ -235,6 +239,7 @@ pub const FALLBACK_CONFIG_INDEX: usize = 0;
 /// `AmtPtpGetDeviceConfig`: the index of the row whose `identification` equals `product_id`, scanning
 /// from row 0; [`FALLBACK_CONFIG_INDEX`] when no row matches (the C traces "Selected a generic fallback
 /// configuration" in that case).
+#[must_use]
 pub fn config_index_for_pid(product_id: u16) -> usize {
     // C compares `int identification` with the USHORT `idProduct` promoted to int.
     let id = i32::from(product_id);
@@ -245,17 +250,20 @@ pub fn config_index_for_pid(product_id: u16) -> usize {
 }
 
 /// The row for `index`, or `None` if out of range.
+#[must_use]
 pub fn config_by_index(index: usize) -> Option<&'static Bcm5974Config> {
     CONFIG_TABLE.get(index)
 }
 
 /// `AmtPtpGetDeviceConfig`: the row for `product_id` (never fails; unknown PIDs get the fallback row).
+#[must_use]
 pub fn config_for_pid(product_id: u16) -> &'static Bcm5974Config {
     config_by_index(config_index_for_pid(product_id)).unwrap_or(&FALLBACK_CONFIG)
 }
 
 /// `transferLength` of `AmtPtpConfigContReaderForInterruptEndPoint` (Interrupt.c:30-47):
 /// `HEADER_TYPEn + FSIZE_TYPEn * MAX_FINGERS` (526 for TYPE4). `size_t` arithmetic on positive constants.
+#[must_use]
 pub const fn reader_transfer_length(tp_type: TrackpadType) -> usize {
     // Both constants are small positive ints, so `as usize` is value preserving.
     tp_type.header() as usize + tp_type.finger_size() as usize * MAX_FINGERS

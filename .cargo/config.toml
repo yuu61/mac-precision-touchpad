@@ -1,2 +1,78 @@
 [alias]
 xtask = "run --quiet --package xtask --"
+
+[build]
+# Clippy policy for the host, KMDF, and UMDF workspaces. Driver configs append
+# their CRT flags to this array. Plain rustc ignores the Clippy tool lints.
+rustflags = [
+    "-Dclippy::all",
+    "-Dclippy::pedantic",
+    "-Dclippy::nursery",
+    "-Dclippy::restriction",
+    # This lint warns about enabling the restriction group itself.
+    "-Aclippy::blanket_clippy_restriction_lints",
+
+    # Keep the normal Rust syntax for tail expressions, match ergonomics,
+    # generic bounds, visibility and shadowing during type refinement.
+    "-Aclippy::implicit_return",
+    "-Aclippy::pattern_type_mismatch",
+    "-Aclippy::inline_trait_bounds",
+    "-Aclippy::pub_with_shorthand",
+    "-Aclippy::redundant_pub_crate",
+    "-Aclippy::field_scoped_visibility_modifiers",
+    "-Aclippy::rest_pattern_accessible_field",
+    # Use an underscore between numeric literals and their type suffixes.
+    "-Aclippy::separated_literal_suffix",
+    "-Aclippy::shadow_reuse",
+    "-Aclippy::shadow_unrelated",
+    # Both semicolon-placement lints apply to unsafe blocks. Use rustfmt.
+    "-Aclippy::semicolon_inside_block",
+    "-Aclippy::semicolon_outside_block",
+    # Organize items by driver operation. Keep helpers that document a step,
+    # public re-exports, and descriptive names at module boundaries.
+    "-Aclippy::arbitrary_source_item_ordering",
+    "-Aclippy::definition_in_module_root",
+    "-Aclippy::single_call_fn",
+    "-Aclippy::pub_use",
+    "-Aclippy::module_name_repetitions",
+    "-Aclippy::missing_docs_in_private_items",
+    "-Aclippy::too_long_first_doc_paragraph",
+    # Coordinate formulas, protocol test vectors, and borrow signatures use
+    # conventional short names. The compiler can infer unambiguous literals.
+    "-Aclippy::min_ident_chars",
+    "-Aclippy::single_char_lifetime_names",
+    "-Aclippy::default_numeric_fallback",
+    # Internal crates can use exhaustive protocol types and let the compiler
+    # check any new variants. Function boundaries need no blanket inline hint.
+    "-Aclippy::exhaustive_enums",
+    "-Aclippy::exhaustive_structs",
+    "-Aclippy::missing_inline_in_public_items",
+    # Use trait defaults and preserve independently set hardware flags.
+    "-Aclippy::missing_trait_methods",
+    "-Aclippy::struct_excessive_bools",
+    # Preserve byte order, narrowing, sign extension, and integer division at
+    # the C/WDK and wire boundaries. Lossless cast suggestions remain enabled.
+    "-Aclippy::as_conversions",
+    "-Aclippy::cast_possible_truncation",
+    "-Aclippy::cast_possible_wrap",
+    "-Aclippy::cast_sign_loss",
+    "-Aclippy::little_endian_bytes",
+    "-Aclippy::big_endian_bytes",
+    "-Aclippy::integer_division",
+    "-Aclippy::integer_division_remainder_used",
+    # Bounded packet offsets, widened operands, and test counters produce
+    # repeated false positives. Use checked operations for unbounded offsets.
+    "-Aclippy::arithmetic_side_effects",
+    # One safety contract can cover a sequence of dependent WDF operations.
+    "-Aclippy::multiple_unsafe_ops_per_block",
+    # Tests are separate Cargo targets, and equality assertions log operands.
+    "-Aclippy::tests_outside_test_module",
+    "-Aclippy::missing_assert_message",
+    # xtask and build scripts write CLI output and Cargo directives.
+    "-Aclippy::print_stdout",
+    "-Aclippy::print_stderr",
+    # Error paths can use either ? or an explicit branch. Host tests use std.
+    "-Aclippy::question_mark_used",
+    "-Aclippy::option_if_let_else",
+    "-Aclippy::std_instead_of_alloc",
+]

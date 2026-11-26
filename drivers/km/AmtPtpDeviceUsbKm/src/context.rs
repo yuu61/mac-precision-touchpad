@@ -1,7 +1,7 @@
 //! The device context: the port of the C `DEVICE_CONTEXT` (Device.h:25-47).
 //!
 //! The hardware-independent fields live in [`DeviceState`] (core). The WDF handles stay here. The C
-//! context has no locking although the reader completion (≤ DISPATCH_LEVEL), the parallel I/O queue and
+//! context has no locking although the reader completion (≤ `DISPATCH_LEVEL`), the parallel I/O queue and
 //! the PnP/power callbacks use it concurrently, so every field is atomic (port policy P2 "atomics with the same
 //! semantics", port record KM-X1): handles are `AtomicPtr` with `Relaxed` ordering, which is the plain
 //! pointer load/store the C compiler emits. The context is written once with `ptr.write` right after
@@ -30,13 +30,13 @@ const RELAXED: Ordering = Ordering::Relaxed;
 
 /// Per-device context (`DEVICE_CONTEXT`).
 pub(crate) struct DeviceContext {
-    /// `UsbDevice`: created by the first PrepareHardware, reused on restart.
+    /// `UsbDevice`: created by the first `PrepareHardware`, reused on restart.
     usb_device: AtomicPtr<WDFUSBDEVICE__>,
     /// `InterruptPipe`: the continuous-reader pipe (NULL until selected; reset at every reselection).
     interrupt_pipe: AtomicPtr<WDFUSBPIPE__>,
     /// `UsbInterface`: the selected interface.
     usb_interface: AtomicPtr<WDFUSBINTERFACE__>,
-    /// `InputQueue`: the manual queue of pended READ_REPORTs.
+    /// `InputQueue`: the manual queue of pended `READ_REPORTs`.
     input_queue: AtomicPtr<WDFQUEUE__>,
     /// Everything else (core).
     pub(crate) state: DeviceState,
@@ -62,7 +62,7 @@ impl DeviceContext {
     ///
     /// # Safety
     /// `device` is a live `WDFDEVICE` created by [`crate::device`] (its context was initialized with
-    /// `ptr.write` before any callback that calls this can run); IRQL <= DISPATCH_LEVEL. The returned
+    /// `ptr.write` before any callback that calls this can run); IRQL <= `DISPATCH_LEVEL`. The returned
     /// reference must not outlive the device.
     pub(crate) unsafe fn of<'a, H>(device: *mut H) -> Option<&'a Self> {
         // SAFETY: live WDF handle and IRQL per the caller contract.

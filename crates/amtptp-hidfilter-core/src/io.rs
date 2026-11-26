@@ -71,23 +71,32 @@ pub trait FilterIo {
     /// `WdfRequestSetInformation(request, information)`.
     fn set_information(&mut self, request: Self::Request, information: usize);
     /// `WdfRequestRetrieveOutputMemory(request, &memory)`.
+    ///
+    /// # Errors
+    /// Returns the WDF failure status if the request has no retrievable output memory.
     fn retrieve_output_memory(&mut self, request: Self::Request) -> Result<Self::Memory, NtStatus>;
     /// `WdfMemoryCopyFromBuffer(memory, 0, source, source.len())`.
     fn copy_to_memory(&mut self, memory: Self::Memory, source: &[u8]) -> NtStatus;
     /// `WdfRequestRetrieveOutputBuffer(request, minimum_length, &buffer, NULL)`; the slice has at least
     /// `minimum_length` bytes (the driver glue gives exactly `minimum_length`, because `Length` is NULL).
+    ///
+    /// # Errors
+    /// Returns the WDF failure status if the buffer cannot be retrieved or is too short.
     fn retrieve_output_buffer(
         &mut self,
         request: Self::Request,
         minimum_length: usize,
     ) -> Result<&mut [u8], NtStatus>;
-    /// `(PHID_XFER_PACKET)WdfRequestWdmGetIrp(request)->UserBuffer` for GET_FEATURE; `None` if NULL.
+    /// `(PHID_XFER_PACKET)WdfRequestWdmGetIrp(request)->UserBuffer` for `GET_FEATURE`; `None` if NULL.
     fn get_feature_packet(&mut self, request: Self::Request) -> Option<XferPacketMut<'_>>;
-    /// `(PHID_XFER_PACKET)WdfRequestWdmGetIrp(request)->UserBuffer` for SET_FEATURE; `None` if NULL.
+    /// `(PHID_XFER_PACKET)WdfRequestWdmGetIrp(request)->UserBuffer` for `SET_FEATURE`; `None` if NULL.
     fn set_feature_packet(&mut self, request: Self::Request) -> Option<XferPacket<'_>>;
     /// `WdfRequestForwardToIoQueue(request, HidReadQueue)`.
     fn forward_to_read_queue(&mut self, request: Self::Request) -> NtStatus;
     /// `WdfIoQueueRetrieveNextRequest(HidReadQueue, &request)`.
+    ///
+    /// # Errors
+    /// Returns the WDF failure status if the queue is empty or cannot supply a request.
     fn retrieve_next_parked_read(&mut self) -> Result<Self::Request, NtStatus>;
     /// `WdfRequestFormatRequestUsingCurrentType(request)`.
     fn format_using_current_type(&mut self, request: Self::Request);
@@ -100,9 +109,15 @@ pub trait FilterIo {
     // ---- lower reads (Input.c:39-117) ----------------------------------------------------------
 
     /// `WdfRequestCreate(attributes{WORKER_REQUEST_CONTEXT, ParentObject = device}, HidIoTarget)`.
+    ///
+    /// # Errors
+    /// Returns the WDF failure status if the request cannot be created.
     fn create_lower_read(&mut self) -> Result<Self::LowerRead, NtStatus>;
     /// `WdfMemoryCreateFromLookaside(HidReadBufferLookaside)`; on success also stores
     /// `DeviceContext` and `RequestMemory` in the request context.
+    ///
+    /// # Errors
+    /// Returns the WDF failure status if the buffer cannot be allocated.
     fn create_lower_read_memory(
         &mut self,
         read: Self::LowerRead,
@@ -145,8 +160,14 @@ pub trait FilterIo {
     // ---- mode switch (Device.c:371-418) --------------------------------------------------------
 
     /// `WdfRequestCreate(WDF_NO_OBJECT_ATTRIBUTES, HidIoTarget, &request)`.
+    ///
+    /// # Errors
+    /// Returns the WDF failure status if the request cannot be created.
     fn create_mode_switch_request(&mut self) -> Result<Self::ModeSwitchRequest, NtStatus>;
     /// `WdfMemoryCreatePreallocated(attributes{ParentObject = request}, packet.as_mut_ptr(), 32)`.
+    ///
+    /// # Errors
+    /// Returns the WDF failure status if the transfer packet cannot be wrapped in WDF memory.
     fn create_mode_switch_memory(
         &mut self,
         request: Self::ModeSwitchRequest,

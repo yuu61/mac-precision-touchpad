@@ -1,11 +1,13 @@
 //! Replays `descriptors.txt`: `IOCTL_HID_GET_DEVICE_DESCRIPTOR`, `IOCTL_HID_GET_REPORT_DESCRIPTOR` and
-//! `IOCTL_HID_GET_DEVICE_ATTRIBUTES` for every PID and ReportType, buffer sizes and injected states.
+//! `IOCTL_HID_GET_DEVICE_ATTRIBUTES` for every PID and `ReportType`, buffer sizes and injected states.
 //!
 //! The device config is built through [`DeviceConfig::identify`] / [`DeviceConfig::apply_desired_report_type`]
-//! where the record says the real PrepareHardware set it (`inj=-`); `inj=pid|rt` records write the field
+//! where the record says the real `PrepareHardware` set it (`inj=-`); `inj=pid|rt` records write the field
 //! directly, as the harness did. The output-buffer steps are the KMDF model from the fixture README:
 //! `WdfRequestRetrieveOutputMemory` fails for length 0, `WdfMemoryCopyFromBuffer` for a buffer shorter
 //! than the copy, `WdfRequestRetrieveOutputBuffer(32)` for a buffer shorter than 32.
+
+#![cfg(test)]
 
 mod common;
 
@@ -26,9 +28,9 @@ fn config_for(pid: u16, rt: u32, ver: u16, inj: &str) -> DeviceConfig {
     let mut cfg = DeviceConfig::new();
     // Real PrepareHardware with the record's PID/version (lower attributes VID 05ac).
     let real_pid = if inj == "pid" { 0x0272 } else { pid };
-    let mut attrs = [0u8; 32];
-    attrs[..4].copy_from_slice(&32u32.to_le_bytes());
-    attrs[4..6].copy_from_slice(&0x05acu16.to_le_bytes());
+    let mut attrs = [0_u8; 32];
+    attrs[..4].copy_from_slice(&32_u32.to_le_bytes());
+    attrs[4..6].copy_from_slice(&0x05ac_u16.to_le_bytes());
     attrs[6..8].copy_from_slice(&real_pid.to_le_bytes());
     attrs[8..10].copy_from_slice(&ver.to_le_bytes());
     assert_eq!(cfg.identify(STATUS_SUCCESS, &attrs), Ok(()));
@@ -101,7 +103,11 @@ fn descriptors_and_attributes() {
                     (STATUS_SUCCESS, DEVICE_ATTRIBUTES_INFORMATION)
                 }
             }
-            other => panic!("{ctx}: unexpected {other:?}"),
+            other @ (InternalIoctl::ReadReport
+            | InternalIoctl::GetString
+            | InternalIoctl::GetFeature
+            | InternalIoctl::SetFeature
+            | InternalIoctl::NotSupported) => panic!("{ctx}: unexpected {other:?}"),
         };
         if status != STATUS_SUCCESS && wdf.is_empty() {
             // Driver-decided errors only come from injected (unreachable) context states.

@@ -24,11 +24,11 @@ pub const STATUS_BUFFER_TOO_SMALL: NtStatus = nt(0xC000_0023);
 /// `STATUS_UNKNOWN_REVISION` (0xC0000058): the unreachable `transferLength <= 0` branch of the C reader
 /// setup. Kept for completeness; no code path returns it.
 pub const STATUS_UNKNOWN_REVISION: NtStatus = nt(0xC000_0058);
-/// `STATUS_NOT_SUPPORTED` (0xC00000BB): unknown IOCTL, unknown GET_FEATURE report ID.
+/// `STATUS_NOT_SUPPORTED` (0xC00000BB): unknown IOCTL, unknown `GET_FEATURE` report ID.
 pub const STATUS_NOT_SUPPORTED: NtStatus = nt(0xC000_00BB);
 /// `STATUS_INVALID_DEVICE_STATE` (0xC0000184): unknown PID, no interrupt pipe, no HID descriptor.
 pub const STATUS_INVALID_DEVICE_STATE: NtStatus = nt(0xC000_0184);
-/// `STATUS_INVALID_BUFFER_SIZE` (0xC0000206): short GET_STRING input, short GET_FEATURE input/report
+/// `STATUS_INVALID_BUFFER_SIZE` (0xC0000206): short `GET_STRING` input, short `GET_FEATURE` input/report
 /// buffer (checks made by the driver itself).
 pub const STATUS_INVALID_BUFFER_SIZE: NtStatus = nt(0xC000_0206);
 /// `STATUS_NO_MORE_ENTRIES` (0x8000001A): what `WdfIoQueueRetrieveNextRequest` returns on an empty
@@ -36,6 +36,7 @@ pub const STATUS_INVALID_BUFFER_SIZE: NtStatus = nt(0xC000_0206);
 pub const STATUS_NO_MORE_ENTRIES: NtStatus = nt(0x8000_001A);
 
 /// `NT_SUCCESS(status)`: true for success and informational statuses (`status >= 0`).
+#[must_use]
 pub const fn nt_success(status: NtStatus) -> bool {
     status >= 0
 }

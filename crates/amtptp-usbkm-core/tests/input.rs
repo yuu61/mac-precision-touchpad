@@ -1,9 +1,11 @@
 //! Replays `tests/fixtures/input_<row>.txt`: reader completion → PTP input report.
 //!
 //! Model of one record (README "input_<row>.txt"): bring-up to D0 for `pid` through the core lifecycle,
-//! set the record's driver state (`st_in`), pend `npend` READ_REPORTs (the first with `outlen` bytes of
+//! set the record's driver state (`st_in`), pend `npend` `READ_REPORTs` (the first with `outlen` bytes of
 //! `prefill`), deliver the packet, and compare the first request's completion and buffer, the queue depth
 //! and the state afterwards.
+
+#![cfg(test)]
 
 mod common;
 
@@ -16,7 +18,7 @@ use amtptp_usbkm_core::status::{Completion, STATUS_BUFFER_TOO_SMALL};
 use common::fake::FakeHw;
 use common::{Record, Tally, hex, kv, load, num, status, to_hex};
 
-/// A pended READ_REPORT: its output buffer and how it ended.
+/// A pended `READ_REPORT`: its output buffer and how it ended.
 struct PendedRead {
     buf: Vec<u8>,
     completion: Option<Completion>,
@@ -121,7 +123,7 @@ fn replay(case: &Case<'_>, prev_out: Option<&str>) -> &'static str {
                 let output = if req.buf.is_empty() {
                     Err(STATUS_BUFFER_TOO_SMALL)
                 } else {
-                    Ok(&mut req.buf[..])
+                    Ok(&mut *req.buf)
                 };
                 req.completion = Some(complete_read_report(&result, output));
                 first = Some(req);
@@ -255,7 +257,7 @@ fn replay_file(name: &str, total: usize, expected: &[(&str, usize)]) {
 
 /// Per file: 1 defaults line, 1000 random records, the edge groups. ffff has 11 extra fallback-PID
 /// golden-B records.
-fn expected(edge: usize) -> [(&'static str, usize); 7] {
+const fn expected(edge: usize) -> [(&'static str, usize); 7] {
     [
         ("defaults_line", 1),
         ("driver/edge", edge),

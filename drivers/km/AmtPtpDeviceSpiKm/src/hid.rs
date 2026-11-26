@@ -1,4 +1,4 @@
-//! The HID IOCTL handlers (C: Hid.c). All of them run at IRQL <= DISPATCH_LEVEL from the internal-IOCTL
+//! The HID IOCTL handlers (C: Hid.c). All of them run at IRQL <= `DISPATCH_LEVEL` from the internal-IOCTL
 //! dispatcher, so none is pageable (the C `PAGED_CODE()` and `_IRQL_requires_(PASSIVE_LEVEL)` annotations
 //! were wrong: SPI-B22, SPI-B25).
 //!
@@ -93,7 +93,7 @@ fn trace_hid_failure(step: &[u8], what: &[u8], status: NTSTATUS) {
 
 /// `AmtPtpGetHidDescriptor` (Hid.c:107-304), `IOCTL_HID_GET_DEVICE_DESCRIPTOR`: the 9-byte HID
 /// descriptor `09 21 00 01 00 01 22 f5 01`, Information 9; a PID outside the family switch gives
-/// `STATUS_NOT_FOUND` (unreachable after a successful PrepareHardware).
+/// `STATUS_NOT_FOUND` (unreachable after a successful `PrepareHardware`).
 pub(crate) fn get_hid_descriptor(context: &DeviceContext, request: &Request) -> NTSTATUS {
     copy_descriptor(
         request,
@@ -224,7 +224,7 @@ pub(crate) fn report_features(request: &Request) -> NTSTATUS {
         // to the caller's memory is created; bytes past `reply.write` stay
         // untouched, as in C.
         unsafe {
-            copy_nonoverlapping(reply.write.as_ptr(), packet.reportBuffer, reply.write.len())
+            copy_nonoverlapping(reply.write.as_ptr(), packet.reportBuffer, reply.write.len());
         };
     }
     if !NT_SUCCESS(reply.status) {
@@ -252,7 +252,7 @@ pub(crate) fn set_features(context: &DeviceContext, request: &Request) -> NTSTAT
         Ok(packet) => packet,
         Err(status) => return status,
     };
-    let mut report = [0u8; SET_FEATURE_READ_LEN];
+    let mut report = [0_u8; SET_FEATURE_READ_LEN];
     let readable = usize::try_from(packet.reportBufferLen)
         .unwrap_or(usize::MAX)
         .min(SET_FEATURE_READ_LEN);
@@ -268,7 +268,7 @@ pub(crate) fn set_features(context: &DeviceContext, request: &Request) -> NTSTAT
                 packet.reportBuffer.cast_const(),
                 report.as_mut_ptr(),
                 readable,
-            )
+            );
         };
         report.get(..readable)
     };

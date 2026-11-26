@@ -105,13 +105,18 @@ cargo xtask help
   `package/AmtPtpHidFilter.inx` with AmtPtpHidFilter only. The default `all` packages both.
 - `test`: runs these steps, all of them, then reports every failure:
   - `cargo test --workspace` in the host workspace (core crates and xtask);
-  - `cargo clippy --workspace --all-targets -- -D warnings` in the host workspace;
-  - `cargo clippy -- -D warnings` in `drivers/km` and in `drivers/um`.
+  - Clippy on all host targets, including integration tests.
+  - Clippy in both driver workspaces via `clippy-driver` as the compiler wrapper.
+    This also checks the shared `wdf-support` and `rc-embed` crates with each WDK model.
 
-  Clippy in a driver workspace lints only that workspace's members, not the path dependencies
-  `drivers/wdf-support` and `drivers/rc-embed`. To lint those, run
-  `cargo check --config "build.rustc-wrapper='<toolchain>/bin/clippy-driver.exe'"` in the
-  driver workspace.
+  [`.cargo/config.toml`](../../.cargo/config.toml) enables the `all`, `pedantic`, `nursery`, and
+  `restriction` groups and records the reasons for individual exceptions. The Cargo manifests
+  enable the `cargo` group and check dependency versions at the workspace level.
+  [`clippy.toml`](../../clippy.toml) configures the lints, including allowances for test
+  assertions. Warnings fail `cargo xtask test`. The strict profile was verified with Clippy 1.100.
+  Fix lint findings in the code. For an unavoidable local exception, use
+  `#[expect(lint, reason = "...")]` where the lint reliably fires. Document recurring
+  exceptions once in the shared configuration.
 
 ### Package layout
 

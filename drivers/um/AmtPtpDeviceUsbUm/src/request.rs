@@ -14,7 +14,7 @@
 //! a zero-length buffer, `STATUS_INVALID_BUFFER_SIZE` from `WdfMemoryCopyFromBuffer` into a short buffer)
 //! comes from WDF itself: the glue never checks lengths in place of the framework.
 //!
-//! With `UmdfMethodNeitherAction=Copy` (INF) the reflector copies the METHOD_NEITHER HID IOCTL buffers,
+//! With `UmdfMethodNeitherAction=Copy` (INF) the reflector copies the `METHOD_NEITHER` HID IOCTL buffers,
 //! which is what makes `WdfRequestRetrieve*Memory` work for them; input and output are separate buffers.
 
 use core::borrow::Borrow;
@@ -44,7 +44,7 @@ pub(crate) unsafe fn memory_buffer(memory: WDFMEMORY) -> (*mut u8, usize) {
 /// # Safety
 /// If `bytes` is non-null and `len` > 0, `bytes..bytes + len` must be readable, initialized memory
 /// that nobody writes for the lifetime `'a`.
-pub(crate) unsafe fn slice_or_empty<'a>(bytes: *const u8, len: usize) -> &'a [u8] {
+pub(crate) const unsafe fn slice_or_empty<'a>(bytes: *const u8, len: usize) -> &'a [u8] {
     if bytes.is_null() || len == 0 {
         &[]
     } else {
@@ -58,7 +58,7 @@ pub(crate) unsafe fn slice_or_empty<'a>(bytes: *const u8, len: usize) -> &'a [u8
 /// # Safety
 /// If `bytes` is non-null and `len` > 0, `bytes..bytes + len` must be writable memory that nothing
 /// else accesses for the lifetime `'a`.
-pub(crate) unsafe fn slice_mut_or_empty<'a>(bytes: *mut u8, len: usize) -> &'a mut [u8] {
+pub(crate) const unsafe fn slice_mut_or_empty<'a>(bytes: *mut u8, len: usize) -> &'a mut [u8] {
     if bytes.is_null() || len == 0 {
         &mut []
     } else {
@@ -68,7 +68,7 @@ pub(crate) unsafe fn slice_mut_or_empty<'a>(bytes: *mut u8, len: usize) -> &'a m
 }
 
 /// [`HidRequest`] over a framework-delivered request: borrowed (`R = &Request`, the default queue's
-/// dispatcher completes it) or owned (`R = Request`, a READ_REPORT retrieved from the InputQueue).
+/// dispatcher completes it) or owned (`R = Request`, a `READ_REPORT` retrieved from the `InputQueue`).
 pub(crate) struct RequestIo<R> {
     request: R,
     /// Cached result of `WdfRequestRetrieveInputMemory` (NULL until retrieved successfully).
@@ -79,7 +79,7 @@ pub(crate) struct RequestIo<R> {
 
 impl<R: Borrow<Request>> RequestIo<R> {
     /// Wraps `request`; nothing is retrieved yet.
-    pub(crate) fn new(request: R) -> Self {
+    pub(crate) const fn new(request: R) -> Self {
         Self {
             request,
             input_memory: null_mut(),

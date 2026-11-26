@@ -1,8 +1,12 @@
-//! Shared test support: fixture record parser, a fake UMDF framework (requests, the READ_REPORT queue)
+//! Shared test support: fixture record parser, a fake UMDF framework (requests, the `READ_REPORT` queue)
 //! and a fake USB device, modelled exactly as described in `tests/fixtures/README.md`.
 
-#![allow(dead_code)]
+#![allow(
+    dead_code,
+    reason = "Each integration test target uses a different subset of these helpers"
+)]
 
+use core::fmt::Write as _;
 use std::collections::VecDeque;
 
 use amtptp_usbum_core::io::{
@@ -143,13 +147,18 @@ pub fn hex(s: &str) -> Vec<u8> {
     (0..s.len())
         .step_by(2)
         .map(|i| {
-            u8::from_str_radix(&s[i..i + 2], 16).unwrap_or_else(|e| panic!("bad hex {s}: {e}"))
+            u8::from_str_radix(s.get(i..i + 2).expect("ASCII hex bytes"), 16)
+                .unwrap_or_else(|e| panic!("bad hex {s}: {e}"))
         })
         .collect()
 }
 
 pub fn to_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    let mut hex = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(hex, "{byte:02x}").expect("formatting hex into a String");
+    }
+    hex
 }
 
 pub fn parse_u(v: &str) -> u64 {
@@ -251,7 +260,7 @@ impl HidRequest for FakeReq {
     }
 }
 
-/// The manual InputQueue.
+/// The manual `InputQueue`.
 #[derive(Default)]
 pub struct FakeQueue {
     pub pending: VecDeque<FakeReq>,
@@ -259,7 +268,7 @@ pub struct FakeQueue {
 }
 
 impl FakeQueue {
-    /// Queue of READ_REPORT requests with the given output lengths, pre-filled with 0xee.
+    /// Queue of `READ_REPORT` requests with the given output lengths, pre-filled with 0xee.
     pub fn with_lengths(lengths: &[usize]) -> Self {
         Self {
             pending: lengths
@@ -382,7 +391,7 @@ impl FakeUsb {
     }
 
     pub fn set_pipes(&mut self, pipes: Option<Vec<PipeType>>) {
-        self.visited = vec![false; pipes.as_ref().map_or(1, |p| p.len())];
+        self.visited = vec![false; pipes.as_ref().map_or(1, std::vec::Vec::len)];
         self.pipes = pipes;
     }
 }
@@ -505,7 +514,7 @@ impl UsbTargetSetup for FakeUsb {
     }
 }
 
-/// GET_STRING device strings (README "Device model").
+/// `GET_STRING` device strings (README "Device model").
 pub struct FakeStrings {
     pub fail_all: Option<NtStatus>,
     pub queries: Vec<String>,
@@ -514,7 +523,7 @@ pub struct FakeStrings {
 }
 
 impl FakeStrings {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             fail_all: None,
             queries: Vec::new(),
@@ -522,7 +531,7 @@ impl FakeStrings {
         }
     }
 
-    pub fn string(index: u8) -> Option<&'static str> {
+    pub const fn string(index: u8) -> Option<&'static str> {
         match index {
             1 => Some("Apple Inc."),
             2 => Some("Apple Internal Keyboard / Trackpad"),

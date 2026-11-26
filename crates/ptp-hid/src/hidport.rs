@@ -2,7 +2,7 @@
 //! `pshpack1`) and `HID_DEVICE_ATTRIBUTES` (32 bytes), plus the `hidport.h` descriptor-type and string-ID
 //! constants.
 //!
-//! wdk-sys generates `hidport.h` only for WDM/KMDF, not for UMDF (WDR#355), so UsbUm cannot get these
+//! wdk-sys generates `hidport.h` only for WDM/KMDF, not for UMDF (WDR#355), so `UsbUm` cannot get these
 //! types from wdk-sys. Every driver can use the codecs here instead.
 
 use crate::BufferTooSmall;
@@ -63,6 +63,7 @@ pub struct HidDescriptor {
 impl HidDescriptor {
     /// The HID descriptor all four C drivers use, `{0x09, 0x21, 0x0100, 0x00, 0x01, {0x22, len}}`, for a
     /// report descriptor of `report_length` bytes.
+    #[must_use]
     pub const fn new(report_length: u16) -> Self {
         Self {
             b_length: HID_DESCRIPTOR_LEN as u8, // 9, fits
@@ -76,6 +77,7 @@ impl HidDescriptor {
     }
 
     /// Encodes the 9 wire bytes.
+    #[must_use]
     pub const fn to_bytes(self) -> [u8; HID_DESCRIPTOR_LEN] {
         let [bcd0, bcd1] = self.bcd_hid.to_le_bytes();
         let [len0, len1] = self.w_report_length.to_le_bytes();
@@ -94,6 +96,7 @@ impl HidDescriptor {
 
     /// Decodes the first 9 bytes of `buf`. Returns `None` if `buf` is shorter than 9 bytes. No field is
     /// validated.
+    #[must_use]
     pub const fn from_bytes(buf: &[u8]) -> Option<Self> {
         match buf.first_chunk::<HID_DESCRIPTOR_LEN>() {
             Some(
@@ -124,6 +127,7 @@ impl HidDescriptor {
 
 /// The 9-byte HID descriptor for a report descriptor of `report_length` bytes:
 /// `09 21 00 01 00 01 22 lo hi`.
+#[must_use]
 pub const fn hid_descriptor(report_length: u16) -> [u8; HID_DESCRIPTOR_LEN] {
     HidDescriptor::new(report_length).to_bytes()
 }
@@ -132,13 +136,13 @@ const _: () = assert!(REPORT_DESCRIPTOR_U32_ID_UMAPP_LEN <= u16::MAX as usize);
 const _: () = assert!(REPORT_DESCRIPTOR_U32_ID_LEN <= u16::MAX as usize);
 const _: () = assert!(REPORT_DESCRIPTOR_SPI_UMAPP_LEN <= u16::MAX as usize);
 
-/// UsbUm's HID descriptor (all 6 families, 516-byte report descriptor): `09 21 00 01 00 01 22 04 02`.
+/// `UsbUm`'s HID descriptor (all 6 families, 516-byte report descriptor): `09 21 00 01 00 01 22 04 02`.
 pub const HID_DESCRIPTOR_U32_ID_UMAPP: [u8; HID_DESCRIPTOR_LEN] =
     hid_descriptor(REPORT_DESCRIPTOR_U32_ID_UMAPP_LEN as u16); // 516 fits, asserted above
-/// The HID descriptor of UsbKm and HidFilter (493-byte report descriptor): `09 21 00 01 00 01 22 ed 01`.
+/// The HID descriptor of `UsbKm` and `HidFilter` (493-byte report descriptor): `09 21 00 01 00 01 22 ed 01`.
 pub const HID_DESCRIPTOR_U32_ID: [u8; HID_DESCRIPTOR_LEN] =
     hid_descriptor(REPORT_DESCRIPTOR_U32_ID_LEN as u16); // 493 fits, asserted above
-/// SpiKm's HID descriptor (all 4 families, both variants, 501-byte report descriptor):
+/// `SpiKm`'s HID descriptor (all 4 families, both variants, 501-byte report descriptor):
 /// `09 21 00 01 00 01 22 f5 01`.
 pub const HID_DESCRIPTOR_SPI_UMAPP: [u8; HID_DESCRIPTOR_LEN] =
     hid_descriptor(REPORT_DESCRIPTOR_SPI_UMAPP_LEN as u16); // 501 fits, asserted above
@@ -157,7 +161,7 @@ pub const HID_DEVICE_ATTRIBUTES_WRITTEN_LEN: usize = 10;
 /// `HID_DEVICE_ATTRIBUTES` without `Size` (always 32 when encoded) and `Reserved`.
 ///
 /// Which values each driver reports is decided in its core crate (UsbUm/SpiKm/HidFilter report
-/// [`crate::common::DEVICE_VID`]; UsbKm reports the USB idVendor).
+/// [`crate::common::DEVICE_VID`]; `UsbKm` reports the USB idVendor).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HidDeviceAttributes {
     /// `VendorID` (bytes 4-5).
@@ -171,6 +175,7 @@ pub struct HidDeviceAttributes {
 impl HidDeviceAttributes {
     /// The 10 bytes the C drivers write: `Size` = 32 (u32 LE), `VendorID`, `ProductID`, `VersionNumber`
     /// (u16 LE each).
+    #[must_use]
     pub const fn header_bytes(self) -> [u8; HID_DEVICE_ATTRIBUTES_WRITTEN_LEN] {
         let [s0, s1, s2, s3] = (HID_DEVICE_ATTRIBUTES_LEN as u32).to_le_bytes(); // 32 fits
         let [v0, v1] = self.vendor_id.to_le_bytes();
@@ -180,9 +185,10 @@ impl HidDeviceAttributes {
     }
 
     /// Encodes the whole 32-byte structure with `Reserved` zeroed.
+    #[must_use]
     pub const fn to_bytes(self) -> [u8; HID_DEVICE_ATTRIBUTES_LEN] {
-        let mut out = [0u8; HID_DEVICE_ATTRIBUTES_LEN];
-        let _ = put(&mut out, &self.header_bytes());
+        let mut out = [0_u8; HID_DEVICE_ATTRIBUTES_LEN];
+        put(&mut out, &self.header_bytes());
         out
     }
 
@@ -192,6 +198,9 @@ impl HidDeviceAttributes {
     /// `buf` to be at least 32 bytes; otherwise it writes nothing and returns [`BufferTooSmall`]. It then
     /// writes only bytes 0..10 and leaves `Reserved` (bytes 10..32) untouched, as the C code does. A core
     /// crate that wants zeroed `Reserved` bytes copies [`Self::to_bytes`] instead.
+    ///
+    /// # Errors
+    /// Returns [`BufferTooSmall`] if the buffer cannot hold the report.
     pub fn write_to(self, buf: &mut [u8]) -> Result<(), BufferTooSmall> {
         if buf.len() < HID_DEVICE_ATTRIBUTES_LEN {
             return Err(BufferTooSmall);
@@ -200,9 +209,10 @@ impl HidDeviceAttributes {
     }
 
     /// Decodes `VendorID`, `ProductID` and `VersionNumber` from a 32-byte structure, for example the
-    /// answer to the `IOCTL_HID_GET_DEVICE_ATTRIBUTES` that SpiKm and HidFilter send down their stacks.
+    /// answer to the `IOCTL_HID_GET_DEVICE_ATTRIBUTES` that `SpiKm` and `HidFilter` send down their stacks.
     /// Returns `None` if `buf` is shorter than 32 bytes. `Size` and `Reserved` are not checked (the C
     /// drivers do not check them either).
+    #[must_use]
     pub const fn from_bytes(buf: &[u8]) -> Option<Self> {
         if buf.len() < HID_DEVICE_ATTRIBUTES_LEN {
             return None;
@@ -301,21 +311,21 @@ mod tests {
             product_id: 0x027a,
             version_number: 0x0001,
         };
-        let mut buf = [0xAAu8; HID_DEVICE_ATTRIBUTES_LEN];
+        let mut buf = [0xAA_u8; HID_DEVICE_ATTRIBUTES_LEN];
         assert_eq!(a.write_to(&mut buf), Ok(()));
         assert_eq!(
             buf[..10],
             [0x20, 0, 0, 0, 0xac, 0x05, 0x7a, 0x02, 0x01, 0x00]
         );
         assert!(buf[10..].iter().all(|&b| b == 0xAA));
-        let mut short = [0xAAu8; HID_DEVICE_ATTRIBUTES_LEN - 1];
+        let mut short = [0xAA_u8; HID_DEVICE_ATTRIBUTES_LEN - 1];
         assert_eq!(a.write_to(&mut short), Err(BufferTooSmall));
         assert!(short.iter().all(|&b| b == 0xAA));
     }
 
     #[test]
     fn attributes_decode_needs_full_struct() {
-        let mut buf = [0u8; HID_DEVICE_ATTRIBUTES_LEN];
+        let mut buf = [0_u8; HID_DEVICE_ATTRIBUTES_LEN];
         buf[4..10].copy_from_slice(&[0xac, 0x05, 0x78, 0x02, 0x34, 0x12]);
         assert_eq!(
             HidDeviceAttributes::from_bytes(&buf),

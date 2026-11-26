@@ -6,6 +6,8 @@
 //! with the first `min(blen, 3)` bytes of `rbuf`. No record has a `wdf` failure: every status here comes
 //! from driver code.
 
+#![cfg(test)]
+
 mod common;
 
 use amtptp_spikm_core::feature::{SET_FEATURE_READ_LEN, check_xfer_packet, get_feature};
@@ -25,7 +27,7 @@ fn preset(rt: &DeviceRuntime, r: &Record) {
     let pio = r.get("pio_in") == "1";
     let prb = r.get("prb_in") == "1";
     let prt = r.get("prt_in") == "1";
-    let mode = if pio { 3u8 } else { 0 };
+    let mode = if pio { 3_u8 } else { 0 };
     assert_eq!(rt.set_feature(4, 2, Some(&[4, mode])), STATUS_SUCCESS);
     let bits = u8::from(prb) | (u8::from(prt) << 1);
     assert_eq!(rt.set_feature(6, 3, Some(&[6, 0, bits])), STATUS_SUCCESS);
@@ -74,14 +76,13 @@ fn feature_reports() {
                 gets += 1;
                 assert_eq!(r.hex32("code"), 0x000B_0192);
                 let outlen: usize = r.dec("outlen");
-                let status = match check_xfer_packet(outlen, user_buffer) {
-                    Err(s) => s,
-                    Ok(()) => {
-                        let reply = get_feature(report_id, blen, rb_present);
-                        // The glue copies `write` to the start of reportBuffer; never more.
-                        after[..reply.write.len()].copy_from_slice(reply.write);
-                        reply.status
-                    }
+                let status = if let Err(s) = check_xfer_packet(outlen, user_buffer) {
+                    s
+                } else {
+                    let reply = get_feature(report_id, blen, rb_present);
+                    // The glue copies `write` to the start of reportBuffer; never more.
+                    after[..reply.write.len()].copy_from_slice(reply.write);
+                    reply.status
                 };
                 tally.add(if status == STATUS_SUCCESS {
                     GET_OK
@@ -94,14 +95,13 @@ fn feature_reports() {
                 sets += 1;
                 assert_eq!(r.hex32("code"), 0x000B_0191);
                 let inlen: usize = r.dec("inlen");
-                let status = match check_xfer_packet(inlen, user_buffer) {
-                    Err(s) => s,
-                    Ok(()) => {
-                        // The glue passes min(reportBufferLen, 3) bytes (None for a NULL buffer).
-                        let take = (blen as usize).min(SET_FEATURE_READ_LEN).min(rbuf.len());
-                        let report = rb_present.then(|| &rbuf[..take]);
-                        rt.set_feature(report_id, blen, report)
-                    }
+                let status = if let Err(s) = check_xfer_packet(inlen, user_buffer) {
+                    s
+                } else {
+                    // The glue passes min(reportBufferLen, 3) bytes (None for a NULL buffer).
+                    let take = (blen as usize).min(SET_FEATURE_READ_LEN).min(rbuf.len());
+                    let report = rb_present.then(|| &rbuf[..take]);
+                    rt.set_feature(report_id, blen, report)
                 };
                 if r.opt("oob") == Some("1") {
                     assert_eq!((report_id, blen, rbuf.len()), (6, 2, 3), "{ctx}");

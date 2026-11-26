@@ -1,31 +1,30 @@
-//! AmtPtpHidFilter: KMDF 1.23 HID lower filter that turns the Magic Trackpad 2 HID collection
+//! `AmtPtpHidFilter`: KMDF 1.23 HID lower filter that turns the Magic Trackpad 2 HID collection
 //! (Bluetooth; USB through the standalone INF) into a Windows Precision Touchpad.
 //! Port of the C driver `src/AmtPtpHidFilter` (spec `hidfilter.md`).
 //!
 //! All hardware-independent logic (IOCTL routing, feature reports, descriptors, the read pipeline,
-//! the mode switch, the PnP/power sequences, the detour's checks and AddDevice's failure handling)
+//! the mode switch, the PnP/power sequences, the detour's checks and `AddDevice`'s failure handling)
 //! lives in `amtptp_hidfilter_core`, which owns the C call **sequences** and is replayed against the
 //! C oracle fixtures. This crate is the thin WDF glue: every WDF callback is one call into the core,
 //! and the core's I/O traits are implemented here with one WDF or kernel call per method.
 //!
 //! | C file | Rust module |
 //! |---|---|
-//! | `Driver.c` (DriverEntry, cleanup) | this file |
-//! | `Driver.c` (EvtDeviceAdd), `Device.c`, `Queue.c` (queue creation) | [`device`] |
-//! | `Queue.c` (dispatch, EvtIoStop) | [`queue`] |
+//! | `Driver.c` (`DriverEntry`, cleanup) | this file |
+//! | `Driver.c` (`EvtDeviceAdd`), `Device.c`, `Queue.c` (queue creation) | [`device`] |
+//! | `Queue.c` (dispatch, `EvtIoStop`) | [`queue`] |
 //! | `Input.c`, `Hid.c` and the WDF calls of `Device.c` | [`io`] |
 //! | `Detour.c`, `include/Hac.h` | [`hac`] (the only module that chases undocumented pointers) |
 //! | `include/Device.h`, `include/Queue.h` (contexts) | [`context`] |
 //!
 //! Code placement mirrors the C `#pragma alloc_text`: `DriverEntry` in `INIT`; device-add and the
-//! driver-object cleanup in `PAGE` (both PASSIVE_LEVEL). Everything else is non-paged, as in C
-//! (I/O callbacks and the completion routine run at up to DISPATCH_LEVEL).
+//! driver-object cleanup in `PAGE` (both `PASSIVE_LEVEL`). Everything else is non-paged, as in C
+//! (I/O callbacks and the completion routine run at up to `DISPATCH_LEVEL`).
 //!
-//! Tracing: TraceLogging provider `AmtPtpHidFilterTraceProvider` with the C driver's WPP control
+//! Tracing: `TraceLogging` provider `AmtPtpHidFilterTraceProvider` with the C driver's WPP control
 //! GUID; the keywords reuse the WPP flag bits (`TRACE_DRIVER` 0x1 ... `TRACE_INPUT` 0x10).
 #![no_std]
 
-#[cfg(not(test))]
 extern crate wdk_panic; // #[panic_handler]: a panic is a bugcheck (0x52504E43).
 
 mod context;
@@ -120,7 +119,7 @@ pub unsafe extern "system" fn driver_entry(
 }
 
 /// `PtpFilterEvtDriverContextCleanup` (Driver.c:68-80): `EvtCleanupCallback` of the WDF driver
-/// object, at PASSIVE_LEVEL when the driver unloads (the C `WPP_CLEANUP` site).
+/// object, at `PASSIVE_LEVEL` when the driver unloads (the C `WPP_CLEANUP` site).
 ///
 /// The HIDCLASS detour is intentionally not reverted (HF-B26).
 #[unsafe(link_section = "PAGE")]

@@ -13,11 +13,11 @@
 //!
 //! [`process_packet`] is pure, so calling it before dequeuing the request is observably identical to the
 //! C order. The precedence the C order implies is kept by [`complete_read_report`]: a failed output-memory
-//! retrieval wins over DATA_ERROR, and DATA_ERROR wins over a too-small output buffer.
+//! retrieval wins over `DATA_ERROR`, and `DATA_ERROR` wins over a too-small output buffer.
 //!
 //! Arithmetic mirrors the C exactly: coordinates are `(int)(signed short)` values, X/Y are clamped below at
 //! 0 but not above (B19), Y is inverted, contact IDs are slot indices (B18), more than 5 contacts fail the
-//! read (B8), Tip = `major*2 >= 200 || minor*2 >= 150`, Confidence = `minor*2 > 0`, and ScanTime is
+//! read (B8), Tip = `major*2 >= 200 || minor*2 >= 150`, Confidence = `minor*2 > 0`, and `ScanTime` is
 //! [`scan_time_as_c`] (always 0 in the real driver, B1).
 
 use ptp_hid::common::PTP_CONTACT_SLOTS;
@@ -49,10 +49,11 @@ pub const FINGER_TOUCH_MINOR: usize = 18;
 /// ```
 ///
 /// `perf_counter_out` is the value `KeQueryPerformanceCounter` writes to its out-parameter (the
-/// frequency) and `last_report_time` is what D0Entry stored the same way, so in the real driver both are
+/// frequency) and `last_report_time` is what `D0Entry` stored the same way, so in the real driver both are
 /// the QPC frequency and the result is always 0 (spec B1, preserved). The clamp is signed only: a negative
 /// delta passes through and the `(USHORT)` cast wraps it (-1 → 0xFFFF). The subtraction wraps on
 /// overflow (two's complement, as MSVC does; P2 for the signed-overflow UB).
+#[must_use]
 pub const fn scan_time_as_c(perf_counter_out: i64, last_report_time: i64) -> u16 {
     // LONGLONG arithmetic; `/` truncates toward zero like C, and 100 is never 0 or -1.
     let mut delta = perf_counter_out.wrapping_sub(last_report_time) / 100;
@@ -75,10 +76,10 @@ pub enum ReadReportResult {
 /// The outcome of [`process_packet`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PacketAction {
-    /// The length gate failed: drop the packet and do not touch the InputQueue (the pended READ_REPORT
+    /// The length gate failed: drop the packet and do not touch the `InputQueue` (the pended `READ_REPORT`
     /// stays queued).
     Discard,
-    /// Dequeue the next READ_REPORT (`WdfIoQueueRetrieveNextRequest`); if there is none, drop the packet.
+    /// Dequeue the next `READ_REPORT` (`WdfIoQueueRetrieveNextRequest`); if there is none, drop the packet.
     /// Otherwise complete it with [`complete_read_report`].
     Deliver(ReadReportResult),
 }
@@ -99,7 +100,8 @@ fn raw_i16(packet: &[u8], offset: usize) -> i32 {
 }
 
 /// Builds the report from a raw packet (`packet.len()` = `NumBytesTransferred`), with the given config
-/// row, gates and ScanTime. Pure; see the module docs for the arithmetic.
+/// row, gates and `ScanTime`. Pure; see the module docs for the arithmetic.
+#[must_use]
 pub fn parse_packet(
     cfg: &Bcm5974Config,
     packet: &[u8],
@@ -185,7 +187,7 @@ pub fn process_packet(state: &DeviceState, packet: &[u8], perf_counter_out: i64)
     )
 }
 
-/// Completes a dequeued READ_REPORT.
+/// Completes a dequeued `READ_REPORT`.
 ///
 /// `output` is the result of `WdfRequestRetrieveOutputMemory`: the driver passes its `WDFMEMORY` wrapper
 /// (so the copy is the framework's `WdfMemoryCopyFromBuffer(mem, 0, report, 50)`), tests pass a byte slice.
@@ -198,6 +200,7 @@ pub fn process_packet(state: &DeviceState, packet: &[u8], perf_counter_out: i64)
 ///   with the copy status and nothing is written (P2). Otherwise the 50 bytes are at the start of the
 ///   buffer (the rest is untouched) and the request completes with the copy status (`STATUS_SUCCESS`),
 ///   `Information = 50`.
+#[must_use]
 pub fn complete_read_report_to<M: OutputMemory + ?Sized>(
     result: &ReadReportResult,
     output: Result<&mut M, NtStatus>,
@@ -224,6 +227,7 @@ pub fn complete_read_report_to<M: OutputMemory + ?Sized>(
 
 /// [`complete_read_report_to`] on a byte slice (the [`OutputMemory`] model of `WdfMemoryCopyFromBuffer`:
 /// `STATUS_BUFFER_TOO_SMALL` below 50 bytes).
+#[must_use]
 pub fn complete_read_report(
     result: &ReadReportResult,
     output: Result<&mut [u8], NtStatus>,
@@ -237,7 +241,7 @@ mod tests {
     use crate::config::{FALLBACK_CONFIG, config_for_pid};
     use crate::status::{STATUS_BUFFER_TOO_SMALL, STATUS_INVALID_BUFFER_SIZE};
 
-    /// An output memory whose copy fails with a framework status other than BUFFER_TOO_SMALL.
+    /// An output memory whose copy fails with a framework status other than `BUFFER_TOO_SMALL`.
     struct FailingMemory(NtStatus);
 
     impl OutputMemory for FailingMemory {
@@ -274,14 +278,14 @@ mod tests {
 
     #[test]
     fn golden_a_header_only() {
-        let mut packet = [0u8; 46];
+        let mut packet = [0_u8; 46];
         packet[31] = 1;
         let PacketAction::Deliver(ReadReportResult::Report(r)) =
             parse_packet(&FALLBACK_CONFIG, &packet, InputGates::ON, 0)
         else {
             panic!("expected a report");
         };
-        let mut expect = [0u8; 50];
+        let mut expect = [0_u8; 50];
         expect[0] = 5;
         expect[49] = 1;
         assert_eq!(r, expect);
@@ -320,7 +324,7 @@ mod tests {
             complete_read_report(&ReadReportResult::DataError, Err(STATUS_BUFFER_TOO_SMALL)),
             Completion::status(STATUS_BUFFER_TOO_SMALL)
         );
-        let mut short = [0xa5u8; 49];
+        let mut short = [0xa5_u8; 49];
         assert_eq!(
             complete_read_report(&ReadReportResult::DataError, Ok(&mut short)),
             Completion::status(STATUS_DATA_ERROR)
@@ -330,7 +334,7 @@ mod tests {
             Completion::status(STATUS_BUFFER_TOO_SMALL)
         );
         assert!(short.iter().all(|&b| b == 0xa5));
-        let mut long = [0xa5u8; 51];
+        let mut long = [0xa5_u8; 51];
         assert_eq!(
             complete_read_report(&report, Ok(&mut long)),
             Completion::success(50)

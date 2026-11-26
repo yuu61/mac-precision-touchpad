@@ -5,6 +5,7 @@
 //! INIT helpers.
 
 /// `WDF_REL_TIMEOUT_IN_SEC(n)`: a relative due time in 100 ns units (negative).
+#[must_use]
 pub const fn rel_timeout_in_sec(seconds: i64) -> i64 {
     -(seconds * 10_000_000)
 }
@@ -26,12 +27,12 @@ pub const DEVICE_INTERFACE_GUID: (u32, u16, u16, [u8; 8]) = (
 );
 
 /// `PTP_LIST_POOL_TAG` `'LTPA'` (Driver.h:32): the MSVC multi-character constant 0x4C545041, which
-/// reads "APTL" in memory. Pool tag of the lookaside list (NonPagedPoolNx, entry size
+/// reads "APTL" in memory. Pool tag of the lookaside list (`NonPagedPoolNx`, entry size
 /// [`crate::REPORT_BUFFER_SIZE`]).
 pub const READ_BUFFER_POOL_TAG: u32 = u32::from_le_bytes(*b"APTL");
 
 /// The lookaside list's parent. C passes `WDF_NO_OBJECT_ATTRIBUTES`, which parents it to the WDFDRIVER
-/// and leaks one list per AddDevice (HF-B15). The port parents it to the device (port policy P2).
+/// and leaks one list per `AddDevice` (HF-B15). The port parents it to the device (port policy P2).
 pub const READ_BUFFER_LOOKASIDE_PARENT_IS_DEVICE: bool = true;
 
 /// `WDF_TIMER_CONFIG.Period` of the recovery timer: 0 (one-shot). Its attributes use

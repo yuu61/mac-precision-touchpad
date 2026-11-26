@@ -3,13 +3,13 @@
 //! The pure building blocks ([`scan_time`], [`wellspring_contact`], [`mt2_contact`], [`build_report`],
 //! [`classify_packet`]) reproduce the C integer semantics exactly (sign extension, truncation, the MSVC /
 //! `-fwrapv` two's-complement results of the C UB). [`on_read_complete`] strings them together in the C
-//! order, driving the READ_REPORT queue and the control pipe through the [`crate::io`] traits.
+//! order, driving the `READ_REPORT` queue and the control pipe through the [`crate::io`] traits.
 
 use ptp_hid::common::PTP_CONTACT_SLOTS;
 use ptp_hid::input::{PTP_REPORT_LEN, PtpContact, PtpReport};
 
 use crate::config::{Bcm5974Config, TrackpadType};
-use crate::io::{ControlPipe, HidRequest, ReadQueue};
+use crate::io::{ControlPipe, HidRequest as _, ReadQueue};
 use crate::state::DeviceState;
 use crate::status::{NtStatus, STATUS_SUCCESS};
 use crate::usb::emergency_reset;
@@ -29,6 +29,7 @@ pub const MT2_FINGER_LEN: usize = 9;
 /// The subtraction wraps (two's complement, P2 for the signed-overflow UB), the division truncates toward
 /// zero, only the upper bound is clamped, and a negative delta is truncated to 16 bits (for example a
 /// delta of -1 gives 0xFFFF).
+#[must_use]
 pub const fn scan_time(qpc_now: i64, perf_counter: i64) -> u16 {
     let delta = qpc_now.wrapping_sub(perf_counter) / 100;
     let delta = if delta > 0xFF { 0xFF } else { delta };
@@ -58,12 +59,13 @@ const FINGER_TOUCH_MINOR: usize = 18;
 
 /// TYPE2-4 contact decode (InputInterrupt.c:322-339) of the `TRACKPAD_FINGER` at the start of `finger`.
 ///
-/// Only bytes 2..20 are read (abs_x, abs_y, touch_major, touch_minor; all le16 interpreted as i16).
+/// Only bytes 2..20 are read (`abs_x`, `abs_y`, `touch_major`, `touch_minor`; all le16 interpreted as i16).
 ///
 /// - `X = ax - x.min > 0 ? (USHORT)(ax - x.min) : 0` (no upper clamp, UM-B18)
 /// - `Y = y.max - ay > 0 ? (USHORT)(y.max - ay) : 0` (inverted, no upper clamp)
 /// - `ContactID = slot` (not a tracking ID)
 /// - `TipSwitch = (touch_major << 1) >= 200`, `Confidence = (touch_minor << 1) > 0`
+#[must_use]
 pub fn wellspring_contact(cfg: &Bcm5974Config, finger: &[u8], slot: usize) -> PtpContact {
     let abs_x = raw_to_integer(le_u16_at(finger, FINGER_ABS_X));
     let abs_y = raw_to_integer(le_u16_at(finger, FINGER_ABS_Y));
@@ -97,6 +99,7 @@ pub fn wellspring_contact(cfg: &Bcm5974Config, finger: &[u8], slot: usize) -> Pt
 /// is reproduced including the `F == -4096 && L == 0` case. Then `X = x - x.min > 0 ? x - x.min : 0`,
 /// `Y = y - y.min > 0 ? y - y.min : 0` (no upper clamp), `ContactID = byte 8 & 0x0F` (device ID),
 /// `TipSwitch = TouchMajor * 2 > 0`, `Confidence = TouchMinor * 2 < 345` (duplicated condition, UM-B17).
+#[must_use]
 pub fn mt2_contact(cfg: &Bcm5974Config, finger: &[u8; MT2_FINGER_LEN]) -> PtpContact {
     let [
         b0,
@@ -112,7 +115,7 @@ pub fn mt2_contact(cfg: &Bcm5974Config, finger: &[u8; MT2_FINGER_LEN]) -> PtpCon
     let tmp_x = u16::from_le_bytes([b0, b1]) & 0x1fff;
     let tmp_y = u32::from_le_bytes([b0, b1, b2, b3]);
     // `tmp_x << 3` is an int (at most 0xFFF8); `(SHORT)` keeps the low 16 bits as signed.
-    let x = ((i32::from(tmp_x) << 3) as u16 as i16 as i32) >> 3;
+    let x = i32::from((i32::from(tmp_x) << 3) as u16 as i16) >> 3;
     // `tmp_y << 6` is a UINT shift (high bits drop), `(INT)` reinterprets, `-` wraps, `>>` is arithmetic.
     let y = ((tmp_y << 6) as i32).wrapping_neg() >> 19;
     let dx = x.wrapping_sub(cfg.x.min);
@@ -151,7 +154,8 @@ pub enum PacketDisposition {
 }
 
 /// The length validation, mode gate and type dispatch of `AmtPtpEvtUsbInterruptPipeReadComplete`.
-pub fn classify_packet(
+#[must_use]
+pub const fn classify_packet(
     cfg: &Bcm5974Config,
     wellspring_mode_on: bool,
     len: usize,
@@ -170,7 +174,9 @@ pub fn classify_packet(
     }
     match cfg.tp_type {
         TrackpadType::Type1 => PacketDisposition::Unsupported,
-        _ => PacketDisposition::Report { fingers },
+        TrackpadType::Type2 | TrackpadType::Type3 | TrackpadType::Type4 | TrackpadType::Type5 => {
+            PacketDisposition::Report { fingers }
+        }
     }
 }
 
@@ -178,11 +184,12 @@ pub fn classify_packet(
 /// request handling).
 ///
 /// The report starts zero-initialized (UM-B13, P2 FIXED: C leaves unused slots, padding bits and, with
-/// the surface off, ContactCount and all contacts as stack garbage). Then:
+/// the surface off, `ContactCount` and all contacts as stack garbage). Then:
 /// - `ScanTime = scan_time`;
 /// - if `surface_on`: `ContactCount = min((len - h) / f, 5)` and contacts `0..n` decoded from the finger
 ///   block at `h + tp_delta + i * f` (TYPE2-4: [`wellspring_contact`], TYPE5: [`mt2_contact`]);
 /// - if `button_on && packet[tp_button] != 0`: `IsButtonClicked = 1`.
+#[must_use]
 pub fn build_report(
     cfg: &Bcm5974Config,
     packet: &[u8],
@@ -216,7 +223,10 @@ pub fn build_report(
                     Some(block) => mt2_contact(cfg, block),
                     None => mt2_contact(cfg, &[0; MT2_FINGER_LEN]),
                 },
-                _ => wellspring_contact(cfg, finger, slot),
+                TrackpadType::Type1
+                | TrackpadType::Type2
+                | TrackpadType::Type3
+                | TrackpadType::Type4 => wellspring_contact(cfg, finger, slot),
             };
         }
     }
@@ -238,10 +248,10 @@ pub enum ReadCompleteOutcome {
     DroppedModeOff,
     /// TYPE1 device; the packet was dropped.
     DroppedUnsupported,
-    /// `DeviceInfo` is not set (cannot happen after a successful PrepareHardware; the C code would
+    /// `DeviceInfo` is not set (cannot happen after a successful `PrepareHardware`; the C code would
     /// dereference `NULL`). The packet was dropped.
     DroppedNoConfig,
-    /// No READ_REPORT pending (`WdfIoQueueRetrieveNextRequest` failed with `status`); the frame is
+    /// No `READ_REPORT` pending (`WdfIoQueueRetrieveNextRequest` failed with `status`); the frame is
     /// dropped, nothing is buffered.
     NoPendingRequest {
         /// The retrieve status.
@@ -266,7 +276,7 @@ pub enum ReadCompleteOutcome {
 /// request was retrieved; TYPE5: after its output memory was retrieved).
 ///
 /// Order: [`classify_packet`] (malformed → [`emergency_reset`], synchronous control I/O inside the
-/// completion, as in C); retrieve the next READ_REPORT (none → drop); build the report
+/// completion, as in C); retrieve the next `READ_REPORT` (none → drop); build the report
 /// ([`build_report`]); copy the 50 bytes into the request's output memory; complete with
 /// `STATUS_SUCCESS`/50. A failure after the request was retrieved completes it with that status (UM-B6).
 pub fn on_read_complete<Q, C, F>(

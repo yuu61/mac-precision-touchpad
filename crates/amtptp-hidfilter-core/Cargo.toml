@@ -8,3 +8,6 @@ publish.workspace = true
 
 [dependencies]
 ptp-hid = { path = "../ptp-hid" }
+
+[lints]
+workspace = true

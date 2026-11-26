@@ -33,7 +33,7 @@ use crate::status::{
 /// `reportId` u8 @12, 3 padding bytes).
 pub const HID_XFER_PACKET_LEN: usize = 16;
 
-/// Information of every GET/SET_FEATURE completion: neither handler calls `WdfRequestSetInformation`.
+/// Information of every `GET/SET_FEATURE` completion: neither handler calls `WdfRequestSetInformation`.
 pub const FEATURE_INFORMATION: usize = 0;
 
 /// The checks both handlers make before looking at the packet (Hid.c:608-618, 753-763), in C order:
@@ -42,6 +42,10 @@ pub const FEATURE_INFORMATION: usize = 0;
 ///
 /// `ioctl_buffer_length` is `Parameters.DeviceIoControl.OutputBufferLength` for GET and
 /// `InputBufferLength` for SET.
+///
+/// # Errors
+/// Returns `STATUS_BUFFER_TOO_SMALL` for a short transfer buffer or
+/// `STATUS_INVALID_DEVICE_REQUEST` for a missing user buffer.
 pub const fn check_xfer_packet(
     ioctl_buffer_length: usize,
     user_buffer_present: bool,
@@ -55,7 +59,7 @@ pub const fn check_xfer_packet(
     }
 }
 
-/// What a GET_FEATURE request does to the caller's report buffer.
+/// What a `GET_FEATURE` request does to the caller's report buffer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GetFeatureReply {
     /// The completion status.
@@ -65,11 +69,11 @@ pub struct GetFeatureReply {
     pub write: &'static [u8],
 }
 
-/// The bytes C writes for GET_FEATURE 0x08: `08 FC`. The comma-operator bug writes only the first blob
+/// The bytes C writes for `GET_FEATURE` 0x08: `08 FC`. The comma-operator bug writes only the first blob
 /// byte (preserved known issue SPI-B1, same as `ptp_hid::feature::write_hqa_report_as_c`).
 pub static HQA_REPORT_AS_C: [u8; 2] = [REPORTID_PTPHQA, HQA_BLOB_FIRST_BYTE];
 
-/// The bytes C writes for GET_FEATURE 0x07: `07 05 00` (5 contacts, click pad).
+/// The bytes C writes for `GET_FEATURE` 0x07: `07 05 00` (5 contacts, click pad).
 pub static DEVICE_CAPS_REPLY: [u8; DEVICE_CAPS_REPORT_LEN] = DEVICE_CAPS_REPORT;
 
 /// `AmtPtpReportFeatures` after [`check_xfer_packet`] passed.
@@ -82,6 +86,7 @@ pub static DEVICE_CAPS_REPLY: [u8; DEVICE_CAPS_REPORT_LEN] = DEVICE_CAPS_REPORT;
 /// `report_buffer_present` is false when `reportBuffer` is NULL. C would dereference it once the length
 /// check passed; the port answers `STATUS_INVALID_DEVICE_REQUEST` instead (P2, not reachable from
 /// hidclass).
+#[must_use]
 pub fn get_feature(
     report_id: u8,
     report_buffer_len: u32,
@@ -139,9 +144,9 @@ fn set_report_byte(
     }
 }
 
-/// `PtpInputOn`, `PtpReportButton` and `PtpReportTouch`: written by SET_FEATURE 0x04/0x06 and **never
-/// read** by the driver (preserved known issue SPI-B3). Atomics, because SET_FEATURE can run concurrently
-/// at DISPATCH_LEVEL (SPI-B15).
+/// `PtpInputOn`, `PtpReportButton` and `PtpReportTouch`: written by `SET_FEATURE` 0x04/0x06 and **never
+/// read** by the driver (preserved known issue SPI-B3). Atomics, because `SET_FEATURE` can run concurrently
+/// at `DISPATCH_LEVEL` (SPI-B15).
 #[derive(Debug, Default)]
 pub struct PtpSettings {
     input_on: AtomicBool,
@@ -151,6 +156,7 @@ pub struct PtpSettings {
 
 impl PtpSettings {
     /// All three flags FALSE, as in the zeroed device context.
+    #[must_use]
     pub const fn new() -> Self {
         Self {
             input_on: AtomicBool::new(false),
@@ -185,7 +191,7 @@ impl PtpSettings {
     ///   (P2 fix of the out-of-bounds read, SPI-B2), so both flags become FALSE.
     /// - Every other ID: `STATUS_NOT_SUPPORTED`.
     ///
-    /// `report` holds the first `min(reportBufferLen, `[`SET_FEATURE_READ_LEN`]`)` bytes of
+    /// `report` holds up to [`SET_FEATURE_READ_LEN`] bytes, bounded by `reportBufferLen`, from
     /// `reportBuffer`, or `None` when `reportBuffer` is NULL. Byte rule (P2): a byte at or past
     /// `reportBufferLen` reads as 0 (C read past the report); a byte inside it with a NULL buffer returns
     /// `STATUS_INVALID_DEVICE_REQUEST` (C dereferenced NULL). For report 0x04 with `reportBufferLen < 2`
@@ -236,7 +242,7 @@ mod tests {
 
     #[test]
     fn hqa_as_c_matches_ptp_hid() {
-        let mut buf = [0xAAu8; HQA_REPORT_LEN];
+        let mut buf = [0xAA_u8; HQA_REPORT_LEN];
         assert_eq!(ptp_hid::feature::write_hqa_report_as_c(&mut buf), Ok(()));
         assert_eq!(buf[..2], HQA_REPORT_AS_C);
         assert!(buf[2..].iter().all(|&b| b == 0xAA));

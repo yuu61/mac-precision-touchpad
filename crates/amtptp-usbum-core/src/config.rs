@@ -23,7 +23,7 @@ pub const HAS_INTEGRATED_BUTTON: i32 = 1;
 pub const TRACKPAD_BUTTON_DATA_LEN: i32 = 4;
 
 /// `MAX_FINGER_ORIENTATION` (orientation limits, never read).
-pub const MAX_FINGER_ORIENTATION: i32 = 16384;
+pub const MAX_FINGER_ORIENTATION: i32 = 0x4000;
 
 /// `SN_PRESSURE` (pressure signal-to-noise ratio, never read).
 pub const SN_PRESSURE: i32 = 45;
@@ -52,6 +52,7 @@ pub enum TrackpadType {
 
 impl TrackpadType {
     /// `HEADER_TYPEn`: bytes before the first finger block.
+    #[must_use]
     pub const fn header(self) -> i32 {
         // `n * sizeof(USHORT)`
         match self {
@@ -64,6 +65,7 @@ impl TrackpadType {
     }
 
     /// `BUTTON_TYPEn`: offset of the button byte.
+    #[must_use]
     pub const fn button(self) -> i32 {
         match self {
             Self::Type1 => 0,
@@ -75,6 +77,7 @@ impl TrackpadType {
     }
 
     /// `FSIZE_TYPEn`: bytes per finger block (the stride).
+    #[must_use]
     pub const fn fsize(self) -> i32 {
         match self {
             Self::Type1 | Self::Type2 | Self::Type3 => 14 * 2,
@@ -84,14 +87,16 @@ impl TrackpadType {
     }
 
     /// `DELTA_TYPEn`: offset from the header end to the finger struct inside a finger block.
+    #[must_use]
     pub const fn delta(self) -> i32 {
         match self {
             Self::Type4 => 2,
-            _ => 0,
+            Self::Type1 | Self::Type2 | Self::Type3 | Self::Type5 => 0,
         }
     }
 
     /// `USBMSG_TYPEn`: the mode-switch control-message parameters.
+    #[must_use]
     pub const fn usb_msg(self) -> UsbMsg {
         match self {
             Self::Type1 | Self::Type2 | Self::Type3 => UsbMsg {
@@ -124,12 +129,14 @@ impl TrackpadType {
     /// Continuous-reader transfer length of `AmtPtpConfigContReaderForInterruptEndPoint`
     /// (InputInterrupt.c:23-40): `HEADER_TYPEn + FSIZE_TYPEn * MAX_FINGERS` = 474/478/486/526/156. It equals
     /// `tp_datalen` for every type.
+    #[must_use]
     pub const fn reader_transfer_length(self) -> usize {
         // All operands are small positive constants; the C computes this in `size_t`.
         (self.header() + self.fsize() * MAX_FINGERS as i32) as usize
     }
 
     /// The C enumerator name (`"TYPE1"` ... `"TYPE5"`).
+    #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
             Self::Type1 => "TYPE1",
@@ -172,9 +179,9 @@ pub struct Bcm5974Param {
 /// Row names, in table order. The names match the C comments and the oracle fixtures (`fam=`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Family {
-    /// Row 0: MacBookAir, "wellspring".
+    /// Row 0: `MacBookAir`, "wellspring".
     Ws1,
-    /// Row 1: MacBookPro Penryn, "wellspring2".
+    /// Row 1: `MacBookPro` Penryn, "wellspring2".
     Ws2,
     /// Row 2: MacBook5,1, "wellspring3".
     Ws3,
@@ -182,7 +189,7 @@ pub enum Family {
     Ws4,
     /// Row 4: MacBookAir3,1.
     Ws4a,
-    /// Row 5: MacBook8.
+    /// Row 5: `MacBook8`.
     Ws5,
     /// Row 6: MacBookAir4,2.
     Ws6,
@@ -206,6 +213,7 @@ pub enum Family {
 
 impl Family {
     /// Short name as used by the fixtures (`"WS1"` ... `"T2"`).
+    #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
             Self::Ws1 => "WS1",
@@ -280,17 +288,14 @@ impl Bcm5974Config {
     /// Builds a row the way the C initializer does: `ansi, iso, jis, caps, bt_ep, bt_datalen, tp_ep,
     /// DATAFORMAT(type), p, w, x, y, o`, with `bt_datalen = sizeof(TRACKPAD_BUTTON_DATA)`, `w = {SN_WIDTH, 0,
     /// 2048}` and `o = {SN_ORIENT, -MAX_FINGER_ORIENTATION, MAX_FINGER_ORIENTATION}` as in every C row.
-    #[allow(clippy::too_many_arguments)]
     const fn new(
         family: Family,
         pids: (i32, i32, i32),
         caps: i32,
-        bt_ep: i32,
-        tp_ep: i32,
+        (bt_ep, tp_ep): (i32, i32),
         tp_type: TrackpadType,
         p_max: i32,
-        x: (i32, i32),
-        y: (i32, i32),
+        (x, y): ((i32, i32), (i32, i32)),
     ) -> Self {
         Self {
             family,
@@ -317,24 +322,28 @@ impl Bcm5974Config {
     }
 
     /// `(unsigned int) tp_header` as `size_t` (InputInterrupt.c:106).
+    #[must_use]
     pub const fn header_len(&self) -> usize {
         // C: `size_t headerSize = (unsigned int) tp_header;` (non-negative constant).
         self.tp_header as u32 as usize
     }
 
     /// `(unsigned int) tp_fsize` as `size_t` (InputInterrupt.c:107).
+    #[must_use]
     pub const fn finger_len(&self) -> usize {
         // C: `size_t fingerprintSize = (unsigned int) tp_fsize;`
         self.tp_fsize as u32 as usize
     }
 
     /// `tp_delta` as a pointer offset (`f_base = Buffer + headerSize + tp_delta`).
+    #[must_use]
     pub const fn delta_len(&self) -> usize {
         // Non-negative constant (0 or 2); the C adds the int to a pointer.
         self.tp_delta as u32 as usize
     }
 
     /// `tp_button` as a buffer index (`Buffer[tp_button]`).
+    #[must_use]
     pub const fn button_offset(&self) -> usize {
         // Non-negative constant; the C indexes with the int.
         self.tp_button as u32 as usize
@@ -342,12 +351,14 @@ impl Bcm5974Config {
 
     /// Whether `pid` is one of this row's three product IDs (`cfg->ansi == id || cfg->iso == id ||
     /// cfg->jis == id`, the USHORT promoted to int).
+    #[must_use]
     pub const fn matches(&self, pid: u16) -> bool {
         let id = pid as i32; // USHORT -> int promotion
         self.ansi == id || self.iso == id || self.jis == id
     }
 
     /// The ANSI product ID as a USB `idProduct`.
+    #[must_use]
     pub const fn ansi_pid(&self) -> u16 {
         // Every table PID fits in 16 bits.
         self.ansi as u16
@@ -367,33 +378,31 @@ pub const CONFIG_TABLE_LEN: usize = 15;
 /// `Bcm5974ConfigTable`, in C order (row index = position).
 #[rustfmt::skip]
 pub static CONFIG_TABLE: [Bcm5974Config; CONFIG_TABLE_LEN] = [
-    Bcm5974Config::new(Family::Ws1, (0x0223, 0x0224, 0x0225), 0, 0x84, 0x81, T1, 256, (-4824, 5342), (-172, 5820)),
-    Bcm5974Config::new(Family::Ws2, (0x0230, 0x0231, 0x0232), 0, 0x84, 0x81, T1, 256, (-4824, 4824), (-172, 4290)),
-    Bcm5974Config::new(Family::Ws3, (0x0236, 0x0237, 0x0238), HIB, 0x84, 0x81, T2, 300, (-4460, 5166), (-75, 6700)),
-    Bcm5974Config::new(Family::Ws4, (0x023f, 0x0240, 0x0241), HIB, 0x84, 0x81, T2, 300, (-4620, 5140), (-150, 6600)),
-    Bcm5974Config::new(Family::Ws4a, (0x0242, 0x0243, 0x0244), HIB, 0x84, 0x81, T2, 300, (-4616, 5112), (-142, 5234)),
-    Bcm5974Config::new(Family::Ws5, (0x0245, 0x0246, 0x0247), HIB, 0x84, 0x81, T2, 300, (-4415, 5050), (-55, 6680)),
-    Bcm5974Config::new(Family::Ws6, (0x024c, 0x024d, 0x024e), HIB, 0x84, 0x81, T2, 300, (-4620, 5140), (-150, 6600)),
-    Bcm5974Config::new(Family::Ws5a, (0x0252, 0x0253, 0x0254), HIB, 0x84, 0x81, T2, 300, (-4750, 5280), (-150, 6730)),
-    Bcm5974Config::new(Family::Ws6a, (0x0249, 0x024a, 0x024b), HIB, 0x84, 0x81, T2, 300, (-4620, 5140), (-150, 6600)),
-    Bcm5974Config::new(Family::Ws7, (0x0262, 0x0263, 0x0264), HIB, 0x84, 0x81, T2, 300, (-4750, 5280), (-150, 6730)),
-    Bcm5974Config::new(Family::Ws7a, (0x0259, 0x025a, 0x025b), HIB, 0x84, 0x81, T2, 300, (-4750, 5280), (-150, 6730)),
-    Bcm5974Config::new(Family::Ws8, (0x0290, 0x0291, 0x0292), HIB, 0, 0x83, T3, 300, (-4620, 5140), (-150, 6600)),
-    Bcm5974Config::new(Family::Ws9, (0x0272, 0x0273, 0x0274), HIB, 0, 0x83, T4, 300, (-4828, 5345), (-203, 6803)),
-    Bcm5974Config::new(Family::Mt2, (0x0265, 0x0265, 0x0265), HIB, 0, 0x83, T5, 300, (-3678, 3934), (-2479, 2586)),
+    Bcm5974Config::new(Family::Ws1, (0x0223, 0x0224, 0x0225), 0, (0x84, 0x81), T1, 256, ((-4824, 5342), (-172, 5820))),
+    Bcm5974Config::new(Family::Ws2, (0x0230, 0x0231, 0x0232), 0, (0x84, 0x81), T1, 256, ((-4824, 4824), (-172, 4290))),
+    Bcm5974Config::new(Family::Ws3, (0x0236, 0x0237, 0x0238), HIB, (0x84, 0x81), T2, 300, ((-4460, 5166), (-75, 6700))),
+    Bcm5974Config::new(Family::Ws4, (0x023f, 0x0240, 0x0241), HIB, (0x84, 0x81), T2, 300, ((-4620, 5140), (-150, 6600))),
+    Bcm5974Config::new(Family::Ws4a, (0x0242, 0x0243, 0x0244), HIB, (0x84, 0x81), T2, 300, ((-4616, 5112), (-142, 5234))),
+    Bcm5974Config::new(Family::Ws5, (0x0245, 0x0246, 0x0247), HIB, (0x84, 0x81), T2, 300, ((-4415, 5050), (-55, 6680))),
+    Bcm5974Config::new(Family::Ws6, (0x024c, 0x024d, 0x024e), HIB, (0x84, 0x81), T2, 300, ((-4620, 5140), (-150, 6600))),
+    Bcm5974Config::new(Family::Ws5a, (0x0252, 0x0253, 0x0254), HIB, (0x84, 0x81), T2, 300, ((-4750, 5280), (-150, 6730))),
+    Bcm5974Config::new(Family::Ws6a, (0x0249, 0x024a, 0x024b), HIB, (0x84, 0x81), T2, 300, ((-4620, 5140), (-150, 6600))),
+    Bcm5974Config::new(Family::Ws7, (0x0262, 0x0263, 0x0264), HIB, (0x84, 0x81), T2, 300, ((-4750, 5280), (-150, 6730))),
+    Bcm5974Config::new(Family::Ws7a, (0x0259, 0x025a, 0x025b), HIB, (0x84, 0x81), T2, 300, ((-4750, 5280), (-150, 6730))),
+    Bcm5974Config::new(Family::Ws8, (0x0290, 0x0291, 0x0292), HIB, (0, 0x83), T3, 300, ((-4620, 5140), (-150, 6600))),
+    Bcm5974Config::new(Family::Ws9, (0x0272, 0x0273, 0x0274), HIB, (0, 0x83), T4, 300, ((-4828, 5345), (-203, 6803))),
+    Bcm5974Config::new(Family::Mt2, (0x0265, 0x0265, 0x0265), HIB, (0, 0x83), T5, 300, ((-3678, 3934), (-2479, 2586))),
     // C comment on the width limits of this row: "This is incorrect; check actual data later".
-    Bcm5974Config::new(Family::T2, (0x027d, 0x027d, 0x027d), HIB, 0, 0x83, T4, 300, (-4828, 5345), (-203, 6803)),
+    Bcm5974Config::new(Family::T2, (0x027d, 0x027d, 0x027d), HIB, (0, 0x83), T4, 300, ((-4828, 5345), (-203, 6803))),
 ];
 
 /// `AmtPtpGetDeviceConfig` with bounded iteration (UM-B3, P2): the index of the first row whose
 /// `ansi`, `iso` or `jis` equals `pid`, or `None` when no row matches. The vendor ID is not checked
 /// (UM-B23, P3).
+#[must_use]
 pub fn lookup_config_row(pid: u16) -> Option<u8> {
-    CONFIG_TABLE
-        .iter()
-        .position(|cfg| cfg.matches(pid))
-        // CONFIG_TABLE_LEN is 15, so the index always fits in a u8.
-        .and_then(|row| u8::try_from(row).ok())
+    let row = CONFIG_TABLE.iter().position(|cfg| cfg.matches(pid))?;
+    u8::try_from(row).ok()
 }
 
 /// `AmtPtpGetDeviceConfig`: the table row for `pid`, or `None` (C: `NULL`).
@@ -402,6 +411,7 @@ pub fn lookup_config(pid: u16) -> Option<&'static Bcm5974Config> {
 }
 
 /// The table row at `row`, or `None` if `row` is out of range.
+#[must_use]
 pub fn config_row(row: u8) -> Option<&'static Bcm5974Config> {
     CONFIG_TABLE.get(usize::from(row))
 }

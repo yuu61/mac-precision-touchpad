@@ -13,7 +13,7 @@
 //! power-policy settings (the driver is a filter, so not the power-policy owner), no file-object
 //! configuration and no I/O type setting, exactly as in C.
 //!
-//! UMDF runs every callback at PASSIVE_LEVEL in the host process; nothing here is pageable.
+//! UMDF runs every callback at `PASSIVE_LEVEL` in the host process; nothing here is pageable.
 
 use core::ptr::{self, null_mut};
 use core::sync::atomic::{AtomicPtr, Ordering};
@@ -45,7 +45,7 @@ use crate::usb::{DeviceIo, UsbSetup};
 /// The C fields `UsbDeviceTraits`, `DeviceDescriptor`, `DeviceInfo`, the three qualification levels, the
 /// three flags and `PerfCounter` are in [`DeviceState`]. `reader_pipe` is new (UM-B16 fix).
 pub(crate) struct DeviceContext {
-    /// `UsbDevice`: created once by the first PrepareHardware, reused on restart.
+    /// `UsbDevice`: created once by the first `PrepareHardware`, reused on restart.
     usb_device: AtomicPtr<WDFUSBDEVICE__>,
     /// `InterruptPipe`: the first interrupt pipe of interface 0. Keeps its value across a restart, as in C.
     interrupt_pipe: AtomicPtr<WDFUSBPIPE__>,
@@ -62,7 +62,7 @@ pub(crate) struct DeviceContext {
 // Concurrent callbacks (parallel queue, reader completions, PnP/power) share the context through
 // `&DeviceContext`, so it must be `Sync` (all fields are atomics).
 const _: fn() = || {
-    fn assert_sync<T: Sync>() {}
+    const fn assert_sync<T: Sync>() {}
     assert_sync::<DeviceContext>();
 };
 
@@ -90,7 +90,7 @@ impl DeviceContext {
         }
     }
 
-    /// `UsbDevice` (NULL before the first successful PrepareHardware).
+    /// `UsbDevice` (NULL before the first successful `PrepareHardware`).
     pub(crate) fn usb_device(&self) -> WDFUSBDEVICE {
         self.usb_device.load(Ordering::Acquire)
     }
@@ -185,7 +185,7 @@ pub(crate) unsafe extern "C" fn evt_device_add(
 
 /// `AmtPtpCreateDevice` (Device.c:24-118).
 ///
-/// 1. PnP/power callbacks PrepareHardware, D0Entry, D0Exit (nothing else).
+/// 1. PnP/power callbacks `PrepareHardware`, `D0Entry`, `D0Exit` (nothing else).
 /// 2. `WdfDeviceCreate` with the `DEVICE_CONTEXT` context type (no cleanup/destroy callbacks).
 /// 3. Initialize the context.
 /// 4. `SurpriseRemovalOK = WdfTrue` (all other capabilities `WdfUseDefault`).
@@ -195,9 +195,7 @@ pub(crate) unsafe extern "C" fn evt_device_add(
 /// # Safety
 /// `device_init` must be the framework's `WDFDEVICE_INIT` of the current `EvtDriverDeviceAdd`, not yet
 /// consumed by `WdfDeviceCreate`.
-unsafe fn create_device(device_init: PWDFDEVICE_INIT) -> NTSTATUS {
-    let mut device_init = device_init;
-
+unsafe fn create_device(mut device_init: PWDFDEVICE_INIT) -> NTSTATUS {
     let mut pnp_power_callbacks = pnppower_event_callbacks_init();
     pnp_power_callbacks.EvtDevicePrepareHardware = Some(evt_device_prepare_hardware);
     pnp_power_callbacks.EvtDeviceD0Entry = Some(evt_device_d0_entry);
@@ -253,7 +251,7 @@ unsafe fn create_device(device_init: PWDFDEVICE_INIT) -> NTSTATUS {
     pnp_caps.SurpriseRemovalOK = _WDF_TRI_STATE::WdfTrue;
     // SAFETY: valid device; initialized capabilities structure (copied by the framework).
     unsafe {
-        call_unsafe_wdf_function_binding!(WdfDeviceSetPnpCapabilities, device, &raw mut pnp_caps)
+        call_unsafe_wdf_function_binding!(WdfDeviceSetPnpCapabilities, device, &raw mut pnp_caps);
     };
 
     // SAFETY: valid device; the GUID is a 'static; ReferenceString NULL (as in C).

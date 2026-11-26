@@ -1,0 +1,54 @@
+name: Rust CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Tests and Clippy (x64 and ARM64)
+    runs-on: windows-2025
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      RUSTUP_TOOLCHAIN: '1.100.0'
+      KIT_PACKAGE_VERSION: '10.0.28000.2526'
+      Version_Number: '10.0.28000.0'
+      LIBCLANG_PATH: 'C:\Program Files\LLVM\bin'
+      CARGO_INCREMENTAL: '0'
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Rust and Clippy
+        run: rustup toolchain install "$env:RUSTUP_TOOLCHAIN" --profile minimal --component clippy --target aarch64-pc-windows-msvc
+
+      - name: Set up the Windows SDK and WDK
+        run: ./.github/scripts/rust-ci.ps1
+
+      - name: Host tests and x64 Clippy
+        run: cargo xtask test
+
+      - name: KMDF Clippy on ARM64
+        working-directory: drivers/km
+        run: cargo clippy --locked --workspace --all-features --target aarch64-pc-windows-msvc -- -D warnings
+
+      - name: UMDF Clippy on ARM64
+        working-directory: drivers/um
+        run: cargo clippy --locked --workspace --all-features --target aarch64-pc-windows-msvc -- -D warnings
+
+      - name: Check Cargo lockfiles
+        run: git diff --exit-code -- Cargo.lock drivers/km/Cargo.lock drivers/um/Cargo.lock

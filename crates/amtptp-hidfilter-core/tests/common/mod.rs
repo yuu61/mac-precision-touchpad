@@ -1,9 +1,12 @@
 //! Shared fixture parsing and a mock of the framework that follows the C oracle's stub model
 //! (`tests/fixtures/README.md` section 5). Every trait call is recorded in the fixtures' `ev` format.
-#![allow(dead_code)]
+#![allow(
+    dead_code,
+    reason = "Each integration test target uses a different subset of these helpers"
+)]
 
+use core::fmt::Write as _;
 use std::collections::VecDeque;
-use std::fmt::Write as _;
 
 use amtptp_hidfilter_core::{
     AddDeviceIo, Bcm5974Param, DetourIo, DeviceSnapshot, FailedAction, FilterIo, NtStatus,
@@ -34,7 +37,7 @@ impl Rec {
     }
 
     pub fn case(&self) -> &str {
-        self.fields.first().map(|(_, v)| v.as_str()).unwrap_or("?")
+        self.fields.first().map_or("?", |(_, v)| v.as_str())
     }
 
     pub fn num(&self, key: &str) -> i128 {
@@ -59,7 +62,7 @@ pub fn load(name: &str) -> Vec<Rec> {
                     let (k, v) = tok
                         .split_once('=')
                         .unwrap_or_else(|| panic!("bad token {tok}"));
-                    (k.to_string(), v.to_string())
+                    (k.to_owned(), v.to_owned())
                 })
                 .collect(),
         })
@@ -83,7 +86,7 @@ pub fn hex(s: &str) -> Vec<u8> {
     assert!(s.len().is_multiple_of(2), "odd hex {s}");
     (0..s.len())
         .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+        .map(|i| u8::from_str_radix(s.get(i..i + 2).expect("ASCII hex bytes"), 16).unwrap())
         .collect()
 }
 
@@ -107,68 +110,69 @@ pub fn status(s: &str) -> NtStatus {
 }
 
 /// Parses an `st_in` / `st_out` value (README 2.1).
-pub fn parse_state(s: &str) -> DeviceSnapshot {
-    let mut d = DeviceSnapshot::default();
-    for pair in s.split(',') {
-        let (k, v) = pair
+pub fn parse_state(text: &str) -> DeviceSnapshot {
+    let mut state = DeviceSnapshot::default();
+    for pair in text.split(',') {
+        let (key, value) = pair
             .split_once(':')
             .unwrap_or_else(|| panic!("bad state {pair}"));
-        let axis = |v: &str| {
-            let p: Vec<i32> = v.split('/').map(|x| num(x) as i32).collect();
+        let axis = |value: &str| {
+            let bounds: Vec<i32> = value.split('/').map(|item| num(item) as i32).collect();
             Bcm5974Param {
-                snratio: p[0],
-                min: p[1],
-                max: p[2],
+                snratio: bounds[0],
+                min: bounds[1],
+                max: bounds[2],
             }
         };
-        match k {
-            "vid" => d.vendor_id = num(v) as u16,
-            "pid" => d.product_id = num(v) as u16,
-            "ver" => d.version_number = num(v) as u16,
-            "hdr" => d.input_header_size = num(v) as usize,
-            "fsz" => d.input_finger_size = num(v) as usize,
-            "fdelta" => d.input_finger_delta = num(v) as usize,
-            "bdelta" => d.input_button_delta = num(v) as usize,
-            "x" => d.x = axis(v),
-            "y" => d.y = axis(v),
-            "cfg" => d.device_configured = v == "1",
-            "detour" => d.detour_completed = v == "1",
-            "target" => d.io_target_set = v == "1",
-            "inp_on" => d.ptp_input_on = v == "1",
-            "touch" => d.ptp_report_touch = v == "1",
-            "btn" => d.ptp_report_button = v == "1",
-            "last" => d.last_report_time = num(v) as i64,
-            _ => panic!("unknown state key {k}"),
+        match key {
+            "vid" => state.vendor_id = num(value) as u16,
+            "pid" => state.product_id = num(value) as u16,
+            "ver" => state.version_number = num(value) as u16,
+            "hdr" => state.input_header_size = num(value) as usize,
+            "fsz" => state.input_finger_size = num(value) as usize,
+            "fdelta" => state.input_finger_delta = num(value) as usize,
+            "bdelta" => state.input_button_delta = num(value) as usize,
+            "x" => state.x = axis(value),
+            "y" => state.y = axis(value),
+            "cfg" => state.device_configured = value == "1",
+            "detour" => state.detour_completed = value == "1",
+            "target" => state.io_target_set = value == "1",
+            "inp_on" => state.ptp_input_on = value == "1",
+            "touch" => state.ptp_report_touch = value == "1",
+            "btn" => state.ptp_report_button = value == "1",
+            "last" => state.last_report_time = num(value) as i64,
+            _ => panic!("unknown state key {key}"),
         }
     }
-    d
+    state
 }
 
 /// The `ev` list of a record (`-` = no events).
 pub fn events(r: &Rec) -> Vec<String> {
     match r.opt("ev") {
         None | Some("-") => Vec::new(),
-        Some(v) => v.split('|').map(str::to_string).collect(),
+        Some(v) => v.split('|').map(str::to_owned).collect(),
     }
 }
 
 /// Splits an event into (name, result) — `Name(args)=result` or `Name(args)`.
 pub fn ev_name_result(e: &str) -> (String, Option<String>) {
-    let name = e.split('(').next().unwrap_or(e).to_string();
-    let result = e.rfind(")=").map(|i| e[i + 2..].to_string());
+    let name = e.split('(').next().unwrap_or(e).to_owned();
+    let result = e.rsplit_once(")=").map(|(_, value)| value.to_owned());
     (name, result)
 }
 
 /// The arguments of an event as (key, value) pairs.
 pub fn ev_args(e: &str) -> Vec<(String, String)> {
-    let start = e.find('(').map(|i| i + 1).unwrap_or(e.len());
+    let start = e.find('(').map_or(e.len(), |i| i + 1);
     let end = e.rfind(')').unwrap_or(e.len());
-    e[start..end]
+    e.get(start..end)
+        .expect("valid event argument delimiters")
         .split(',')
         .filter(|s| !s.is_empty())
         .map(|kv| {
             let (k, v) = kv.split_once('=').unwrap_or((kv, ""));
-            (k.to_string(), v.to_string())
+            (k.to_owned(), v.to_owned())
         })
         .collect()
 }
@@ -205,13 +209,13 @@ pub fn started(vid: u16, hdr: usize) -> DeviceSnapshot {
 pub const INFO_IN: usize = 23130;
 
 // Fault statuses (README 5).
-pub const RESOURCE_FAIL: NtStatus = 0xC000_009Au32 as i32;
-pub const FORMAT_FAIL: NtStatus = 0xC000_0184u32 as i32;
-pub const SEND_FAIL: NtStatus = 0xC000_009Du32 as i32;
-pub const EXEC_LEVEL_FAIL: NtStatus = 0xC020_0225u32 as i32;
-pub const TRUE_STATUS_FAIL: NtStatus = 0xC000_0001u32 as i32;
-const BUFFER_TOO_SMALL: NtStatus = 0xC000_0023u32 as i32;
-const NO_MORE_ENTRIES: NtStatus = 0x8000_001Au32 as i32;
+pub const RESOURCE_FAIL: NtStatus = 0xC000_009A_u32 as i32;
+pub const FORMAT_FAIL: NtStatus = 0xC000_0184_u32 as i32;
+pub const SEND_FAIL: NtStatus = 0xC000_009D_u32 as i32;
+pub const EXEC_LEVEL_FAIL: NtStatus = 0xC020_0225_u32 as i32;
+pub const TRUE_STATUS_FAIL: NtStatus = 0xC000_0001_u32 as i32;
+const BUFFER_TOO_SMALL: NtStatus = 0xC000_0023_u32 as i32;
+const NO_MORE_ENTRIES: NtStatus = 0x8000_001A_u32 as i32;
 
 // ------------------------------------------------------------------------------------------------
 // Mock framework
@@ -267,7 +271,7 @@ pub struct Faults {
     pub cfg_send_false: Option<NtStatus>,
     pub cfg_send_true_status: Option<NtStatus>,
     pub attributes: Option<NtStatus>,
-    /// AddDevice: (event name of the failing create, status).
+    /// `AddDevice`: (event name of the failing create, status).
     pub add: Option<(&'static str, NtStatus)>,
     pub wdm_null: bool,
 }
@@ -316,6 +320,10 @@ pub struct Send {
 }
 
 #[derive(Debug, Default)]
+#[expect(
+    clippy::partial_pub_fields,
+    reason = "Fixtures set mock inputs directly while transfer bookkeeping stays private"
+)]
 pub struct Mock {
     pub ev: Vec<String>,
     pub uppers: Vec<Upper>,
@@ -332,6 +340,15 @@ pub struct Mock {
 }
 
 impl Mock {
+    fn add_step(&mut self, name: &'static str) -> NtStatus {
+        let s = match self.faults.add {
+            Some((n, s)) if n == name => s,
+            _ => 0,
+        };
+        self.rec(format!("{name}={}", st(s)));
+        s
+    }
+
     pub fn new() -> Self {
         Self {
             freq: 10_000_000,
@@ -468,21 +485,18 @@ impl FilterIo for Mock {
     }
 
     fn retrieve_next_parked_read(&mut self) -> Result<usize, NtStatus> {
-        match self.read_queue.pop_front() {
-            Some(r) => {
-                self.rec(format!(
-                    "WdfIoQueueRetrieveNextRequest(queue=queue_read)=0x00000000:{}",
-                    Self::up(r)
-                ));
-                Ok(r)
-            }
-            None => {
-                self.rec(format!(
-                    "WdfIoQueueRetrieveNextRequest(queue=queue_read)={}",
-                    st(NO_MORE_ENTRIES)
-                ));
-                Err(NO_MORE_ENTRIES)
-            }
+        if let Some(r) = self.read_queue.pop_front() {
+            self.rec(format!(
+                "WdfIoQueueRetrieveNextRequest(queue=queue_read)=0x00000000:{}",
+                Self::up(r)
+            ));
+            Ok(r)
+        } else {
+            self.rec(format!(
+                "WdfIoQueueRetrieveNextRequest(queue=queue_read)={}",
+                st(NO_MORE_ENTRIES)
+            ));
+            Err(NO_MORE_ENTRIES)
         }
     }
 
@@ -581,12 +595,12 @@ impl FilterIo for Mock {
     }
 
     fn query_device_attributes(&mut self, output: &mut [u8; 32]) -> NtStatus {
-        assert_eq!(*output, [0u8; 32], "attributes buffer must arrive zeroed");
+        assert_eq!(*output, [0_u8; 32], "attributes buffer must arrive zeroed");
         let s = self.faults.attributes.unwrap_or(0);
         self.rec(format!("WdfIoTargetSendInternalIoctlSynchronously(target=target,req=null,ioctl=0x000b0027,in=null,out=buffer,out_len=32,opts=null,bytes_ret=null)={}", st(s)));
         if s == 0 {
             let (v, p, n) = self.attr;
-            output[..4].copy_from_slice(&32u32.to_le_bytes());
+            output[..4].copy_from_slice(&32_u32.to_le_bytes());
             output[4..6].copy_from_slice(&v.to_le_bytes());
             output[6..8].copy_from_slice(&p.to_le_bytes());
             output[8..10].copy_from_slice(&n.to_le_bytes());
@@ -689,12 +703,9 @@ impl DetourIo for Mock {
 
     fn get_lower_device_object(&mut self) -> Option<()> {
         self.rec("IoGetLowerDeviceObject(dev=self)".into());
-        if self.world.lower {
+        self.world.lower.then(|| {
             self.world.refs += 1;
-            Some(())
-        } else {
-            None
-        }
+        })
     }
 
     fn lower_driver_object(&mut self, _l: ()) -> Option<()> {
@@ -728,18 +739,7 @@ impl DetourIo for Mock {
     }
 }
 
-impl Mock {
-    fn add_step(&mut self, name: &'static str) -> NtStatus {
-        let s = match self.faults.add {
-            Some((n, s)) if n == name => s,
-            _ => 0,
-        };
-        self.rec(format!("{name}={}", st(s)));
-        s
-    }
-}
-
-/// AddDevice events are recorded as `Name=result` (or `Name`); tests compare them with the fixture's
+/// `AddDevice` events are recorded as `Name=result` (or `Name`); tests compare them with the fixture's
 /// names and results, and check the fixture's arguments against `amtptp_hidfilter_core::config`.
 impl AddDeviceIo for Mock {
     fn fdo_init_set_filter(&mut self) {
@@ -799,7 +799,7 @@ impl Tally {
     pub fn add(&mut self, category: &str) {
         match self.counts.iter_mut().find(|(c, _)| c == category) {
             Some((_, n)) => *n += 1,
-            None => self.counts.push((category.to_string(), 1)),
+            None => self.counts.push((category.to_owned(), 1)),
         }
     }
 
@@ -817,7 +817,7 @@ impl Tally {
         let mut want: Vec<(String, usize)> = expected
             .iter()
             .filter(|(_, n)| *n > 0)
-            .map(|(c, n)| ((*c).to_string(), *n))
+            .map(|(c, n)| ((*c).to_owned(), *n))
             .collect();
         want.sort();
         assert_eq!(got, want, "per-category record counts");

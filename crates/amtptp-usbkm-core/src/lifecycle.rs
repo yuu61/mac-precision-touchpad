@@ -43,7 +43,7 @@ pub struct ContinuousReaderConfig {
     pub num_pending_reads: u8,
 }
 
-/// The WDF USB operations of the PnP/power callbacks (implemented by the glue). PASSIVE_LEVEL.
+/// The WDF USB operations of the PnP/power callbacks (implemented by the glue). `PASSIVE_LEVEL`.
 ///
 /// Pipes are identified by their index in the selected interface (`WdfUsbInterfaceGetConfiguredPipe`
 /// index); the glue keeps the matching `WDFUSBPIPE` handles.
@@ -57,10 +57,16 @@ pub trait UsbHardware: ControlTransfer {
 
     /// `WdfUsbTargetDeviceRetrieveInformation`: `Ok(Traits)` or the failure status (which the caller
     /// ignores; the C stores traits 0 and goes on).
+    ///
+    /// # Errors
+    /// Returns the WDF failure status if the USB traits cannot be retrieved.
     fn retrieve_device_traits(&mut self) -> Result<u32, NtStatus>;
 
     /// `WdfUsbTargetDeviceSelectConfig` with `WDF_USB_DEVICE_SELECT_CONFIG_PARAMS_INIT_SINGLE_INTERFACE`.
     /// Stores `ConfiguredUsbInterface` and returns `NumberConfiguredPipes`, or the failure status.
+    ///
+    /// # Errors
+    /// Returns the WDF failure status if the interface cannot be selected.
     fn select_single_interface(&mut self) -> Result<u8, NtStatus>;
 
     /// `WdfUsbInterfaceGetConfiguredPipe(UsbInterface, index, &PipeInfo)`: the pipe's `PipeType`.
@@ -74,9 +80,7 @@ pub trait UsbHardware: ControlTransfer {
     /// pipe), or the reset of `InterruptPipe` to NULL at the start of a selection (`None`, the B20 P2 fix).
     /// The glue keeps its `WDFUSBPIPE` handle in sync with [`DeviceState::interrupt_pipe`] here: the handle
     /// is the one `WdfUsbInterfaceGetConfiguredPipe` returned for `index`. Default: nothing.
-    fn interrupt_pipe_selected(&mut self, index: Option<u8>) {
-        let _ = index;
-    }
+    fn interrupt_pipe_selected(&mut self, _index: Option<u8>) {}
 
     /// `WdfUsbTargetPipeConfigContinuousReader` on pipe `index`. The caller ignores the status (spec B9):
     /// trace failures here.
@@ -114,7 +118,7 @@ pub fn continuous_reader_config(state: &DeviceState) -> Option<ContinuousReaderC
 
 /// `SelectInterruptInterface`: selects the single interface, then walks the configured pipes in order,
 /// calling `SetNoMaximumPacketSizeCheck` on **every visited pipe** (it must precede the reader
-/// configuration: 526 is not a multiple of any realistic MaxPacketSize, spec B28), and takes the first
+/// configuration: 526 is not a multiple of any realistic `MaxPacketSize`, spec B28), and takes the first
 /// interrupt pipe regardless of direction (`tp_ep` is ignored, spec B20, preserved).
 ///
 /// Returns the select-config failure, `STATUS_INVALID_DEVICE_STATE` if there is no interrupt pipe, or
@@ -150,7 +154,7 @@ pub fn select_interrupt_interface<H: UsbHardware + ?Sized>(
 
 /// `AmtPtpConfigContReaderForInterruptEndPoint`: configures the continuous reader on the interrupt pipe
 /// and **always returns `STATUS_SUCCESS`** (spec B9, preserved: a failed configuration leaves the device
-/// without input but PrepareHardware succeeds).
+/// without input but `PrepareHardware` succeeds).
 pub fn configure_continuous_reader<H: UsbHardware + ?Sized>(
     state: &DeviceState,
     hw: &mut H,
@@ -209,7 +213,7 @@ pub fn prepare_hardware<H: UsbHardware + ?Sized>(state: &DeviceState, hw: &mut H
 /// 3. start the interrupt pipe's I/O target (starts the continuous reader) and return its status.
 ///
 /// The mode switch happens before the reader starts. Without an interrupt pipe (impossible: KMDF calls
-/// D0Entry only after a successful PrepareHardware, which guarantees one) the C would dereference NULL;
+/// `D0Entry` only after a successful `PrepareHardware`, which guarantees one) the C would dereference NULL;
 /// this returns `STATUS_INVALID_DEVICE_STATE` instead.
 pub fn d0_entry<H: UsbHardware + ?Sized>(state: &DeviceState, hw: &mut H) -> NtStatus {
     let gates = state.input_gates();
@@ -235,6 +239,7 @@ pub fn d0_exit<H: UsbHardware + ?Sized>(state: &DeviceState, hw: &mut H) -> NtSt
 
 /// `AmtPtpEvtUsbInterruptReadersFailed`: always `TRUE` ("reset the pipe and restart the readers"),
 /// whatever the status. Retries indefinitely.
+#[must_use]
 pub const fn readers_failed(_status: NtStatus, _usbd_status: i32) -> bool {
     true
 }
@@ -249,6 +254,7 @@ pub enum IoStopAction {
 }
 
 /// `AmtPtpDeviceUsbKmEvtIoStop(Queue, Request, ActionFlags)`: trace only.
+#[must_use]
 pub const fn io_stop(_action_flags: u32) -> IoStopAction {
     IoStopAction::None
 }
@@ -298,7 +304,7 @@ pub const DEFAULT_QUEUE: QueueSpec = QueueSpec {
     io_stop: true,
 };
 
-/// The InputQueue for pended READ_REPORTs: `WDF_IO_QUEUE_CONFIG_INIT(&cfg, WdfIoQueueDispatchManual)`,
+/// The `InputQueue` for pended `READ_REPORTs`: `WDF_IO_QUEUE_CONFIG_INIT(&cfg, WdfIoQueueDispatchManual)`,
 /// `PowerManaged = WdfFalse`, no callbacks. Never started, stopped or purged by the driver.
 pub const INPUT_QUEUE: QueueSpec = QueueSpec {
     dispatch: QueueDispatch::Manual,
@@ -323,6 +329,7 @@ pub struct Guid {
 
 impl Guid {
     /// The 16 in-memory bytes (Data1..Data3 little-endian).
+    #[must_use]
     pub const fn to_bytes(self) -> [u8; 16] {
         let [a0, a1, a2, a3] = self.data1.to_le_bytes();
         let [b0, b1] = self.data2.to_le_bytes();

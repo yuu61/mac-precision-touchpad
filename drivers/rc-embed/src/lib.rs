@@ -27,11 +27,9 @@
 //!   `link.exe` converts it (cvtres) for the target machine, so the same `.res`
 //!   works for x64 and ARM64 and for `/DRIVER` images.
 
+use core::error::Error;
 use std::{
-    env,
-    error::Error,
-    fmt,
-    fs,
+    env, fmt, fs,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -53,9 +51,11 @@ fn err(message: impl Into<String>) -> RcError {
 }
 
 fn env_path(name: &str) -> Result<PathBuf, RcError> {
-    env::var_os(name)
-        .map(PathBuf::from)
-        .ok_or_else(|| err(format!("{name} is not set; rc-embed must run from a build script")))
+    env::var_os(name).map(PathBuf::from).ok_or_else(|| {
+        err(format!(
+            "{name} is not set; rc-embed must run from a build script"
+        ))
+    })
 }
 
 /// Strips the `\\?\` prefix that `canonicalize` adds on Windows; `rc.exe` does
@@ -75,22 +75,33 @@ fn locate_sdk() -> Result<(PathBuf, PathBuf, PathBuf), RcError> {
         .include_paths()
         .map_err(|e| err(format!("cannot determine WDK include paths: {e}")))?
         .map(|p| plain(&p))
-        .find(|p| p.file_name().is_some_and(|n| n.eq_ignore_ascii_case("shared")))
+        .find(|p| {
+            p.file_name()
+                .is_some_and(|n| n.eq_ignore_ascii_case("shared"))
+        })
         .ok_or_else(|| err("WDK include paths contain no `shared` directory"))?;
-    let sdk_include = shared
-        .parent()
-        .ok_or_else(|| err(format!("unexpected SDK include layout: {}", shared.display())))?;
+    let sdk_include = shared.parent().ok_or_else(|| {
+        err(format!(
+            "unexpected SDK include layout: {}",
+            shared.display()
+        ))
+    })?;
     let um = sdk_include.join("um");
     if !um.join("winres.h").is_file() {
         return Err(err(format!("winres.h not found in {}", um.display())));
     }
-    let sdk_version = sdk_include
-        .file_name()
-        .ok_or_else(|| err(format!("unexpected SDK include layout: {}", shared.display())))?;
-    let root = sdk_include
-        .parent()
-        .and_then(Path::parent)
-        .ok_or_else(|| err(format!("unexpected SDK include layout: {}", shared.display())))?;
+    let sdk_version = sdk_include.file_name().ok_or_else(|| {
+        err(format!(
+            "unexpected SDK include layout: {}",
+            shared.display()
+        ))
+    })?;
+    let root = sdk_include.parent().and_then(Path::parent).ok_or_else(|| {
+        err(format!(
+            "unexpected SDK include layout: {}",
+            shared.display()
+        ))
+    })?;
     let host = match env::consts::ARCH {
         "x86_64" => "x64",
         "aarch64" => "arm64",
@@ -98,7 +109,11 @@ fn locate_sdk() -> Result<(PathBuf, PathBuf, PathBuf), RcError> {
         other => return Err(err(format!("unsupported build host architecture {other}"))),
     };
     let rc = root.join("bin").join(sdk_version).join(host).join("rc.exe");
-    let rc = if rc.is_file() { rc } else { PathBuf::from("rc.exe") };
+    let rc = if rc.is_file() {
+        rc
+    } else {
+        PathBuf::from("rc.exe")
+    };
     Ok((um, shared, rc))
 }
 
@@ -110,7 +125,7 @@ fn locate_sdk() -> Result<(PathBuf, PathBuf, PathBuf), RcError> {
 /// # Errors
 /// Returns an error if the WDK/SDK cannot be located, `rc.exe` cannot be started,
 /// or `rc.exe` reports a failure (its output is forwarded to Cargo's log).
-pub fn compile_and_link(rc_file: impl AsRef<Path>) -> Result<PathBuf, Box<dyn Error>> {
+pub fn compile_and_link<P: AsRef<Path>>(rc_file: P) -> Result<PathBuf, Box<dyn Error>> {
     let manifest_dir = env_path("CARGO_MANIFEST_DIR")?;
     let out_dir = env_path("OUT_DIR")?;
     let rc_file = manifest_dir.join(rc_file);
@@ -125,7 +140,10 @@ pub fn compile_and_link(rc_file: impl AsRef<Path>) -> Result<PathBuf, Box<dyn Er
     println!("cargo::rerun-if-changed={}", rc_file.display());
     for entry in fs::read_dir(&rc_dir)? {
         let path = entry?.path();
-        if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("h")) {
+        if path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("h"))
+        {
             println!("cargo::rerun-if-changed={}", path.display());
         }
     }

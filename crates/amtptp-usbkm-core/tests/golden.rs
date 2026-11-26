@@ -1,6 +1,8 @@
 //! The golden vectors of the porting spec (usbkm.md §5, §6.3, §7.4, Appendices A-C), typed in from the
 //! spec independently of the fixture files.
 
+#![cfg(test)]
+
 mod common;
 
 use amtptp_usbkm_core::config::{FALLBACK_CONFIG, config_for_pid};
@@ -39,7 +41,9 @@ C5150026FF007508960001B102C0050D090EA10185040922A10209521500251075089501B102C0A1
 fn report(action: PacketAction) -> [u8; 50] {
     match action {
         PacketAction::Deliver(ReadReportResult::Report(r)) => r,
-        other => panic!("expected a report, got {other:?}"),
+        other @ (PacketAction::Discard | PacketAction::Deliver(ReadReportResult::DataError)) => {
+            panic!("expected a report, got {other:?}");
+        }
     }
 }
 
@@ -64,7 +68,7 @@ fn appendix_a_report_descriptor() {
         hex(&APPENDIX_A.to_ascii_lowercase()),
         REPORT_DESCRIPTOR.to_vec()
     );
-    let mut out = vec![0u8; 493];
+    let mut out = vec![0_u8; 493];
     assert_eq!(
         get_report_descriptor(Ok(&mut out)),
         Completion::success(493)
@@ -82,9 +86,9 @@ fn appendix_b_hid_descriptor() {
 
 #[test]
 fn golden_a_header_only_button() {
-    let mut packet = vec![0u8; 46];
+    let mut packet = vec![0_u8; 46];
     packet[31] = 0x01;
-    let mut expect = [0u8; 50];
+    let mut expect = [0_u8; 50];
     expect[0] = 0x05;
     expect[49] = 0x01;
     for pid in [0xffff, 0x027a, 0x027c] {
@@ -139,12 +143,12 @@ fn golden_b_prime_13_inch() {
 
 #[test]
 fn golden_c_six_fingers_data_error() {
-    let packet = vec![0u8; 226];
+    let packet = vec![0_u8; 226];
     let action = parse_packet(&FALLBACK_CONFIG, &packet, InputGates::ON, 0);
     assert_eq!(action, PacketAction::Deliver(ReadReportResult::DataError));
-    let mut out = [0xa5u8; 50];
+    let mut out = [0xa5_u8; 50];
     let PacketAction::Deliver(result) = action else {
-        unreachable!()
+        panic!("expected a delivered data error");
     };
     assert_eq!(
         complete_read_report(&result, Ok(&mut out)),
@@ -156,7 +160,7 @@ fn golden_c_six_fingers_data_error() {
 #[test]
 fn golden_d_bad_length_dropped() {
     assert_eq!(
-        parse_packet(&FALLBACK_CONFIG, &[0u8; 47], InputGates::ON, 0),
+        parse_packet(&FALLBACK_CONFIG, &[0_u8; 47], InputGates::ON, 0),
         PacketAction::Discard
     );
 }
@@ -203,7 +207,7 @@ fn wellspring_wire_bytes_6_3() {
 #[test]
 fn feature_reports_5_5_and_5_6() {
     // GET 0x07: 07 05 00, Information 0.
-    let mut caps = [0xaau8; 3];
+    let mut caps = [0xaa_u8; 3];
     let c = get_feature(16, || {
         Some(GetFeaturePacket {
             report_id: 0x07,
@@ -213,7 +217,7 @@ fn feature_reports_5_5_and_5_6() {
     assert_eq!(c, Completion::status(0));
     assert_eq!(caps, [0x07, 0x05, 0x00]);
     // GET 0x08: only [0]=08 [1]=fc.
-    let mut hqa = [0xaau8; 257];
+    let mut hqa = [0xaa_u8; 257];
     let c = get_feature(16, || {
         Some(GetFeaturePacket {
             report_id: 0x08,
@@ -222,7 +226,7 @@ fn feature_reports_5_5_and_5_6() {
     });
     assert_eq!(c, Completion::status(0));
     assert_eq!(hqa[..4], [0x08, 0xfc, 0xaa, 0xaa]);
-    let mut short = [0u8; 256];
+    let mut short = [0_u8; 256];
     let c = get_feature(16, || {
         Some(GetFeaturePacket {
             report_id: 0x08,
@@ -238,7 +242,7 @@ fn feature_reports_5_5_and_5_6() {
     assert_eq!(lifecycle::prepare_hardware(&state, &mut hw), 0);
     assert_eq!(lifecycle::d0_entry(&state, &mut hw), 0);
     hw.take_logs();
-    for (mode, expect) in [(0u8, STATUS_NOT_SUPPORTED), (3, 0), (7, 0)] {
+    for (mode, expect) in [(0_u8, STATUS_NOT_SUPPORTED), (3, 0), (7, 0)] {
         let report = [0x04, mode];
         let c = set_feature(
             16,
@@ -278,7 +282,7 @@ fn attributes_5_3() {
         product_id: 0x0273,
         bcd_device: 0x0905,
     };
-    let mut out = [0x11u8; 32];
+    let mut out = [0x11_u8; 32];
     assert_eq!(
         get_device_attributes(Ok(&mut out), ids),
         Completion::success(32)

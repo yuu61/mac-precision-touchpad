@@ -13,34 +13,38 @@ use crate::process;
 /// libclang for wdk-sys's bindgen. MSYS2 may put an unrelated libclang on PATH.
 const DEFAULT_LIBCLANG_PATH: &str = r"C:\Program Files\LLVM\bin";
 
-/// Variables that must not reach the driver builds: the target dir must stay
-/// inside each workspace (wdk-build walks up from OUT_DIR to the first
-/// Cargo.lock), and RUSTFLAGS-style variables replace `[build] rustflags`,
-/// silently dropping the required `+crt-static`.
-const DRIVER_ENV_REMOVE: [&str; 6] = [
-    "CARGO_TARGET_DIR",
-    "CARGO_BUILD_TARGET_DIR",
-    "CARGO_BUILD_TARGET",
+// Cargo replaces its configured rustflags when any of these variables are set.
+const RUSTFLAGS_ENV: [&str; 3] = [
     "RUSTFLAGS",
     "CARGO_ENCODED_RUSTFLAGS",
     "CARGO_BUILD_RUSTFLAGS",
 ];
 
+/// Variables that must not reach the driver builds: the target dir must stay
+/// inside each workspace (wdk-build walks up from `OUT_DIR` to the first
+/// Cargo.lock), and RUSTFLAGS-style variables replace `[build] rustflags`,
+/// silently dropping the required `+crt-static`.
+const DRIVER_TARGET_ENV: [&str; 3] = [
+    "CARGO_TARGET_DIR",
+    "CARGO_BUILD_TARGET_DIR",
+    "CARGO_BUILD_TARGET",
+];
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Workspace {
-    /// `drivers/km`: KMDF (AmtPtpDeviceUsbKm, AmtPtpDeviceSpiKm, AmtPtpHidFilter).
+    /// `drivers/km`: KMDF (`AmtPtpDeviceUsbKm`, `AmtPtpDeviceSpiKm`, `AmtPtpHidFilter`).
     Km,
-    /// `drivers/um`: UMDF (AmtPtpDeviceUsbUm).
+    /// `drivers/um`: UMDF (`AmtPtpDeviceUsbUm`).
     Um,
 }
 
 impl Workspace {
-    pub const ALL: [Workspace; 2] = [Workspace::Km, Workspace::Um];
+    pub const ALL: [Self; 2] = [Self::Km, Self::Um];
 
-    pub fn dir_name(self) -> &'static str {
+    pub const fn dir_name(self) -> &'static str {
         match self {
-            Workspace::Km => "km",
-            Workspace::Um => "um",
+            Self::Km => "km",
+            Self::Um => "um",
         }
     }
 
@@ -87,7 +91,7 @@ fn framework_version_from_manifest(ws: Workspace, text: &str) -> Result<String, 
     let number = |key: &str| -> Result<u32, String> {
         let v = get(key)?;
         v.parse::<u32>()
-            .map_err(|_| format!("[{SECTION}] {key} = {v} is not a number"))
+            .map_err(|error| format!("[{SECTION}] {key} = {v} is not a number: {error}"))
     };
     let major = number(&format!("{prefix}-version-major"))?;
     let minor = number(&format!("target-{prefix}-version-minor"))?;
@@ -128,7 +132,7 @@ fn cargo_program() -> OsString {
 fn driver_cargo(ws: Workspace) -> Command {
     let mut cmd = Command::new(cargo_program());
     cmd.current_dir(ws.dir());
-    for var in DRIVER_ENV_REMOVE {
+    for var in DRIVER_TARGET_ENV.into_iter().chain(RUSTFLAGS_ENV) {
         if env::var_os(var).is_some() {
             println!(
                 "xtask: note: not passing {var} to the {} driver build",
@@ -175,8 +179,7 @@ pub fn build_drivers(
     Ok(())
 }
 
-/// `cargo xtask test`: host-workspace tests, then clippy (-D warnings) in all
-/// three workspaces. Runs every step and reports all failures at the end.
+/// Runs the host tests and strict Clippy checks, collecting failures from every step.
 pub fn test_all() -> Result<(), String> {
     let root = repo_root();
     let mut steps: Vec<(String, Command)> = Vec::new();
@@ -186,20 +189,36 @@ pub fn test_all() -> Result<(), String> {
     steps.push(("cargo test (host workspace)".into(), host_test));
 
     let mut host_clippy = Command::new(cargo_program());
+    for var in RUSTFLAGS_ENV {
+        host_clippy.env_remove(var);
+    }
     host_clippy.current_dir(&root).args([
         "clippy",
         "--workspace",
         "--all-targets",
+        "--all-features",
         "--",
         "-D",
         "warnings",
     ]);
     steps.push(("cargo clippy (host workspace)".into(), host_clippy));
 
+    // Cargo Clippy only wraps workspace members. Use Clippy as the rustc wrapper
+    // so both WDK models also lint wdf-support and rc-embed in their build graph.
+    let clippy_driver = Path::new(&cargo_program()).with_file_name("clippy-driver.exe");
     for ws in Workspace::ALL {
         let mut clippy = driver_cargo(ws);
-        clippy.args(["clippy", "--", "-D", "warnings"]);
-        steps.push((format!("cargo clippy (drivers/{})", ws.dir_name()), clippy));
+        clippy
+            .env_remove("RUSTC_WORKSPACE_WRAPPER")
+            .env("RUSTC_WRAPPER", &clippy_driver)
+            .args([
+                "check",
+                "--workspace",
+                "--all-features",
+                "--config",
+                r#"build.rustflags=["-Dwarnings"]"#,
+            ]);
+        steps.push((format!("Clippy (drivers/{})", ws.dir_name()), clippy));
     }
 
     let mut failed = Vec::new();
@@ -256,9 +275,9 @@ target-umdf-version-minor = 15
 
     #[test]
     fn rejects_wrong_driver_type_or_missing_keys() {
-        assert!(framework_version_from_manifest(Workspace::Um, KM).is_err());
-        assert!(framework_version_from_manifest(Workspace::Km, UM).is_err());
-        assert!(framework_version_from_manifest(Workspace::Km, "[workspace]\n").is_err());
+        framework_version_from_manifest(Workspace::Um, KM).unwrap_err();
+        framework_version_from_manifest(Workspace::Km, UM).unwrap_err();
+        framework_version_from_manifest(Workspace::Km, "[workspace]\n").unwrap_err();
     }
 
     #[test]

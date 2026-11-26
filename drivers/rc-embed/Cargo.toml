@@ -18,3 +18,8 @@ doctest = false
 
 [dependencies]
 wdk-build = "=0.6.0"
+
+[lints.clippy]
+cargo = { level = "deny", priority = -1 }
+# Dependency versions are checked on the driver workspace that builds this crate.
+multiple_crate_versions = "allow"

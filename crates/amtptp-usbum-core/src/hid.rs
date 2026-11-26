@@ -2,7 +2,7 @@
 //! Hid.c: descriptors, attributes, strings and feature reports.
 //!
 //! Every handler returns an [`IoctlOutcome`]; the glue then calls `WdfRequestSetInformation` and
-//! `WdfRequestComplete` exactly once (the C dispatcher completes every request except READ_REPORT).
+//! `WdfRequestComplete` exactly once (the C dispatcher completes every request except `READ_REPORT`).
 
 use ptp_hid::common::{
     PTP_COLLECTION_MOUSE, PTP_COLLECTION_WINDOWS, REPORTID_DEVICE_CAPS, REPORTID_FUNCSWITCH,
@@ -51,13 +51,14 @@ pub enum IoctlRoute {
     SetFeature,
     /// `IOCTL_UMDF_HID_GET_FEATURE` → [`get_feature`].
     GetFeature,
-    /// Everything else (WRITE_REPORT, ACTIVATE/DEACTIVATE, idle notification, SET_OUTPUT_REPORT,
-    /// GET_INPUT_REPORT, physical descriptor, unknown codes): completed with [`STATUS_NOT_SUPPORTED`] and
+    /// Everything else (`WRITE_REPORT`, ACTIVATE/DEACTIVATE, idle notification, `SET_OUTPUT_REPORT`,
+    /// `GET_INPUT_REPORT`, physical descriptor, unknown codes): completed with [`STATUS_NOT_SUPPORTED`] and
     /// Information 0, **not** forwarded ([`IoctlOutcome::NOT_SUPPORTED`]).
     NotSupported,
 }
 
 /// The `switch (IoControlCode)` of Queue.c:150-202.
+#[must_use]
 pub const fn route_ioctl(io_control_code: u32) -> IoctlRoute {
     match io_control_code {
         IOCTL_HID_GET_DEVICE_DESCRIPTOR => IoctlRoute::GetDeviceDescriptor,
@@ -71,7 +72,7 @@ pub const fn route_ioctl(io_control_code: u32) -> IoctlRoute {
     }
 }
 
-/// A TraceLogging event the C driver writes on this path (provider `AmtPtpDeviceTraceProvider`).
+/// A `TraceLogging` event the C driver writes on this path (provider `AmtPtpDeviceTraceProvider`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TraceEvent {
     /// `DeviceIdentificationEvent`, Routine `"AmtPtpGetHidDescriptor"`, `idProduct`, Subtype
@@ -91,12 +92,14 @@ pub enum TraceEvent {
 }
 
 impl TraceEvent {
-    /// The TraceLogging event name.
+    /// The `TraceLogging` event name.
+    #[must_use]
     pub const fn event_name(self) -> &'static str {
         "DeviceIdentificationEvent"
     }
 
     /// The `"Routine"` field.
+    #[must_use]
     pub const fn routine(self) -> &'static str {
         match self {
             Self::HidDescriptorNotFound { .. } => "AmtPtpGetHidDescriptor",
@@ -105,6 +108,7 @@ impl TraceEvent {
     }
 
     /// The `"Subtype"` field.
+    #[must_use]
     pub const fn subtype(self) -> &'static str {
         match self {
             Self::HidDescriptorNotFound { .. } => "DeviceDescriptorNotFoundInRegistry",
@@ -120,7 +124,7 @@ pub struct IoctlOutcome {
     pub status: NtStatus,
     /// `WdfRequestSetInformation` value (0 when the C handler never set it).
     pub information: usize,
-    /// TraceLogging event to write before completing, if any.
+    /// `TraceLogging` event to write before completing, if any.
     pub event: Option<TraceEvent>,
 }
 
@@ -129,6 +133,7 @@ impl IoctlOutcome {
     pub const NOT_SUPPORTED: Self = Self::status(STATUS_NOT_SUPPORTED);
 
     /// A completion with `status` and Information 0.
+    #[must_use]
     pub const fn status(status: NtStatus) -> Self {
         Self {
             status,
@@ -138,6 +143,7 @@ impl IoctlOutcome {
     }
 
     /// A successful completion with `information`.
+    #[must_use]
     pub const fn success(information: usize) -> Self {
         Self {
             status: STATUS_SUCCESS,
@@ -196,7 +202,7 @@ pub fn get_report_descriptor<R: HidRequest>(state: &DeviceState, request: &mut R
 }
 
 /// `AmtPtpGetDeviceAttribs` (Hid.c:188-243): `WdfRequestRetrieveOutputBuffer(32)` (failure: that
-/// status), then write `Size` 32, VendorID 0x8910, ProductID = `idProduct`, VersionNumber 1 into bytes
+/// status), then write `Size` 32, `VendorID` 0x8910, `ProductID` = `idProduct`, `VersionNumber` 1 into bytes
 /// 0..10. `Reserved` (bytes 10..32) is left untouched. Information 32.
 pub fn get_device_attributes<R: HidRequest>(state: &DeviceState, request: &mut R) -> IoctlOutcome {
     let buffer = match request.output_buffer(HID_DEVICE_ATTRIBUTES_LEN) {
@@ -367,15 +373,14 @@ pub fn set_feature<R: HidRequest, C: ControlPipe>(
     }
 }
 
-/// SET_FEATURE 0x04 (Hid.c:935-1041).
+/// `SET_FEATURE` 0x04 (Hid.c:935-1041).
 fn set_input_mode<C: ControlPipe>(state: &DeviceState, control: &mut C, mode: u8) -> IoctlOutcome {
     // P2: the C code dereferences DeviceInfo, which is never NULL once the device has started.
     let Some(cfg) = state.config() else {
         return IoctlOutcome::success(0);
     };
-    let device_mode_on = match get_wellspring_mode(cfg, control) {
-        Ok(on) => on,
-        Err(_) => return IoctlOutcome::success(0),
+    let Ok(device_mode_on) = get_wellspring_mode(cfg, control) else {
+        return IoctlOutcome::success(0);
     };
     let switch_status = match mode {
         PTP_COLLECTION_MOUSE if device_mode_on => set_wellspring_mode(state, cfg, control, false),

@@ -2,7 +2,7 @@
 //! normally triggers one lower `IOCTL_HID_READ_REPORT` to the Apple PDO, and each lower completion turns
 //! Apple's packet into a PTP input report for the **oldest** queued upstream request.
 //!
-//! Everything here runs at IRQL <= DISPATCH_LEVEL and is non-paged.
+//! Everything here runs at IRQL <= `DISPATCH_LEVEL` and is non-paged.
 
 use core::ptr::{null, null_mut, write_bytes};
 
@@ -44,7 +44,7 @@ declare_context_type!(
 /// arrives while unconfigured just waits in the queue (SPI-B12/B13, preserved).
 ///
 /// # Safety
-/// `device` is the request's live device and `context` its context; IRQL <= DISPATCH_LEVEL.
+/// `device` is the request's live device and `context` its context; IRQL <= `DISPATCH_LEVEL`.
 pub(crate) unsafe fn spi_input_routine_worker(
     device: WDFDEVICE,
     context: &DeviceContext,
@@ -93,7 +93,7 @@ fn trace_issue_failure(step: &[u8], status: NTSTATUS) {
 ///
 /// 1. `WdfRequestCreate` (context `WORKER_REQUEST_CONTEXT`, parent = the device, target = the local I/O
 ///    target).
-/// 2. `WdfMemoryCreateFromLookaside` (1024 bytes, NonPagedPoolNx). The buffer is zeroed (P2: lookaside
+/// 2. `WdfMemoryCreateFromLookaside` (1024 bytes, `NonPagedPoolNx`). The buffer is zeroed (P2: lookaside
 ///    buffers are not zero-initialized and may hold an earlier read; the completion routine only looks at
 ///    the first `Information` bytes anyway, so this changes nothing observable).
 /// 3. Context = {device context, memory}.
@@ -105,7 +105,7 @@ fn trace_issue_failure(step: &[u8], status: NTSTATUS) {
 /// the upstream request stays queued and is served by a later completion.
 ///
 /// # Safety
-/// `device` is a live device of this driver and `context` its context; IRQL <= DISPATCH_LEVEL.
+/// `device` is a live device of this driver and `context` its context; IRQL <= `DISPATCH_LEVEL`.
 pub(crate) unsafe fn spi_input_issue_request(device: WDFDEVICE, context: &DeviceContext) {
     let target: WDFIOTARGET = context.spi_trackpad_io_target;
 
@@ -229,7 +229,7 @@ pub(crate) unsafe fn spi_input_issue_request(device: WDFDEVICE, context: &Device
     }
 }
 
-/// `AmtPtpRequestCompletionRoutine` (Input.c:157-321): completion of a lower read, IRQL <= DISPATCH_LEVEL,
+/// `AmtPtpRequestCompletionRoutine` (Input.c:157-321): completion of a lower read, IRQL <= `DISPATCH_LEVEL`,
 /// possibly on several CPUs at once.
 ///
 /// 1. Retrieve the oldest request from `HidQueue`. None: the data is dropped and no new read is issued
@@ -282,7 +282,7 @@ unsafe extern "C" fn request_completion_routine(
 ///
 /// # Safety
 /// `context` is the issuing device's context, `spi_request` the completed lower read and `params` its
-/// completion parameters; IRQL <= DISPATCH_LEVEL.
+/// completion parameters; IRQL <= `DISPATCH_LEVEL`.
 unsafe fn serve_oldest_read(
     context: &DeviceContext,
     spi_request: WDFREQUEST,

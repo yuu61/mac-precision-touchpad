@@ -3,11 +3,11 @@
 //! - Default queue: `WDF_IO_QUEUE_CONFIG_INIT_DEFAULT_QUEUE(Parallel)`, `PowerManaged = WdfUseDefault`
 //!   (= not power-managed for a filter), `EvtIoInternalDeviceControl` + `EvtIoStop`, no attributes. The
 //!   handle is not kept. Request types without a callback are forwarded down by WDF (filter).
-//! - InputQueue: `WDF_IO_QUEUE_CONFIG_INIT(Manual)`, `PowerManaged = WdfFalse`, no callbacks, handle in the
+//! - `InputQueue`: `WDF_IO_QUEUE_CONFIG_INIT(Manual)`, `PowerManaged = WdfFalse`, no callbacks, handle in the
 //!   context. Never started, stopped or purged by the driver.
 //!
-//! Every internal IOCTL is completed here (none is forwarded) except READ_REPORT, which is forwarded to the
-//! InputQueue and completed later by the reader (`crate::interrupt`). Requests are completed the way the C
+//! Every internal IOCTL is completed here (none is forwarded) except `READ_REPORT`, which is forwarded to the
+//! `InputQueue` and completed later by the reader (`crate::interrupt`). Requests are completed the way the C
 //! does it: `WdfRequestSetInformation` exactly where the C calls it (non-zero Information), then
 //! `WdfRequestComplete(status)`; see [`complete`].
 
@@ -65,11 +65,11 @@ fn queue_config(spec: &QueueSpec) -> WDF_IO_QUEUE_CONFIG {
     config
 }
 
-/// `AmtPtpDeviceUsbKmQueueInitialize` (Queue.c:24-103): the default queue, then the InputQueue. Returns
-/// the first failure. PASSIVE_LEVEL, `PAGE` as in C.
+/// `AmtPtpDeviceUsbKmQueueInitialize` (Queue.c:24-103): the default queue, then the `InputQueue`. Returns
+/// the first failure. `PASSIVE_LEVEL`, `PAGE` as in C.
 ///
 /// # Safety
-/// `device` is the live device that owns `context`; PASSIVE_LEVEL.
+/// `device` is the live device that owns `context`; `PASSIVE_LEVEL`.
 #[unsafe(link_section = "PAGE")]
 pub(crate) unsafe fn queue_initialize(device: WDFDEVICE, context: &DeviceContext) -> NTSTATUS {
     wdk::paged_code!();
@@ -186,7 +186,7 @@ pub(crate) fn retrieve_output_memory(
 }
 
 /// `Result<RequestOutputMemory, NtStatus>` → the `Result<&mut M, NtStatus>` the core takes.
-pub(crate) fn as_output<'m, 'r>(
+pub(crate) const fn as_output<'m, 'r>(
     output: &'m mut Result<RequestOutputMemory<'r>, NtStatus>,
 ) -> Result<&'m mut RequestOutputMemory<'r>, NtStatus> {
     match output {
@@ -247,7 +247,7 @@ unsafe fn xfer_packet(request: &Request) -> Option<(*mut u8, usize, u8)> {
     Some((buffer, length as usize, report_id))
 }
 
-/// GET_FEATURE packet: the caller's report buffer as `&mut [u8]`; a NULL `reportBuffer` becomes an empty
+/// `GET_FEATURE` packet: the caller's report buffer as `&mut [u8]`; a NULL `reportBuffer` becomes an empty
 /// slice (spec B16, P2: the C would write through NULL).
 ///
 /// # Safety
@@ -276,7 +276,7 @@ unsafe fn get_feature_packet(request: &mut Request) -> Option<GetFeaturePacket<'
     })
 }
 
-/// SET_FEATURE packet: the report as `&[u8]` (NULL `reportBuffer` → empty, spec B16).
+/// `SET_FEATURE` packet: the report as `&[u8]` (NULL `reportBuffer` → empty, spec B16).
 ///
 /// # Safety
 /// As [`xfer_packet`]; `reportBuffer` points at `reportBufferLen` readable bytes.
@@ -307,7 +307,8 @@ unsafe fn set_feature_packet(request: &Request) -> Option<SetFeaturePacket<'_>> 
             keyword(KW_QUEUE),
             u8("InputMode", &mode)
         );
-    } else if report_id == REPORTID_FUNCSWITCH
+    }
+    if report_id == REPORTID_FUNCSWITCH
         && let Some(bits) = feature::selective_report_trace_bits(report_buffer)
     {
         // Selective reporting is traced only, never applied (spec B15). The C reads the bits from
@@ -328,7 +329,7 @@ unsafe fn set_feature_packet(request: &Request) -> Option<SetFeaturePacket<'_>> 
 }
 
 /// `AmtPtpDeviceUsbKmEvtIoDeviceControl` (Queue.c:105-182), registered as the default queue's
-/// `EvtIoInternalDeviceControl`. Any IRQL <= DISPATCH_LEVEL (READ_REPORT can arrive at DISPATCH_LEVEL);
+/// `EvtIoInternalDeviceControl`. Any IRQL <= `DISPATCH_LEVEL` (`READ_REPORT` can arrive at `DISPATCH_LEVEL`);
 /// non-paged. The two lengths are unused, as in C (the feature handlers read them from
 /// `WdfRequestGetParameters`).
 unsafe extern "C" fn evt_io_internal_device_control(
@@ -460,7 +461,7 @@ fn trace_failure(handler: &str, completion: &Completion) {
 
 /// `AmtPtpDeviceUsbKmEvtIoStop` (Queue.c:221-280): trace only. No `WdfRequestStopAcknowledge`, no
 /// completion: every request of the default queue is completed or forwarded by the dispatcher before it
-/// returns (a SET_FEATURE in a synchronous transfer completes when the transfer does).
+/// returns (a `SET_FEATURE` in a synchronous transfer completes when the transfer does).
 unsafe extern "C" fn evt_io_stop(queue: WDFQUEUE, request: WDFREQUEST, action_flags: ULONG) {
     let IoStopAction::None = amtptp_usbkm_core::lifecycle::io_stop(action_flags);
     let queue = queue as usize;

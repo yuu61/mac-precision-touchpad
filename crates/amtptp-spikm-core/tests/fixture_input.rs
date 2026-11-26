@@ -10,7 +10,9 @@
 //!   every bit flagged in `undef` must be 0.
 //! - SPI-B9 (P2): bytes at or past `(LONG)len` read as 0, so `b9=1` records compare `out_tail0`. As a
 //!   cross-check, parsing the whole 1024-byte buffer (what C does) reproduces `out`.
-//! - SPI-B8 (P1): ScanTime arithmetic from `qpcf` and `lrt_in` exactly as C.
+//! - SPI-B8 (P1): `ScanTime` arithmetic from `qpcf` and `lrt_in` exactly as C.
+
+#![cfg(test)]
 
 mod common;
 
@@ -29,7 +31,7 @@ const FW_COPY: &str = "framework: WdfMemoryCopyFromBuffer c0000023 (outlen < 30)
 
 /// README rule for `undef` (bits the C code leaves uninitialized), over the 30 report bytes.
 fn undef_rule(num_of_fingers: u8) -> [u8; REPORT_LEN] {
-    let mut mask = [0u8; REPORT_LEN];
+    let mut mask = [0_u8; REPORT_LEN];
     let filled = usize::from(num_of_fingers.min(5));
     for i in 0..5 {
         let base = 1 + 5 * i;
@@ -56,7 +58,7 @@ fn replay(e: &Expect) -> Tally {
     let recs = load(e.file);
     assert_eq!(recs.len(), e.records, "{}: record count", e.file);
     let mut tally = Tally::default();
-    let mut b9 = 0usize;
+    let mut b9 = 0_usize;
     for r in &recs {
         let ctx = format!("{}:{} {}", e.file, r.line, r.case());
         let pid = r.hex16("pid");
@@ -77,10 +79,10 @@ fn replay(e: &Expect) -> Tally {
         assert_eq!(rt.last_report_time(), lrt_in);
 
         let input = r.bytes("in");
-        let mut buffer = vec![0u8; LOWER_READ_BUFFER_LEN];
+        let mut buffer = vec![0_u8; LOWER_READ_BUFFER_LEN];
         buffer[..input.len()].copy_from_slice(&input);
         let len: u64 = r.dec("len");
-        let mut qpc_calls = 0u32;
+        let mut qpc_calls = 0_u32;
         let result = rt.complete_lower_read(info, len, &buffer, || {
             qpc_calls += 1;
             qpcf
@@ -91,14 +93,13 @@ fn replay(e: &Expect) -> Tally {
         let mut out = prefill(outlen);
         let wdf = wdf_failures(r);
         let (status, information, infoset) = match result {
-            Ok(bytes) if outlen == 0 => {
+            Ok(_) if outlen == 0 => {
                 assert_eq!(
                     wdf,
                     [("WdfRequestRetrieveOutputMemory".into(), "c0000023".into())]
                 );
                 tally.add(FW_RETRIEVE);
-                let _ = bytes;
-                (STATUS_BUFFER_TOO_SMALL, 0u64, 0u32)
+                (STATUS_BUFFER_TOO_SMALL, 0_u64, 0_u32)
             }
             Ok(_) if outlen < REPORT_LEN => {
                 assert_eq!(wdf, [("WdfMemoryCopyFromBuffer".into(), "c0000023".into())]);
@@ -149,7 +150,7 @@ fn replay(e: &Expect) -> Tally {
             // Cross-check: reading the whole buffer like C reproduces the C output `out`.
             let rt_c = DeviceRuntime::new();
             rt_c.on_d0_entry(lrt_in);
-            let _ = rt_c.on_self_managed_io_init_or_restart(STATUS_SUCCESS, || lrt_in);
+            let _status = rt_c.on_self_managed_io_init_or_restart(STATUS_SUCCESS, || lrt_in);
             let whole = rt_c
                 .complete_lower_read(info, LOWER_READ_BUFFER_LEN as u64, &buffer, || qpcf)
                 .expect("b9 records pass the length gate");
@@ -158,26 +159,30 @@ fn replay(e: &Expect) -> Tally {
         }
 
         // SPI-B5 (P2): every bit C leaves uninitialized is zero in our report.
-        if let Some(undef) = r.opt("undef").filter(|u| *u != "-") {
-            let undef = common::hex(undef);
-            assert_eq!(undef.len(), outlen, "{ctx}: undef length");
-            let n = input.get(30).copied().unwrap_or(0);
-            let rule = undef_rule(n);
-            assert_eq!(undef[..REPORT_LEN], rule, "{ctx}: undef rule");
-            assert!(undef[REPORT_LEN..].iter().all(|&b| b == 0), "{ctx}");
-            for (o, m) in out.iter().zip(&undef) {
-                assert_eq!(o & m, 0, "{ctx}: uninitialized bit not zero");
+        match r.opt("undef").filter(|u| *u != "-") {
+            Some(undef) => {
+                let undef = common::hex(undef);
+                assert_eq!(undef.len(), outlen, "{ctx}: undef length");
+                let n = input.get(30).copied().unwrap_or(0);
+                let rule = undef_rule(n);
+                assert_eq!(undef[..REPORT_LEN], rule, "{ctx}: undef rule");
+                assert!(undef[REPORT_LEN..].iter().all(|&b| b == 0), "{ctx}");
+                for (o, m) in out.iter().zip(&undef) {
+                    assert_eq!(o & m, 0, "{ctx}: uninitialized bit not zero");
+                }
             }
-        } else if status == STATUS_SUCCESS {
-            // Random records omit `undef`; it follows the same rule, so the masked bits must be 0.
-            let n = if len as u32 as i32 >= 46 {
-                input.get(30).copied().unwrap_or(0)
-            } else {
-                0
-            };
-            for (o, m) in out.iter().zip(undef_rule(n)) {
-                assert_eq!(o & m, 0, "{ctx}: uninitialized bit not zero");
+            None if status == STATUS_SUCCESS => {
+                // Random records omit `undef`; it follows the same rule, so the masked bits must be 0.
+                let n = if len as u32 as i32 >= 46 {
+                    input.get(30).copied().unwrap_or(0)
+                } else {
+                    0
+                };
+                for (o, m) in out.iter().zip(undef_rule(n)) {
+                    assert_eq!(o & m, 0, "{ctx}: uninitialized bit not zero");
+                }
             }
+            None => {}
         }
     }
     assert_eq!(b9, e.b9, "{}: b9 records", e.file);

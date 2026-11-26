@@ -2,7 +2,7 @@
 //! code makes in `Input.c`, `Hid.c` and `Device.c` that the oracle records, plus the lower-read
 //! completion routine. Pure accessors may differ from C without effect: `WdfMemoryGetBuffer` is
 //! called only on the report path of the completion (C: at entry, with a NULL size), and
-//! GET/SET_FEATURE take their lengths from the `EvtIoInternalDeviceControl` arguments instead of
+//! `GET/SET_FEATURE` take their lengths from the `EvtIoInternalDeviceControl` arguments instead of
 //! `WdfRequestGetParameters` (the same IRP stack-location fields).
 //!
 //! The core decides *which* call happens *when* (it is replayed against the C oracle); this module
@@ -11,9 +11,9 @@
 //! `WdfRequestRetrieveOutputMemory` / `WdfMemoryCopyFromBuffer`) are KMDF's, as in C.
 //!
 //! IRQL: everything here except the mode switch and the attributes query may run at
-//! DISPATCH_LEVEL (parallel default queue, completion routine) and is non-paged. The two
+//! `DISPATCH_LEVEL` (parallel default queue, completion routine) and is non-paged. The two
 //! synchronous sends are only reached from `EvtDeviceSelfManagedIoInit`/`Restart` and the
-//! passive-level recovery timer, i.e. at PASSIVE_LEVEL, as in C.
+//! passive-level recovery timer, i.e. at `PASSIVE_LEVEL`, as in C.
 
 use core::ffi::c_void;
 use core::mem::size_of;
@@ -61,7 +61,7 @@ const _: () = assert!(size_of::<ULONG_PTR>() == size_of::<usize>());
 pub(crate) struct Filter<'a> {
     pub(crate) ctx: &'a DeviceContext,
     /// Trace a failed `WdfIoQueueRetrieveNextRequest` as a dropped input packet (Input.c:176-180).
-    /// Only the lower-read completion sets it: D0Exit drains `HidReadQueue` until that call fails,
+    /// Only the lower-read completion sets it: `D0Exit` drains `HidReadQueue` until that call fails,
     /// which is not an error there.
     trace_input_drop: bool,
 }
@@ -136,7 +136,7 @@ impl FilterIo for Filter<'_> {
         let information = information as ULONG_PTR;
         // SAFETY: `request` is a live request owned by the core (not yet completed).
         unsafe {
-            call_unsafe_wdf_function_binding!(WdfRequestSetInformation, request, information)
+            call_unsafe_wdf_function_binding!(WdfRequestSetInformation, request, information);
         };
     }
 
@@ -339,7 +339,7 @@ impl FilterIo for Filter<'_> {
     fn format_using_current_type(&mut self, request: WDFREQUEST) {
         // SAFETY: live owned request.
         unsafe {
-            call_unsafe_wdf_function_binding!(WdfRequestFormatRequestUsingCurrentType, request)
+            call_unsafe_wdf_function_binding!(WdfRequestFormatRequestUsingCurrentType, request);
         };
     }
 
@@ -536,7 +536,7 @@ impl FilterIo for Filter<'_> {
         );
         // SAFETY: live device; WdfDeviceSetFailed is callable at <= DISPATCH_LEVEL.
         unsafe {
-            call_unsafe_wdf_function_binding!(WdfDeviceSetFailed, self.ctx.device(), failed_action)
+            call_unsafe_wdf_function_binding!(WdfDeviceSetFailed, self.ctx.device(), failed_action);
         };
     }
 
@@ -550,7 +550,7 @@ impl FilterIo for Filter<'_> {
         );
         // SAFETY: the timer was created in AddDevice (parent = device); WdfTimerStart is callable at
         // <= DISPATCH_LEVEL. Its BOOLEAN (already queued) is ignored, as in C.
-        let _ = unsafe {
+        let _was_queued = unsafe {
             call_unsafe_wdf_function_binding!(WdfTimerStart, self.ctx.recovery_timer(), due_time)
         };
     }
@@ -559,7 +559,7 @@ impl FilterIo for Filter<'_> {
         // SAFETY: the work item was created in AddDevice (parent = device); WdfWorkItemEnqueue is
         // callable at <= DISPATCH_LEVEL (a no-op if already queued).
         unsafe {
-            call_unsafe_wdf_function_binding!(WdfWorkItemEnqueue, self.ctx.recovery_work_item())
+            call_unsafe_wdf_function_binding!(WdfWorkItemEnqueue, self.ctx.recovery_work_item());
         };
     }
 
@@ -752,7 +752,7 @@ impl FilterIo for Filter<'_> {
     }
 }
 
-/// Traces a SET_FEATURE (Hid.c:298-336): the report, then the change the core will apply (decoded
+/// Traces a `SET_FEATURE` (Hid.c:298-336): the report, then the change the core will apply (decoded
 /// the same way, from the same bytes) or the rejection. The core reaches `set_feature_packet` only
 /// after its length and NULL `UserBuffer` checks, as in C.
 fn trace_set_feature(report_id: u8, report_buffer: &[u8]) {
@@ -803,7 +803,7 @@ fn trace_set_feature(report_id: u8, report_buffer: &[u8]) {
 }
 
 /// `PtpFilterInputRequestCompletionCallback` (Input.c:119-253): completion routine of every lower
-/// `IOCTL_HID_READ_REPORT`, at IRQL <= DISPATCH_LEVEL.
+/// `IOCTL_HID_READ_REPORT`, at IRQL <= `DISPATCH_LEVEL`.
 ///
 /// Reads the device-context pointer and `RequestMemory` from the request context **before**
 /// anything is deleted (the C code reads `RequestMemory` after deleting the request: HF-B10, P2),

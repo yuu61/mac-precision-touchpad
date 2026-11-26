@@ -1,6 +1,8 @@
-//! Replays `fixtures/lifecycle.txt`: AddDevice (with faults), PrepareHardware, D0Entry/D0Exit, the
-//! detour variants, the read-issue path and its faults, the work item, READ_REPORT and GET_STRING
+//! Replays `fixtures/lifecycle.txt`: `AddDevice` (with faults), `PrepareHardware`, D0Entry/D0Exit, the
+//! detour variants, the read-issue path and its faults, the work item, `READ_REPORT` and `GET_STRING`
 //! dispatch, and the pipeline FIFO order.
+
+#![cfg(test)]
 
 mod common;
 
@@ -63,7 +65,7 @@ fn check_detour_extras(r: &Rec, m: &Mock) {
         assert_eq!(m.world.patched, want, "{}", r.case());
     }
     if let Some(refs) = r.opt("lower_refs") {
-        assert_eq!(m.world.refs as i128, num(refs), "{}", r.case());
+        assert_eq!(i128::from(m.world.refs), num(refs), "{}", r.case());
     }
     if let Some(id) = r.opt("client_id") {
         // The detour variants with a client_id field must see exactly that ID.
@@ -71,11 +73,11 @@ fn check_detour_extras(r: &Rec, m: &Mock) {
     }
 }
 
-/// AddDevice: checks the fixture's object configuration against `config`, then the call sequence.
-fn replay_add_device(r: &Rec, tally: &mut Tally) {
-    let case = r.case();
-    let mut m = Mock::new();
-    let fixture_ev = events(r);
+/// `AddDevice`: checks the fixture's object configuration against `config`, then the call sequence.
+fn replay_add_device(record: &Rec, tally: &mut Tally) {
+    let case = record.case();
+    let mut mock = Mock::new();
+    let fixture_ev = events(record);
     let fault: Option<(&'static str, i32)> = match case {
         "device-add-ok" | "device-add-wdm-do-null" => None,
         "device-add-device-create-fails" => Some(("WdfDeviceCreate", RESOURCE_FAIL)),
@@ -87,20 +89,21 @@ fn replay_add_device(r: &Rec, tally: &mut Tally) {
         "device-add-read-queue-fails" => Some(("ReadQueue", RESOURCE_FAIL)),
         other => panic!("unknown AddDevice case {other}"),
     };
-    m.faults.add = fault;
-    m.faults.wdm_null = case == "device-add-wdm-do-null";
-    let ret = add_device(&mut m);
+    mock.faults.add = fault;
+    mock.faults.wdm_null = case == "device-add-wdm-do-null";
+    let ret = add_device(&mut mock);
 
     // C: (name, result) of every call, and its return value.
     let c: Vec<(String, Option<String>)> = fixture_ev.iter().map(|e| ev_name_result(e)).collect();
-    let got: Vec<(String, Option<String>)> =
-        m.ev.iter()
-            .map(|e| match e.split_once('=') {
-                Some((n, s)) => (n.to_string(), Some(s.to_string())),
-                None => (e.clone(), None),
-            })
-            .collect();
-    let c_ret = r.get("ret");
+    let got: Vec<(String, Option<String>)> = mock
+        .ev
+        .iter()
+        .map(|e| match e.split_once('=') {
+            Some((n, s)) => (n.to_owned(), Some(s.to_owned())),
+            None => (e.clone(), None),
+        })
+        .collect();
+    let c_ret = record.get("ret");
     match case {
         "device-add-wdm-do-null" => {
             // HF-B17: C returns SUCCESS with a half-built device; the port fails AddDevice.
@@ -126,8 +129,11 @@ fn replay_add_device(r: &Rec, tally: &mut Tally) {
             tally.add(ADD_EXACT);
         }
     }
-    if r.get("st_out") != "nodevice" {
-        assert_eq!(DeviceState::new().snapshot(), parse_state(r.get("st_out")));
+    if record.get("st_out") != "nodevice" {
+        assert_eq!(
+            DeviceState::new().snapshot(),
+            parse_state(record.get("st_out"))
+        );
     }
     if case == "device-add-ok" {
         check_object_config(&fixture_ev);
@@ -154,10 +160,7 @@ fn check_object_config(ev: &[String]) {
         "{{{d1:08x}-{d2:04x}-{d3:04x}-{:02x}{:02x}-{}}}",
         d4[0],
         d4[1],
-        d4[2..]
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect::<String>()
+        to_hex(&d4[2..])
     );
     assert_eq!(arg("WdfDeviceCreateDeviceInterface", 0, "guid"), guid);
     assert_eq!(arg("WdfDeviceCreateDeviceInterface", 0, "ref"), "null");
@@ -168,14 +171,14 @@ fn check_object_config(ev: &[String]) {
     assert_eq!(arg("WdfLookasideListCreate", 0, "pool"), "NonPagedPoolNx");
     assert_eq!(
         num(&arg("WdfLookasideListCreate", 0, "tag")),
-        config::READ_BUFFER_POOL_TAG as i128
+        i128::from(config::READ_BUFFER_POOL_TAG)
     );
     // HF-B15: C passes no list attributes (parent = WDFDRIVER); the port parents it to the device.
     assert_eq!(arg("WdfLookasideListCreate", 0, "list_attrs"), "null");
     const { assert!(config::READ_BUFFER_LOOKASIDE_PARENT_IS_DEVICE) };
     assert_eq!(
         num(&arg("WdfTimerCreate", 0, "period")),
-        config::RECOVERY_TIMER_PERIOD as i128
+        i128::from(config::RECOVERY_TIMER_PERIOD)
     );
     assert_eq!(arg("WdfTimerCreate", 0, "exec"), "passive");
     assert_eq!(arg("WdfTimerCreate", 0, "parent"), "device");
@@ -257,7 +260,7 @@ fn replay_lifecycle() {
                 match case {
                     "issue-read-ok" => {}
                     "issue-read-request-create-fails" => {
-                        m.faults.lower_create = Some(RESOURCE_FAIL)
+                        m.faults.lower_create = Some(RESOURCE_FAIL);
                     }
                     "issue-read-lookaside-fails" => m.faults.lookaside = Some(RESOURCE_FAIL),
                     "issue-read-format-fails" => m.faults.lower_format = Some(FORMAT_FAIL),
@@ -311,7 +314,7 @@ fn replay_lifecycle() {
             assert_eq!(m.read_queue.len() as i128, num(d), "{case}");
         }
         if let Some(p) = r.opt("lower_reads_pending") {
-            assert_eq!(m.lower_reads_pending as i128, num(p), "{case}");
+            assert_eq!(i128::from(m.lower_reads_pending), num(p), "{case}");
         }
         tally.add("exact");
     }
@@ -324,7 +327,7 @@ fn replay_lifecycle() {
     assert_eq!(total, TOTAL);
 }
 
-/// Two upper READ_REPORTs (each issues a lower read), then one lower completion delivering to the
+/// Two upper `READ_REPORTs` (each issues a lower read), then one lower completion delivering to the
 /// first parked request (FIFO).
 fn replay_pipeline(r: &Rec, m: &mut Mock, state: &DeviceState) {
     for _ in 0..2 {

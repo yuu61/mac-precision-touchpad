@@ -19,7 +19,7 @@
 //! `ObfDereferenceObject` (behind the `ObDereferenceObject` macro) come from wdk-sys's ntddk
 //! bindings, which include `ntifs.h`.
 //!
-//! Runs only from `EvtDeviceSelfManagedIoInit`, at PASSIVE_LEVEL.
+//! Runs only from `EvtDeviceSelfManagedIoInit`, at `PASSIVE_LEVEL`.
 
 use core::ffi::c_void;
 use core::mem::{offset_of, size_of};
@@ -45,36 +45,33 @@ use crate::{KW_DEVICE, PROVIDER};
 /// `HIDCLASS_DRIVER_EXTENSION` (Hac.h:7-17): HIDCLASS's private per-minidriver data, which follows
 /// the `IO_CLIENT_EXTENSION` header of its driver-object extension. Only `MajorFunction[0x0F]` is
 /// read; the other members exist for the layout.
-#[allow(dead_code)]
 #[repr(C)]
 pub(crate) struct HidclassDriverExtension {
-    minidriver_object: PDRIVER_OBJECT,
-    registry_path: UNICODE_STRING,
-    device_extension_size: ULONG,
+    _minidriver_object: PDRIVER_OBJECT,
+    _registry_path: UNICODE_STRING,
+    _device_extension_size: ULONG,
     major_function: [PDRIVER_DISPATCH; IRP_MJ_MAXIMUM_FUNCTION + 1],
-    add_device: PDRIVER_ADD_DEVICE,
-    driver_unload: PDRIVER_UNLOAD,
-    reference_count: LONG,
-    list_entry: LIST_ENTRY,
-    devices_are_polled: BOOLEAN,
+    _add_device: PDRIVER_ADD_DEVICE,
+    _driver_unload: PDRIVER_UNLOAD,
+    _reference_count: LONG,
+    _list_entry: LIST_ENTRY,
+    _devices_are_polled: BOOLEAN,
 }
 
 /// `IO_CLIENT_EXTENSION` (Hac.h:19-23): the I/O manager's header of a driver-object extension
 /// allocated with `IoAllocateDriverObjectExtension`.
-#[allow(dead_code)]
 #[repr(C)]
 pub(crate) struct IoClientExtension {
-    next_extension: *mut IoClientExtension,
+    _next_extension: *mut Self,
     client_identification_address: PVOID,
 }
 
 /// `DRIVER_EXTENSION_EXT` (Hac.h:25-31): the documented `DRIVER_EXTENSION` plus the undocumented
 /// `IoClientExtension` that follows it.
-#[allow(dead_code)]
 #[repr(C)]
 pub(crate) struct DriverExtensionExt {
-    driver_object: *mut DRIVER_OBJECT,
-    add_device: PDRIVER_ADD_DEVICE,
+    _driver_object: *mut DRIVER_OBJECT,
+    _add_device: PDRIVER_ADD_DEVICE,
     count: ULONG,
     service_key_name: UNICODE_STRING,
     io_client_extension: *mut IoClientExtension,
@@ -237,11 +234,8 @@ impl DetourIo for Filter<'_> {
         // SAFETY: HIDCLASS's client extension is followed by its HIDCLASS_DRIVER_EXTENSION (the
         // client ID matched "HIDCLASS"); the offsets (16 + 32 + 15 * 8 = 0xA8) stay inside it.
         let source = unsafe {
-            client
-                .add(1)
-                .cast::<HidclassDriverExtension>()
-                .cast::<u8>()
-                .add(HIDCLASS_EXTENSION_MAJOR_FUNCTION_OFFSET)
+            let extension = client.add(1).cast::<HidclassDriverExtension>();
+            (&raw const (*extension).major_function)
                 .cast::<*mut c_void>()
                 .add(IRP_MJ_INTERNAL_DEVICE_CONTROL)
         };
@@ -276,6 +270,6 @@ impl DetourIo for Filter<'_> {
 
     fn dereference_lower_device(&mut self, lower: PDEVICE_OBJECT) {
         // SAFETY: releases the reference IoGetLowerDeviceObject took (exactly once, core).
-        let _ = unsafe { wdk_sys::ntddk::ObfDereferenceObject(lower.cast()) };
+        let _reference_count = unsafe { wdk_sys::ntddk::ObfDereferenceObject(lower.cast()) };
     }
 }

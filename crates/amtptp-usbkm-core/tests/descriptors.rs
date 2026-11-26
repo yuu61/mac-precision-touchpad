@@ -1,6 +1,8 @@
 //! Replays `tests/fixtures/descriptors.txt` (173 records): descriptor bytes, layouts, constants, IOCTL
 //! codes, the config table, PID → row selection and the descriptor/attribute IOCTLs.
 
+#![cfg(test)]
+
 mod common;
 
 use amtptp_usbkm_core::config::{
@@ -130,7 +132,7 @@ fn descriptors_fixture() {
                         "HID_DESCRIPTOR" => assert_eq!(v(), HID_DESCRIPTOR_LEN),
                         "HID_DEVICE_ATTRIBUTES" => assert_eq!(v(), HID_DEVICE_ATTRIBUTES_LEN),
                         "PTP_DEVICE_SELECTIVE_REPORT_MODE_REPORT" => {
-                            assert_eq!(v(), SELECTIVE_REPORT_DEVICE_MODE_STRUCT_LEN)
+                            assert_eq!(v(), SELECTIVE_REPORT_DEVICE_MODE_STRUCT_LEN);
                         }
                         "BCM5974_CONFIG" => assert_eq!(v(), size_of::<Bcm5974Config>()),
                         "TRACKPAD_FINGER" => assert_eq!(v(), TRACKPAD_FINGER_LEN),
@@ -174,15 +176,14 @@ fn descriptors_fixture() {
             }
             "config_row" => {
                 let idx = num(r.req("idx")) as usize;
-                match CONFIG_TABLE.get(idx) {
-                    Some(row) => check_row(r, row),
-                    None => {
-                        // The `{0}` sentinel: not represented (the Rust lookup is bounds-checked).
-                        assert_eq!(idx, CONFIG_TABLE.len(), "{id}");
-                        assert_eq!(num(r.req("identification")), 0);
-                        for k in ["caps", "tp_type", "tp_header", "tp_fsize", "um_size"] {
-                            assert_eq!(num(r.req(k)), 0, "{id} {k}");
-                        }
+                if let Some(row) = CONFIG_TABLE.get(idx) {
+                    check_row(r, row);
+                } else {
+                    // The `{0}` sentinel: not represented (the Rust lookup is bounds-checked).
+                    assert_eq!(idx, CONFIG_TABLE.len(), "{id}");
+                    assert_eq!(num(r.req("identification")), 0);
+                    for k in ["caps", "tp_type", "tp_header", "tp_fsize", "um_size"] {
+                        assert_eq!(num(r.req(k)), 0, "{id} {k}");
                     }
                 }
                 tally.add("config_row");

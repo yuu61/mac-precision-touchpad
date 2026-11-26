@@ -2,10 +2,10 @@
 //!
 //! Wire traffic, identical to the C driver (spec §6.3, fixtures `feature.txt` / `wire.txt`):
 //!
-//! 1. HID GET_REPORT, feature report 2, interface 2: setup `a1 01 02 03 02 00 04 00`, IN data stage of
+//! 1. HID `GET_REPORT`, feature report 2, interface 2: setup `a1 01 02 03 02 00 04 00`, IN data stage of
 //!    up to 4 bytes.
 //! 2. byte `um_switch_idx` (1) of the buffer := `um_switch_on` (1) or `um_switch_off` (0).
-//! 3. HID SET_REPORT: setup `21 09 02 03 02 00 04 00`, OUT data stage of exactly 4 bytes
+//! 3. HID `SET_REPORT`: setup `21 09 02 03 02 00 04 00`, OUT data stage of exactly 4 bytes
 //!    `[buf[0], mode, buf[2], buf[3]]`.
 //! 4. On success of both transfers, `IsWellspringModeOn := on`.
 //!
@@ -23,15 +23,15 @@ use crate::status::{NtStatus, STATUS_SUCCESS, nt_success};
 /// Length of the control-transfer data stage (`wLength`) and of the buffer: `sizeof(int)` = 4.
 pub const WELLSPRING_DATA_LEN: usize = 4;
 
-/// `BCM5974_WELLSPRING_MODE_READ_REQUEST_ID` (1): HID class GET_REPORT.
+/// `BCM5974_WELLSPRING_MODE_READ_REQUEST_ID` (1): HID class `GET_REPORT`.
 pub const WELLSPRING_MODE_READ_REQUEST_ID: u8 = 1;
-/// `BCM5974_WELLSPRING_MODE_WRITE_REQUEST_ID` (9): HID class SET_REPORT.
+/// `BCM5974_WELLSPRING_MODE_WRITE_REQUEST_ID` (9): HID class `SET_REPORT`.
 pub const WELLSPRING_MODE_WRITE_REQUEST_ID: u8 = 9;
 
-/// `bmRequestType` of the GET_REPORT: device-to-host (bit 7) | class (bits 5-6 = 1) | interface (bits 0-4
+/// `bmRequestType` of the `GET_REPORT`: device-to-host (bit 7) | class (bits 5-6 = 1) | interface (bits 0-4
 /// = 1) = 0xA1.
 pub const BM_REQUEST_D2H_CLASS_INTERFACE: u8 = 0xA1;
-/// `bmRequestType` of the SET_REPORT: host-to-device | class | interface = 0x21.
+/// `bmRequestType` of the `SET_REPORT`: host-to-device | class | interface = 0x21.
 pub const BM_REQUEST_H2D_CLASS_INTERFACE: u8 = 0x21;
 
 /// `POOL_TAG_PTP_CONTROL` = `'PTPC'` (Device.h:59), an MSVC multichar literal (0x50545043, shown as
@@ -59,6 +59,7 @@ pub struct UsbSetupPacket {
 
 impl UsbSetupPacket {
     /// The 8 wire bytes (little-endian words).
+    #[must_use]
     pub const fn to_bytes(self) -> [u8; 8] {
         let [v0, v1] = self.w_value.to_le_bytes();
         let [i0, i1] = self.w_index.to_le_bytes();
@@ -67,12 +68,14 @@ impl UsbSetupPacket {
     }
 
     /// Whether the data stage is device-to-host (bit 7 of `bmRequestType`).
+    #[must_use]
     pub const fn is_device_to_host(self) -> bool {
         self.bm_request_type & 0x80 != 0
     }
 }
 
-/// The GET_REPORT setup packet for `cfg`: `a1 01 <um_req_val> <um_req_idx> 04 00`.
+/// The `GET_REPORT` setup packet for `cfg`: `a1 01 <um_req_val> <um_req_idx> 04 00`.
+#[must_use]
 pub const fn wellspring_read_setup(cfg: &Bcm5974Config) -> UsbSetupPacket {
     UsbSetupPacket {
         bm_request_type: BM_REQUEST_D2H_CLASS_INTERFACE,
@@ -83,7 +86,8 @@ pub const fn wellspring_read_setup(cfg: &Bcm5974Config) -> UsbSetupPacket {
     }
 }
 
-/// The SET_REPORT setup packet for `cfg`: `21 09 <um_req_val> <um_req_idx> 04 00`.
+/// The `SET_REPORT` setup packet for `cfg`: `21 09 <um_req_val> <um_req_idx> 04 00`.
+#[must_use]
 pub const fn wellspring_write_setup(cfg: &Bcm5974Config) -> UsbSetupPacket {
     UsbSetupPacket {
         bm_request_type: BM_REQUEST_H2D_CLASS_INTERFACE,
@@ -94,7 +98,7 @@ pub const fn wellspring_write_setup(cfg: &Bcm5974Config) -> UsbSetupPacket {
     }
 }
 
-/// Step 2 of the switch: writes the mode byte into the buffer the GET_REPORT filled.
+/// Step 2 of the switch: writes the mode byte into the buffer the `GET_REPORT` filled.
 ///
 /// `buf[um_switch_idx] = on ? (unsigned char)um_switch_on : (unsigned char)um_switch_off`. An index
 /// outside the buffer (impossible for every table row) writes nothing.
@@ -115,7 +119,7 @@ pub fn apply_mode_byte(cfg: &Bcm5974Config, buf: &mut [u8; WELLSPRING_DATA_LEN],
 
 /// Synchronous USB control transfers to the device (implemented by the glue over `WDFUSBDEVICE`).
 ///
-/// PASSIVE_LEVEL only, like the C `AmtPtpSetWellspringMode`.
+/// `PASSIVE_LEVEL` only, like the C `AmtPtpSetWellspringMode`.
 pub trait ControlTransfer {
     /// The transfer buffer. The glue's type wraps a `WDFMEMORY` and deletes it in `Drop`
     /// (`WdfObjectDelete`), which runs exactly once on every path of [`set_wellspring_mode`].
@@ -123,6 +127,9 @@ pub trait ControlTransfer {
 
     /// `WdfMemoryCreate(WDF_NO_OBJECT_ATTRIBUTES, NonPagedPoolNx, POOL_TAG_PTP_CONTROL,
     /// WELLSPRING_DATA_LEN, ..)`. The content does not need to be initialized: the caller zeroes it.
+    ///
+    /// # Errors
+    /// Returns the WDF failure status if the transfer buffer cannot be allocated.
     fn allocate_transfer_buffer(&mut self) -> Result<Self::Buffer, NtStatus>;
 
     /// `WdfUsbTargetDeviceSendControlTransferSynchronously(UsbDevice, WDF_NO_HANDLE, NULL, setup,
@@ -139,11 +146,11 @@ pub trait ControlTransfer {
 
 /// `AmtPtpSetWellspringMode(ctx, on)`: switches the trackpad into (`on`) or out of wellspring mode.
 ///
-/// Returns the first failing status (allocation, GET_REPORT or SET_REPORT), leaving
+/// Returns the first failing status (allocation, `GET_REPORT` or `SET_REPORT`), leaving
 /// `IsWellspringModeOn` unchanged; on success sets it to `on` and returns `STATUS_SUCCESS`.
 ///
-/// Callers (C): D0Entry with `on = true` (result ignored), D0Exit with `on = false` (result returned),
-/// SET_FEATURE input mode 3 with `on = true` when the mode is off (result returned).
+/// Callers (C): `D0Entry` with `on = true` (result ignored), `D0Exit` with `on = false` (result returned),
+/// `SET_FEATURE` input mode 3 with `on = true` when the mode is off (result returned).
 pub fn set_wellspring_mode<T: ControlTransfer + ?Sized>(
     state: &DeviceState,
     io: &mut T,

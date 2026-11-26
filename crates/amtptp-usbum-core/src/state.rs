@@ -40,6 +40,7 @@ pub const USB_DEVICE_DESCRIPTOR_LEN: usize = 18;
 
 impl UsbDeviceDescriptor {
     /// Decodes the fields used by the driver from the 18-byte little-endian `USB_DEVICE_DESCRIPTOR`.
+    #[must_use]
     pub const fn from_bytes(bytes: &[u8; USB_DEVICE_DESCRIPTOR_LEN]) -> Self {
         let [
             _,
@@ -79,7 +80,7 @@ pub struct StateSnapshot {
     pub wellspring_mode_on: bool,
     /// `IsSurfaceReportOn` (set from bit 1 of feature 0x06, UM-B14).
     pub surface_report_on: bool,
-    /// `IsButtonReportOn` (set from bit 0 of feature 0x06, UM-B14; also gates D0Entry, UM-B10).
+    /// `IsButtonReportOn` (set from bit 0 of feature 0x06, UM-B14; also gates `D0Entry`, UM-B10).
     pub button_report_on: bool,
     /// `PressureQualLevel` (dead state, UM-B15).
     pub pressure_qual_level: u8,
@@ -87,7 +88,7 @@ pub struct StateSnapshot {
     pub sg_contact_size_qual_level: u8,
     /// `MuContactSizeQualLevel` (dead state, UM-B15).
     pub mu_contact_size_qual_level: u8,
-    /// `PerfCounter.QuadPart`: QPC value at the last D0Entry (ScanTime base, UM-B12).
+    /// `PerfCounter.QuadPart`: QPC value at the last `D0Entry` (`ScanTime` base, UM-B12).
     pub perf_counter: i64,
 }
 
@@ -124,6 +125,7 @@ impl Default for DeviceState {
 impl DeviceState {
     /// The zero-filled state of a freshly created WDF device context (no config row, all flags FALSE,
     /// all levels 0, `PerfCounter` 0, reader not configured).
+    #[must_use]
     pub const fn new() -> Self {
         Self {
             config_row: AtomicU8::new(NO_ROW),
@@ -147,7 +149,7 @@ impl DeviceState {
 
     // --- config row (DeviceInfo) -------------------------------------------------------------------
 
-    /// `DeviceInfo`: the config-table row selected by the last PrepareHardware, or `None` (C: `NULL`).
+    /// `DeviceInfo`: the config-table row selected by the last `PrepareHardware`, or `None` (C: `NULL`).
     pub fn config(&self) -> Option<&'static Bcm5974Config> {
         config_row(self.config_row.load(RELAXED))
     }

@@ -52,7 +52,7 @@ const _: () = assert!(MAX_FILLED_CONTACTS as usize == PTP_CONTACT_SLOTS);
 pub const CONFIDENCE_TOUCH_LIMIT: i16 = 2500;
 /// Divisor of the QPC delta (Input.c:220).
 pub const SCAN_TIME_DIVISOR: i64 = 100;
-/// ScanTime cap (Input.c:257-259): 0xFF, not 0xFFFF.
+/// `ScanTime` cap (Input.c:257-259): 0xFF, not 0xFFFF.
 pub const SCAN_TIME_CAP: u16 = 0xFF;
 
 /// A read-only view of the valid bytes of a lower read. Every byte at or past the end of the view reads as
@@ -84,6 +84,7 @@ pub struct SpiFinger {
 impl<'a> SpiPacket<'a> {
     /// Wraps the valid packet bytes (the first `min((LONG)Information, buffer length)` bytes of the lower
     /// read buffer).
+    #[must_use]
     pub const fn new(bytes: &'a [u8]) -> Self {
         Self { bytes }
     }
@@ -98,17 +99,20 @@ impl<'a> SpiPacket<'a> {
     }
 
     /// `ClickOccurred` (byte 1).
+    #[must_use]
     pub fn click_occurred(&self) -> u8 {
         self.byte(CLICK_OCCURRED_OFFSET)
     }
 
     /// `NumOfFingers` (byte 30).
+    #[must_use]
     pub fn num_of_fingers(&self) -> u8 {
         self.byte(NUM_OF_FINGERS_OFFSET)
     }
 
     /// `Fingers[index]`. `index` must be below [`SPI_MAX_FINGERS`] to address a real finger; larger
     /// indexes read zeros.
+    #[must_use]
     pub fn finger(&self, index: usize) -> SpiFinger {
         let base = FINGERS_OFFSET.saturating_add(index.saturating_mul(SPI_FINGER_LEN));
         let at = |off: usize| self.i16_at(base.saturating_add(off));
@@ -130,6 +134,9 @@ impl<'a> SpiPacket<'a> {
 /// nothing is done; preserved), otherwise the positive length. The `(LONG)` cast keeps the low 32 bits
 /// as a signed value, so `0x1_0000_002E` passes as 46 and `0xFFFF_FFFF` fails as -1. The lower
 /// `IoStatus.Status` is not consulted (preserved, SPI-B9).
+///
+/// # Errors
+/// Returns `STATUS_DEVICE_DATA_ERROR` if the length is shorter than the packet header.
 pub const fn lower_read_length(information: u64) -> Result<usize, NtStatus> {
     // (LONG)(ULONG_PTR): truncate to the low 32 bits, reinterpret as signed.
     let length = information as u32 as i32;
@@ -141,13 +148,14 @@ pub const fn lower_read_length(information: u64) -> Result<usize, NtStatus> {
     }
 }
 
-/// ScanTime exactly as C computes it (Input.c:216-221, 257-264):
+/// `ScanTime` exactly as C computes it (Input.c:216-221, 257-264):
 /// `delta = (current - last) / 100` in i64 (truncating division), then
 /// `delta >= 0xFF ? 0xFF : (USHORT)delta`.
 ///
 /// The subtraction wraps (P2: C's signed overflow is UB; MSVC produces the two's-complement result). A
 /// negative delta is truncated to 16 bits like the C cast. In the shipped driver `current` and `last` are
 /// both the QPC **frequency** (SPI-B8, preserved), so the result is always 0.
+#[must_use]
 pub const fn scan_time(current: i64, last: i64) -> u16 {
     let delta = current.wrapping_sub(last) / SCAN_TIME_DIVISOR;
     if delta >= SCAN_TIME_CAP as i64 {
@@ -173,10 +181,11 @@ const fn positive_difference(a: i16, b: i16) -> u16 {
 /// unused contacts and the padding bits as stack garbage).
 ///
 /// - `ContactCount` = `NumOfFingers` raw (SPI-B6), `IsButtonClicked` = `ClickOccurred` raw.
-/// - For `i < min(NumOfFingers, 5)`: ContactID = `i` (SPI-B7), X = `X - XMin` if positive else 0,
+/// - For `i < min(NumOfFingers, 5)`: `ContactID` = `i` (SPI-B7), X = `X - XMin` if positive else 0,
 ///   Y = `YMax - Y` if positive else 0, Tip = `Pressure > 0`, Confidence = `TouchMajor < 2500 &&
 ///   TouchMinor < 2500`.
-/// - ScanTime = `scan_time`.
+/// - `ScanTime` = `scan_time`.
+#[must_use]
 pub fn build_report(
     packet: &SpiPacket<'_>,
     trackpad: &SpiTrackpadInfo,
@@ -214,6 +223,7 @@ pub fn build_report(
 }
 
 /// [`build_report`] encoded to the 30 wire bytes.
+#[must_use]
 pub fn report_bytes(
     packet: &SpiPacket<'_>,
     trackpad: &SpiTrackpadInfo,
@@ -224,6 +234,7 @@ pub fn report_bytes(
 
 /// The valid prefix of a lower read buffer: the first `min(length, buffer.len())` bytes, where `length`
 /// comes from [`lower_read_length`].
+#[must_use]
 pub fn valid_prefix(buffer: &[u8], length: usize) -> &[u8] {
     buffer.get(..length).unwrap_or(buffer)
 }

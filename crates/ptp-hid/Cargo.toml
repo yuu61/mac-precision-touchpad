@@ -8,3 +8,6 @@ publish.workspace = true
 license = "MIT"
 
 [dependencies]
+
+[lints]
+workspace = true
