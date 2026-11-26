@@ -1,7 +1,5 @@
 # Windows Precision Touchpad Implementation for Apple MacBook family/Magic Trackpad 2
 
-[![Build Status](https://ligstd.visualstudio.com/_apis/public/build/definitions/7694e0d0-94e3-4fd2-b39a-ecd261e1ba2e/22/badge)](https://ligstd.visualstudio.com/Apple%20PTP%20Trackpad/_build?definitionId=22)
-
 This project implements Windows Precision Touchpad Protocol for Apple MacBook family/Magic Trackpad 2 on Windows 10. Both USB (traditional and T2), SPI and Bluetooth trackpads are supported.
 
 ## Donation?
@@ -50,9 +48,32 @@ choco install mac-precision-touchpad
 
 ## For developers
 
-- SPI/T2 version is kernel-mode driver, using KMDF Framework v1.23. Bluetooth driver uses KMDF Framework 1.15. Windows 10 Driver Development Kit Version 2004 or higher is required for development and testing.
-- USB version is a user-mode driver, using UMDF Framework v2.15. Windows 10 Driver Development Kit Version 2004 or higher is required for development and testing.
-- `ReleaseSigned` configuration is reserved for production build only, and it will be rendered as unsigned if you attempt to build using that configuration. (Historically it's signed, but due to EV certificate's requirements, the process has changed.)
+The drivers are written in Rust on top of [windows-drivers-rs](https://github.com/microsoft/windows-drivers-rs) (`wdk-sys` bindings to the Windows Driver Kit).
+
+| Binary | Bus | Framework | Source |
+|---|---|---|---|
+| `AmtPtpDeviceUsbUm.dll` | USB (traditional MacBook, Magic Trackpad 2) | UMDF 2.15 | `drivers/um/AmtPtpDeviceUsbUm`, `crates/amtptp-usbum-core` |
+| `AmtPtpDeviceUsbKm.sys` | USB (T2) | KMDF 1.23 | `drivers/km/AmtPtpDeviceUsbKm`, `crates/amtptp-usbkm-core` |
+| `AmtPtpDeviceSpiKm.sys` | SPI | KMDF 1.23 | `drivers/km/AmtPtpDeviceSpiKm`, `crates/amtptp-spikm-core` |
+| `AmtPtpHidFilter.sys` | Bluetooth (Magic Trackpad 2) | KMDF 1.23 | `drivers/km/AmtPtpHidFilter`, `crates/amtptp-hidfilter-core` |
+
+- `crates/` is a host workspace of `no_std` crates holding all hardware-independent logic (device tables, report descriptors, packet parsing, feature reports). They are unit-tested on the host against fixtures recorded from the original C drivers. `crates/ptp-hid` holds the Precision Touchpad HID building blocks shared by all drivers.
+- `drivers/km` (KMDF) and `drivers/um` (UMDF) are separate Cargo workspaces, because wdk-build allows only one driver model per workspace. `drivers/wdf-support` holds the shared WDF glue.
+- `package/` holds the INF templates; `xtask/` builds the drivers and assembles the driver package (stampinf, Inf2Cat, InfVerif, optional signing).
+- The minimum OS is Windows 10 1709 (KMDF 1.23 / UMDF 2.15). Both x64 and ARM64 are built.
+- `docs/rust-port/` records, per driver, which behaviors of the C implementation were preserved and which defects were fixed during the port, and how packaging works.
+- `drivers/AmtPtpDevice.wprp` is a WPR profile that captures the TraceLogging events of all four drivers.
+
+Requirements: Rust (stable, with the `aarch64-pc-windows-msvc` target for ARM64), Visual Studio with the C++ build tools (x64 and ARM64), the Windows Driver Kit, and LLVM (`winget install LLVM.LLVM`, used by bindgen).
+
+```
+cargo xtask test                                   # host unit tests + clippy for all workspaces
+cargo xtask build --arch all --release             # build the drivers for x64 and ARM64
+cargo xtask package --arch x64 --release           # assemble target/package/x64/AmtPtpDevice (unsigned)
+cargo xtask package --arch arm64 --release --sign <signtool arguments>
+```
+
+See [docs/rust-port/packaging.md](docs/rust-port/packaging.md) for all options, signing, and the INF changes.
 
 ## Device support
 
@@ -96,6 +117,9 @@ I would like to thank projects like [magictrackpad2-dkms](https://github.com/rob
  
 ## License
 
-- USB driver is licensed under [GPLv2](LICENSE-GPL.md).
+- USB drivers are licensed under [GPLv2](LICENSE-GPL.md).
 - SPI driver is licensed under [MIT](LICENSE-MIT.md).
+- The shared building blocks (`crates/ptp-hid`, `drivers/wdf-support`, `drivers/rc-embed`) are licensed under [MIT](LICENSE-MIT.md).
+
+See [LICENSE.md](LICENSE.md) for the mapping of source directories to licenses.
 
