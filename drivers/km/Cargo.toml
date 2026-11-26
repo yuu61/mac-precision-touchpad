@@ -1,0 +1,59 @@
+# Kernel-mode driver workspace: KMDF 1.23 (Windows 10 1709+), x64 and ARM64.
+#
+# wdk-build allows exactly ONE driver-model configuration per Cargo workspace
+# (and per Cargo.lock), which is why the UMDF driver lives in ../um. Build from
+# this directory; never set CARGO_TARGET_DIR / --target-dir (wdk-build locates
+# this manifest by walking up from OUT_DIR to the first Cargo.lock).
+#
+# Shared crates outside this workspace, used as path dependencies:
+#   ../wdf-support   WDF glue (INIT helpers, context macro, request guard, IRP helpers)
+#   ../rc-embed      build-dependency that compiles and links a VERSIONINFO .rc
+#   ../../crates/*   hardware-independent core logic (host-tested)
+[workspace]
+resolver = "3"
+members = [
+    "AmtPtpDeviceUsbKm",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91"
+publish = false
+
+# Driver model for every crate in this workspace (incl. wdk-sys bindings and
+# wdf-support's cfg). Do NOT add minimum-kmdf-version-minor: the INIT helpers in
+# wdf-support use sizeof(T), which equals WDF_STRUCTURE_SIZE(T) only without it.
+[workspace.metadata.wdk.driver-model]
+driver-type = "KMDF"
+kmdf-version-major = 1
+target-kmdf-version-minor = 23
+
+[workspace.dependencies]
+wdk = "=0.5.0"
+# The union of the API subsets the three KM drivers need, declared once here.
+wdk-sys = { version = "=0.5.2", features = ["hid", "usb", "spb"] }
+wdk-panic = "=0.5.0"
+wdk-build = "=0.6.0"
+tracelogging = { version = "=1.2.4", default-features = false, features = ["etw", "macros", "kernel_mode"] }
+wdf-support = { path = "../wdf-support" }
+rc-embed = { path = "../rc-embed" }
+ptp-hid = { path = "../../crates/ptp-hid" }
+amtptp-usbkm-core = { path = "../../crates/amtptp-usbkm-core" }
+
+# Lints are declared per member ([lints] in each driver crate), not as
+# [workspace.lints]: Cargo warns (missing_lints_inheritance) for every local
+# path dependency that does not inherit workspace lints, which would flag the
+# core crates under ../../crates that belong to the root workspace.
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+lto = true
+# Keep a full PDB for release drivers (crash-dump analysis), like the C
+# Release configuration (/Zi + /DEBUG). Debug info does not change codegen.
+debug = "full"
+split-debuginfo = "packed"
+strip = "none"

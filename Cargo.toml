@@ -10,6 +10,7 @@ resolver = "3"
 members = [
     "crates/ptp-hid",
     "crates/amtptp-usbum-core",
+    "crates/amtptp-usbkm-core",
 ]
 exclude = ["drivers"]
 
