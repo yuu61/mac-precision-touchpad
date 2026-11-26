@@ -12,6 +12,7 @@ members = [
     "crates/amtptp-usbum-core",
     "crates/amtptp-usbkm-core",
     "crates/amtptp-spikm-core",
+    "crates/amtptp-hidfilter-core",
 ]
 exclude = ["drivers"]
 

@@ -14,6 +14,7 @@ resolver = "3"
 members = [
     "AmtPtpDeviceUsbKm",
     "AmtPtpDeviceSpiKm",
+    "AmtPtpHidFilter",
 ]
 
 [workspace.package]
@@ -42,6 +43,7 @@ rc-embed = { path = "../rc-embed" }
 ptp-hid = { path = "../../crates/ptp-hid" }
 amtptp-usbkm-core = { path = "../../crates/amtptp-usbkm-core" }
 amtptp-spikm-core = { path = "../../crates/amtptp-spikm-core" }
+amtptp-hidfilter-core = { path = "../../crates/amtptp-hidfilter-core" }
 
 # Lints are declared per member ([lints] in each driver crate), not as
 # [workspace.lints]: Cargo warns (missing_lints_inheritance) for every local

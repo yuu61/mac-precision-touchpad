@@ -1,0 +1,10 @@
+[package]
+name = "amtptp-hidfilter-core"
+description = "Hardware-independent logic of the AmtPtpHidFilter (KMDF, Bluetooth Magic Trackpad 2) driver"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+ptp-hid = { path = "../ptp-hid" }
