@@ -1,0 +1,11 @@
+[package]
+name = "amtptp-spikm-core"
+description = "Hardware-independent logic of the AmtPtpDeviceSpiKm (KMDF, SPI) driver"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license = "MIT"
+
+[dependencies]
+ptp-hid = { path = "../ptp-hid" }
