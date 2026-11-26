@@ -1,0 +1,19 @@
+# Host workspace: pure (no WDK) logic crates that are unit-tested on the host,
+# plus the `xtask` build/packaging tool.
+#
+# The drivers live in separate Cargo workspaces under `drivers/` because
+# wdk-build allows exactly one driver model (KMDF/UMDF + version) per workspace:
+#   drivers/km  -> KMDF 1.23 (AmtPtpDeviceUsbKm, AmtPtpDeviceSpiKm, AmtPtpHidFilter)
+#   drivers/um  -> UMDF 2.15 (AmtPtpDeviceUsbUm)
+[workspace]
+resolver = "3"
+members = [
+    "crates/ptp-hid",
+]
+exclude = ["drivers"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91"
+publish = false

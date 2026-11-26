@@ -21,6 +21,9 @@
 bld/
 [Bb]in/
 [Oo]bj/
+
+# Rust / Cargo build output (host workspace and drivers/km, drivers/um)
+target/
 intermediate/
 
 # Visual Studio 2015 cache/options directory
