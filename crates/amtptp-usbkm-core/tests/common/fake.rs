@@ -1,10 +1,14 @@
 //! A fake of the WDF USB side, modelled on the fixture harness (tests/fixtures/README.md, "Harness
-//! model"): one interrupt IN pipe (EP 0x83) by default, GET_REPORT answered with `02 00`, at most `mdlen`
+//! model"): one interrupt IN pipe (EP 0x83) by default, `GET_REPORT` answered with `02 00`, at most `mdlen`
 //! (4) bytes delivered, failure injection per WDF call, and a call log in the fixtures' `ops` notation
 //! (normalized: only the arguments the Rust port is expected to reproduce).
-#![allow(dead_code)]
+#![allow(
+    dead_code,
+    reason = "Each integration test target uses a different subset of these helpers"
+)]
 
-use std::cell::RefCell;
+use amtptp_usbkm_core::status::STATUS_INVALID_DEVICE_STATE;
+use core::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
@@ -38,7 +42,7 @@ pub struct FakeHw {
     pub wire: Vec<String>,
     /// Injected failures by harness point name (`usbdev_create`, `ctl_read`, ...). 0 = no failure.
     pub inject: BTreeMap<String, i32>,
-    /// GET_REPORT response (`02 00` by default).
+    /// `GET_REPORT` response (`02 00` by default).
     pub ctl_read_response: Vec<u8>,
     /// `(WDF_USB_PIPE_TYPE, endpoint address)` of the configured pipes.
     pub pipes: Vec<(u8, u8)>,
@@ -103,8 +107,8 @@ impl FakeHw {
 
     /// Takes the ops and wire logs (for one fixture step).
     pub fn take_logs(&mut self) -> (Vec<String>, String) {
-        let ops = std::mem::take(&mut *self.ops.borrow_mut());
-        let wire = std::mem::take(&mut self.wire);
+        let ops = core::mem::take(&mut *self.ops.borrow_mut());
+        let wire = core::mem::take(&mut self.wire);
         let wire = if wire.is_empty() {
             "-".to_owned()
         } else {
@@ -144,21 +148,18 @@ impl ControlTransfer for FakeHw {
         };
         let args = format!("setup={setup_hex},mdlen={mdlen},dir={dir}");
         if setup.is_device_to_host() {
-            match self.injected("ctl_read") {
-                Some(st) => {
-                    self.log_st("ctl_xfer", &args, Some(st));
-                    self.wire
-                        .push(format!("in:{setup_hex}:-:{:08x}", st as u32));
-                    st
-                }
-                None => {
-                    let n = self.ctl_read_response.len().min(mdlen);
-                    data[..n].copy_from_slice(&self.ctl_read_response[..n]);
-                    self.log_st("ctl_xfer", &args, Some(0));
-                    self.wire
-                        .push(format!("in:{setup_hex}:{}:00000000", to_hex(&data[..n])));
-                    0
-                }
+            if let Some(st) = self.injected("ctl_read") {
+                self.log_st("ctl_xfer", &args, Some(st));
+                self.wire
+                    .push(format!("in:{setup_hex}:-:{:08x}", st as u32));
+                st
+            } else {
+                let n = self.ctl_read_response.len().min(mdlen);
+                data[..n].copy_from_slice(&self.ctl_read_response[..n]);
+                self.log_st("ctl_xfer", &args, Some(0));
+                self.wire
+                    .push(format!("in:{setup_hex}:{}:00000000", to_hex(&data[..n])));
+                0
             }
         } else {
             let st = self.injected("ctl_write").unwrap_or(0);
@@ -195,18 +196,23 @@ impl UsbHardware for FakeHw {
     }
 
     fn select_single_interface(&mut self) -> Result<u8, NtStatus> {
-        match self.injected("select_config") {
-            Some(st) => {
-                self.log_st("usbdev_select_config", "type=2", Some(st));
+        if let Some(st) = self.injected("select_config") {
+            self.log_st("usbdev_select_config", "type=2", Some(st));
+            self.iface = false;
+            Err(st)
+        } else {
+            let Ok(n) = u8::try_from(self.pipes.len()) else {
+                self.log_st(
+                    "usbdev_select_config",
+                    "type=2",
+                    Some(STATUS_INVALID_DEVICE_STATE),
+                );
                 self.iface = false;
-                Err(st)
-            }
-            None => {
-                let n = u8::try_from(self.pipes.len()).expect("pipe count");
-                self.log_st("usbdev_select_config", &format!("type=2,npipes={n}"), None);
-                self.iface = true;
-                Ok(n)
-            }
+                return Err(STATUS_INVALID_DEVICE_STATE);
+            };
+            self.log_st("usbdev_select_config", &format!("type=2,npipes={n}"), None);
+            self.iface = true;
+            Ok(n)
         }
     }
 
@@ -306,10 +312,10 @@ pub fn normalize_ops(ops: &str) -> (Vec<String>, usize) {
         if !args.is_empty() {
             for kv in args.split(',') {
                 let (k, v) = kv.split_once('=').unwrap_or((kv, ""));
-                if k == "st" {
-                    st = Some(v.to_owned());
-                } else if keep.contains(&k) {
-                    parts.push(format!("{k}={v}"));
+                match k {
+                    "st" => st = Some(v.to_owned()),
+                    _ if keep.contains(&k) => parts.push(format!("{k}={v}")),
+                    _ => {}
                 }
             }
         }

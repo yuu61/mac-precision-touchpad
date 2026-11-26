@@ -1,13 +1,13 @@
 //! Report IDs, PTP constants and usages shared by all four drivers.
 //!
-//! These come from `HidCommon.h`, which is identical in all four drivers apart from comments and HidFilter's
-//! extra `DEVICE_VID`/`DEVICE_VERSION`, and from the `PTP_*` block of each driver's `Hid.h` (HidFilter:
+//! These come from `HidCommon.h`, which is identical in all four drivers apart from comments and `HidFilter`'s
+//! extra `DEVICE_VID`/`DEVICE_VERSION`, and from the `PTP_*` block of each driver's `Hid.h` (`HidFilter`:
 //! `Metadata/WindowsHID.h`), which is also identical.
 //!
-//! The per-driver `DEVICE_VERSION` is not here: it is 0x01 in UsbUm/UsbKm/SpiKm and 0x100 in HidFilter, and
-//! SpiKm does not even use it. Each core crate defines its own.
+//! The per-driver `DEVICE_VERSION` is not here: it is 0x01 in UsbUm/UsbKm/SpiKm and 0x100 in `HidFilter`, and
+//! `SpiKm` does not even use it. Each core crate defines its own.
 
-/// `REPORTID_STANDARDMOUSE`. It is not declared in any of our report descriptors. SpiKm uses 0x02 only as
+/// `REPORTID_STANDARDMOUSE`. It is not declared in any of our report descriptors. `SpiKm` uses 0x02 only as
 /// the ID of Apple's own downstream feature report.
 pub const REPORTID_STANDARDMOUSE: u8 = 0x02;
 /// `REPORTID_MULTITOUCH`: the PTP input report (contacts, scan time, contact count, button).
@@ -60,7 +60,7 @@ pub const PTP_CONTACT_CONFIDENCE_BIT: u8 = 1;
 /// `PTP_CONTACT_TIPSWITCH_BIT` (2): the mask of the Tip Switch bit in a contact's flag byte.
 pub const PTP_CONTACT_TIPSWITCH_BIT: u8 = 2;
 
-/// `DEVICE_VID` (0x8910): the substitute vendor ID that UsbUm, SpiKm and HidFilter report in
+/// `DEVICE_VID` (0x8910): the substitute vendor ID that `UsbUm`, `SpiKm` and `HidFilter` report in
 /// `HID_DEVICE_ATTRIBUTES`. It avoids a hardware-ID collision with Apple's own HID collections (commit
-/// dd364d6). UsbKm reports the real USB idVendor instead.
+/// dd364d6). `UsbKm` reports the real USB idVendor instead.
 pub const DEVICE_VID: u16 = 0x8910;

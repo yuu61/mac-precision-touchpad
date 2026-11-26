@@ -1,6 +1,10 @@
 //! Shared fixture parsing for the C-oracle replay tests (see `tests/fixtures/README.md`).
-#![allow(dead_code)]
+#![allow(
+    dead_code,
+    reason = "Each integration test target uses a different subset of these helpers"
+)]
 
+use core::fmt::Write as _;
 use std::collections::BTreeMap;
 
 /// One fixture line: `key=value` fields, split at the first `=`.
@@ -42,9 +46,9 @@ impl Record {
             .unwrap_or_else(|e| panic!("line {}: {key}: {e}", self.line))
     }
 
-    pub fn dec<T: std::str::FromStr>(&self, key: &str) -> T
+    pub fn dec<T: core::str::FromStr>(&self, key: &str) -> T
     where
-        T::Err: std::fmt::Debug,
+        T::Err: core::fmt::Debug,
     {
         self.get(key)
             .parse()
@@ -68,15 +72,19 @@ pub fn hex(s: &str) -> Vec<u8> {
     assert!(s.len().is_multiple_of(2), "odd hex length");
     (0..s.len())
         .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("hex"))
+        .map(|i| u8::from_str_radix(s.get(i..i + 2).expect("ASCII hex bytes"), 16).expect("hex"))
         .collect()
 }
 
 pub fn to_hex(bytes: &[u8]) -> String {
     if bytes.is_empty() {
-        return "-".to_string();
+        return "-".to_owned();
     }
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    let mut hex = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(hex, "{byte:02x}").expect("formatting hex into a String");
+    }
+    hex
 }
 
 /// Loads `tests/fixtures/<name>` and parses every non-empty line.
@@ -92,7 +100,7 @@ pub fn load(name: &str) -> Vec<Record> {
                 let (k, v) = tok
                     .split_once('=')
                     .unwrap_or_else(|| panic!("{name}:{}: bad token `{tok}`", i + 1));
-                let prev = fields.insert(k.to_string(), v.to_string());
+                let prev = fields.insert(k.to_owned(), v.to_owned());
                 assert!(prev.is_none(), "{name}:{}: duplicate key {k}", i + 1);
             }
             Record {
@@ -105,7 +113,7 @@ pub fn load(name: &str) -> Vec<Record> {
 
 /// `PRE(i) = (0xA0 + i) mod 256`: the prefill of every caller-owned buffer.
 pub fn prefill(len: usize) -> Vec<u8> {
-    (0..len).map(|i| (0xA0usize + i) as u8).collect()
+    (0..len).map(|i| (0xA0_usize + i) as u8).collect()
 }
 
 /// `offset:value` list of bytes that differ between `before` and `after`, or `-`.
@@ -118,7 +126,7 @@ pub fn chg(before: &[u8], after: &[u8]) -> String {
         .map(|(i, (_, b))| format!("{i}:{b:02x}"))
         .collect();
     if parts.is_empty() {
-        "-".to_string()
+        "-".to_owned()
     } else {
         parts.join(",")
     }
@@ -133,7 +141,7 @@ pub fn wdf_failures(r: &Record) -> Vec<(String, String)> {
     w.split(',')
         .map(|e| {
             let (f, s) = e.split_once(':').expect("wdf entry");
-            (f.to_string(), s.to_string())
+            (f.to_owned(), s.to_owned())
         })
         .collect()
 }

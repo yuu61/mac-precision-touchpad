@@ -5,10 +5,10 @@
 //! `Wdf*Create` calls in C order with the C configuration (`amtptp_hidfilter_core::config`), except
 //! the recorded P2 deltas: the lookaside list is parented to the device (HF-B15), the timer and
 //! work item use `AutomaticSerialization = FALSE` (HF-B16), and every creation failure fails
-//! AddDevice (HF-B16, HF-B17).
+//! `AddDevice` (HF-B16, HF-B17).
 //!
-//! Registered PnP/power callbacks, as in C: PrepareHardware, D0Entry, D0Exit, SelfManagedIoInit,
-//! SelfManagedIoRestart. Nothing else (no ReleaseHardware, no SelfManagedIoSuspend/Flush/Cleanup,
+//! Registered PnP/power callbacks, as in C: `PrepareHardware`, `D0Entry`, `D0Exit`, `SelfManagedIoInit`,
+//! `SelfManagedIoRestart`. Nothing else (no `ReleaseHardware`, no SelfManagedIoSuspend/Flush/Cleanup,
 //! no power-policy settings, no file-object configuration, no device cleanup callback).
 
 use core::ptr::{null, null_mut};
@@ -62,7 +62,7 @@ const _: () = assert!(READ_BUFFER_LOOKASIDE_PARENT_IS_DEVICE);
 const _: () = assert!(!READ_QUEUE_POWER_MANAGED);
 
 /// `PtpFilterEvtDeviceAdd` (Driver.c:45-66) + `PtpFilterCreateDevice` (Device.c:10-102) +
-/// `PtpFilterIoQueueInitialize` (Queue.c:10-54), at PASSIVE_LEVEL, in `PAGE` as in C.
+/// `PtpFilterIoQueueInitialize` (Queue.c:10-54), at `PASSIVE_LEVEL`, in `PAGE` as in C.
 #[unsafe(link_section = "PAGE")]
 pub(crate) unsafe extern "C" fn evt_device_add(
     _driver: WDFDRIVER,
@@ -85,10 +85,10 @@ pub(crate) unsafe extern "C" fn evt_device_add(
     status
 }
 
-/// [`AddDeviceIo`]: the object creations of AddDevice. Only used inside `evt_device_add`
-/// (PASSIVE_LEVEL), before the device can receive any other callback.
+/// [`AddDeviceIo`]: the object creations of `AddDevice`. Only used inside `evt_device_add`
+/// (`PASSIVE_LEVEL`), before the device can receive any other callback.
 struct AddDevice {
-    /// The framework's WDFDEVICE_INIT; set to NULL by a successful `WdfDeviceCreate`.
+    /// The framework's `WDFDEVICE_INIT`; set to NULL by a successful `WdfDeviceCreate`.
     device_init: PWDFDEVICE_INIT,
     /// The created device (NULL before `create_device` succeeded).
     device: WDFDEVICE,
@@ -99,7 +99,7 @@ struct AddDevice {
 impl AddDevice {
     /// The device context, once `create_device` succeeded (the core calls the later steps only
     /// then, so `None` is unreachable).
-    fn context(&self) -> Option<&DeviceContext> {
+    const fn context(&self) -> Option<&DeviceContext> {
         // SAFETY: `context` is NULL or points at the initialized context of the live device
         // created by `create_device`, which AddDevice is still building.
         unsafe { self.context.as_ref() }
@@ -325,7 +325,7 @@ impl AddDeviceIo for AddDevice {
         unsafe {
             queue_get_context(queue).write(QueueContext {
                 device: self.device,
-            })
+            });
         };
         status
     }
@@ -443,7 +443,7 @@ fn trace_configuration(event_is_init: bool, ctx: &DeviceContext, status: NtStatu
     }
 }
 
-/// `PtpFilterSelfManagedIoInit` (Device.c:184-245), once at the first start (PASSIVE_LEVEL):
+/// `PtpFilterSelfManagedIoInit` (Device.c:184-245), once at the first start (`PASSIVE_LEVEL)`:
 /// detour, synchronous attributes query, mode switch (failure: 2 s retry timer, SUCCESS), stamp
 /// `LastReportTime` and set `DeviceConfigured`.
 unsafe extern "C" fn evt_device_self_managed_io_init(device: WDFDEVICE) -> NTSTATUS {
@@ -454,7 +454,7 @@ unsafe extern "C" fn evt_device_self_managed_io_init(device: WDFDEVICE) -> NTSTA
     status
 }
 
-/// `PtpFilterSelfManagedIoRestart` (Device.c:247-284), on every later return to D0 (PASSIVE_LEVEL).
+/// `PtpFilterSelfManagedIoRestart` (Device.c:247-284), on every later return to D0 (`PASSIVE_LEVEL`).
 /// HF-B11/B12 preserved (see the core).
 unsafe extern "C" fn evt_device_self_managed_io_restart(device: WDFDEVICE) -> NTSTATUS {
     // SAFETY: power callback of a live device of this driver.
@@ -466,7 +466,7 @@ unsafe extern "C" fn evt_device_self_managed_io_restart(device: WDFDEVICE) -> NT
 
 /// `PtpFilterRecoveryTimerCallback` (Device.c:424-443): passive-level one-shot timer (its
 /// `ExecutionLevel` is `WdfExecutionLevelPassive`), so the synchronous mode switch it triggers runs
-/// at PASSIVE_LEVEL as in C.
+/// at `PASSIVE_LEVEL` as in C.
 unsafe extern "C" fn evt_recovery_timer(timer: WDFTIMER) {
     // SAFETY: live timer of this driver, parented to the device.
     let device = unsafe { call_unsafe_wdf_function_binding!(WdfTimerGetParentObject, timer) };
@@ -481,7 +481,7 @@ unsafe extern "C" fn evt_recovery_timer(timer: WDFTIMER) {
     recovery_timer_callback(&mut Filter::new(ctx), &ctx.state);
 }
 
-/// `PtpFilterWorkItemCallback` (Input.c:30-37): issues one lower read (PASSIVE_LEVEL), without
+/// `PtpFilterWorkItemCallback` (Input.c:30-37): issues one lower read (`PASSIVE_LEVEL`), without
 /// checking `DeviceConfigured`.
 unsafe extern "C" fn evt_recovery_work_item(work_item: WDFWORKITEM) {
     // SAFETY: live work item of this driver, parented to the device.

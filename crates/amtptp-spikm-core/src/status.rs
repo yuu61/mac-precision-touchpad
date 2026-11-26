@@ -1,4 +1,4 @@
-//! The `NTSTATUS` values the SpiKm driver returns or tests, as plain `i32`s.
+//! The `NTSTATUS` values the `SpiKm` driver returns or tests, as plain `i32`s.
 //!
 //! This crate does not depend on wdk-sys, so it defines its own constants. `NtStatus` has the same
 //! representation as `wdk_sys::NTSTATUS` (`i32`), so the glue can pass the values through unchanged.
@@ -20,7 +20,7 @@ pub const STATUS_BUFFER_OVERFLOW: NtStatus = ntstatus(0x8000_0005);
 pub const STATUS_NO_MORE_ENTRIES: NtStatus = ntstatus(0x8000_001A);
 /// `STATUS_UNSUCCESSFUL` (0xC0000001).
 pub const STATUS_UNSUCCESSFUL: NtStatus = ntstatus(0xC000_0001);
-/// `STATUS_INVALID_PARAMETER` (0xC000000D). Used only internally by the C PrepareHardware and then
+/// `STATUS_INVALID_PARAMETER` (0xC000000D). Used only internally by the C `PrepareHardware` and then
 /// discarded.
 pub const STATUS_INVALID_PARAMETER: NtStatus = ntstatus(0xC000_000D);
 /// `STATUS_INVALID_DEVICE_REQUEST` (0xC0000010).
@@ -33,7 +33,7 @@ pub const STATUS_OBJECT_NAME_NOT_FOUND: NtStatus = ntstatus(0xC000_0034);
 pub const STATUS_DEVICE_DATA_ERROR: NtStatus = ntstatus(0xC000_009C);
 /// `STATUS_NOT_SUPPORTED` (0xC00000BB).
 pub const STATUS_NOT_SUPPORTED: NtStatus = ntstatus(0xC000_00BB);
-/// `STATUS_CANCELLED` (0xC0000120): D0Exit completes every queued `IOCTL_HID_READ_REPORT` with it.
+/// `STATUS_CANCELLED` (0xC0000120): `D0Exit` completes every queued `IOCTL_HID_READ_REPORT` with it.
 pub const STATUS_CANCELLED: NtStatus = ntstatus(0xC000_0120);
 /// `STATUS_INVALID_DEVICE_STATE` (0xC0000184).
 pub const STATUS_INVALID_DEVICE_STATE: NtStatus = ntstatus(0xC000_0184);
@@ -44,6 +44,7 @@ pub const STATUS_NOT_FOUND: NtStatus = ntstatus(0xC000_0225);
 
 /// `NT_SUCCESS(Status)`: true for success and informational codes (`Status >= 0`), false for warnings
 /// (0x8xxxxxxx) and errors (0xCxxxxxxx).
+#[must_use]
 pub const fn nt_success(status: NtStatus) -> bool {
     status >= 0
 }

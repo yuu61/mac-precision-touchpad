@@ -1,5 +1,5 @@
 //! Device identification: `SpiTrackpadConfigTable`, the PID-to-family switch, `REPORT_TYPE`, and the
-//! PrepareHardware logic that fills the device configuration (C `DEVICE_CONTEXT` fields `HidVendorID`,
+//! `PrepareHardware` logic that fills the device configuration (C `DEVICE_CONTEXT` fields `HidVendorID`,
 //! `HidProductID`, `HidVersionNumber`, `TrackpadInfo` and `ReportType`).
 
 use core::sync::atomic::{AtomicI16, AtomicU16, AtomicU32, Ordering};
@@ -59,7 +59,7 @@ pub const SPI_TRACKPAD_CONFIG_COUNT: usize = 9;
 
 /// `SpiTrackpadConfigTable` (AppleDefinition.h:52-71) without its `{0}` terminator, in C order.
 ///
-/// PID 0x0280 is bound by the INF but absent here; such a device fails PrepareHardware with
+/// PID 0x0280 is bound by the INF but absent here; such a device fails `PrepareHardware` with
 /// `STATUS_NOT_FOUND` (preserved known issue SPI-B17).
 pub static SPI_TRACKPAD_CONFIG_TABLE: [SpiTrackpadInfo; SPI_TRACKPAD_CONFIG_COUNT] = [
     // MacBookPro11,1 / MacBookPro12,1
@@ -79,12 +79,13 @@ pub static SPI_TRACKPAD_CONFIG_TABLE: [SpiTrackpadInfo; SPI_TRACKPAD_CONFIG_COUN
     SpiTrackpadInfo::apple(0x0291, -5087, 5579, -128, 6089),
 ];
 
-/// The PrepareHardware table lookup (Device.c:244-259): the first entry whose `VendorId` **and**
+/// The `PrepareHardware` table lookup (Device.c:244-259): the first entry whose `VendorId` **and**
 /// `ProductId` both match.
 ///
 /// C walks the table until the `{0}` terminator. No real entry has `VendorId == 0`, so iterating the 9
 /// entries gives the same result for every input, including `vendor_id == 0` (no match), without any
 /// sentinel-based indexing.
+#[must_use]
 pub fn lookup_trackpad(vendor_id: u16, product_id: u16) -> Option<&'static SpiTrackpadInfo> {
     SPI_TRACKPAD_CONFIG_TABLE
         .iter()
@@ -107,6 +108,7 @@ pub enum Family {
 }
 
 /// The `HidProductID` switch: which descriptor family a PID uses, or `None` for the `default:` branch.
+#[must_use]
 pub const fn family_for_product(product_id: u16) -> Option<Family> {
     match product_id {
         0x0275 | 0x0279 | 0x0290 | 0x0291 => Some(Family::F1),
@@ -134,10 +136,10 @@ impl ReportType {
     pub const INVALID: Self = Self(0x7fff_ffff);
 }
 
-/// The configuration PrepareHardware fills in: the C `DEVICE_CONTEXT` fields `HidVendorID`,
+/// The configuration `PrepareHardware` fills in: the C `DEVICE_CONTEXT` fields `HidVendorID`,
 /// `HidProductID`, `HidVersionNumber`, `TrackpadInfo` and `ReportType`.
 ///
-/// It is written only at PASSIVE_LEVEL in PrepareHardware and read by the IOCTL handlers and the read
+/// It is written only at `PASSIVE_LEVEL` in `PrepareHardware` and read by the IOCTL handlers and the read
 /// completion routine.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DeviceConfig {
@@ -155,6 +157,7 @@ pub struct DeviceConfig {
 
 impl DeviceConfig {
     /// The zero-filled state KMDF gives a new device context.
+    #[must_use]
     pub const fn new() -> Self {
         Self {
             hid_vendor_id: 0,
@@ -165,7 +168,7 @@ impl DeviceConfig {
         }
     }
 
-    /// PrepareHardware steps 1-3 (Device.c:210-265), after the synchronous lower
+    /// `PrepareHardware` steps 1-3 (Device.c:210-265), after the synchronous lower
     /// `IOCTL_HID_GET_DEVICE_ATTRIBUTES` returned `lower_status` and filled `lower_attributes` (a
     /// zero-initialized 32-byte `HID_DEVICE_ATTRIBUTES`).
     ///
@@ -175,7 +178,10 @@ impl DeviceConfig {
     ///   hold the lower values even on failure), then copies the matching table entry into
     ///   `trackpad_info`. No match returns `STATUS_NOT_FOUND` and leaves `trackpad_info` as it was.
     ///
-    /// On `Err` the glue returns the status from EvtDevicePrepareHardware **without** touching the registry.
+    /// On `Err` the glue returns the status from `EvtDevicePrepareHardware` **without** touching the registry.
+    ///
+    /// # Errors
+    /// Returns a failed `lower_status` or `STATUS_NOT_FOUND` for unsupported hardware.
     pub fn identify(
         &mut self,
         lower_status: NtStatus,
@@ -184,10 +190,9 @@ impl DeviceConfig {
         if !nt_success(lower_status) {
             return Err(lower_status);
         }
-        let attrs = match HidDeviceAttributes::from_bytes(lower_attributes) {
-            Some(a) => a,
+        let Some(attrs) = HidDeviceAttributes::from_bytes(lower_attributes) else {
             // Unreachable: the array is exactly HID_DEVICE_ATTRIBUTES_LEN bytes.
-            None => return Err(STATUS_NOT_FOUND),
+            return Err(STATUS_NOT_FOUND);
         };
         self.hid_vendor_id = attrs.vendor_id;
         self.hid_product_id = attrs.product_id;
@@ -201,14 +206,14 @@ impl DeviceConfig {
         }
     }
 
-    /// PrepareHardware step 4 (Device.c:268-303): applies the `DesiredReportType` value, if one was read
+    /// `PrepareHardware` step 4 (Device.c:268-303): applies the `DesiredReportType` value, if one was read
     /// (see [`desired_report_type_value`]).
     ///
     /// `Some(0)` selects [`ReportType::PRECISION_TOUCHPAD`], `Some(1)` [`ReportType::TOUCHSCREEN`]; any
     /// other value, and `None` (missing key/value, or a value larger than 4 bytes), leaves `report_type`
     /// unchanged. That keeps the previous value on a re-start of the same device (preserved behavior).
-    /// PrepareHardware then returns `STATUS_SUCCESS` regardless.
-    pub fn apply_desired_report_type(&mut self, value: Option<u32>) {
+    /// `PrepareHardware` then returns `STATUS_SUCCESS` regardless.
+    pub const fn apply_desired_report_type(&mut self, value: Option<u32>) {
         match value {
             Some(0) => self.report_type = ReportType::PRECISION_TOUCHPAD,
             Some(1) => self.report_type = ReportType::TOUCHSCREEN,
@@ -220,10 +225,10 @@ impl DeviceConfig {
 
 /// The [`DeviceConfig`] as it lives in the device context: one atomic per field.
 ///
-/// PrepareHardware writes the configuration at PASSIVE_LEVEL, and it runs again on every restart of the
+/// `PrepareHardware` writes the configuration at `PASSIVE_LEVEL`, and it runs again on every restart of the
 /// same WDFDEVICE (stop/start, rebalance). The IOCTL handlers and the lower-read completion routine read
-/// it at up to DISPATCH_LEVEL. They are not quiesced while PrepareHardware runs, because the default queue
-/// is not power-managed and D0Exit does not cancel in-flight lower reads. C used plain fields, which is a
+/// it at up to `DISPATCH_LEVEL`. They are not quiesced while `PrepareHardware` runs, because the default queue
+/// is not power-managed and `D0Exit` does not cancel in-flight lower reads. C used plain fields, which is a
 /// data race (SPI-B15). Here every field is its own atomic, so each field keeps C's single-variable
 /// semantics (P2). Readers take one [`load`](Self::load) snapshot per request.
 ///
@@ -245,6 +250,7 @@ pub struct SharedDeviceConfig {
 
 impl SharedDeviceConfig {
     /// The zero-filled state of a new device context ([`DeviceConfig::new`]).
+    #[must_use]
     pub const fn new() -> Self {
         Self {
             hid_vendor_id: AtomicU16::new(0),
@@ -283,7 +289,7 @@ impl SharedDeviceConfig {
         }
     }
 
-    /// Stores every field of `config` (each one atomically). Only PrepareHardware calls this.
+    /// Stores every field of `config` (each one atomically). Only `PrepareHardware` calls this.
     pub fn store(&self, config: &DeviceConfig) {
         self.hid_vendor_id
             .store(config.hid_vendor_id, Ordering::Relaxed);
@@ -318,7 +324,8 @@ pub const PARAMETERS_KEY_ACCESS: u32 = 0x0002_0019;
 /// checked, as in C, so any value of up to 4 bytes is accepted. Returns `None` when the query failed
 /// (`!NT_SUCCESS`, e.g. missing value or `STATUS_BUFFER_OVERFLOW` for a larger value). When the key could
 /// not be opened, the glue passes `None` to [`DeviceConfig::apply_desired_report_type`] directly.
-pub fn desired_report_type_value(
+#[must_use]
+pub const fn desired_report_type_value(
     query_status: NtStatus,
     data: [u8; DESIRED_REPORT_TYPE_VALUE_LEN],
 ) -> Option<u32> {
@@ -351,7 +358,7 @@ mod tests {
     #[test]
     fn identify_stores_ids_before_lookup() {
         let mut cfg = DeviceConfig::new();
-        let mut attrs = [0u8; 32];
+        let mut attrs = [0_u8; 32];
         attrs[..10].copy_from_slice(&[0x20, 0, 0, 0, 0xac, 0x05, 0x80, 0x02, 0x02, 0x01]);
         assert_eq!(cfg.identify(0, &attrs), Err(STATUS_NOT_FOUND));
         assert_eq!(cfg.hid_product_id, 0x0280);

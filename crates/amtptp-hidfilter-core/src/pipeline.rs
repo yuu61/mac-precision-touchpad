@@ -1,7 +1,7 @@
 //! The read pipeline (Input.c): one lower `IOCTL_HID_READ_REPORT` per trigger, and its completion,
 //! which turns the raw packet into one 50-byte PTP report for one parked upper read.
 //!
-//! Triggers of a lower read (spec 6.5): an upper READ_REPORT while `DeviceConfigured`, a recovery-timer
+//! Triggers of a lower read (spec 6.5): an upper `READ_REPORT` while `DeviceConfigured`, a recovery-timer
 //! firing whose restart reports success, and the recovery work item after a zero-length completion. A
 //! successful completion does not issue another read; the pipeline is 1:1 with upper reads.
 
@@ -26,21 +26,15 @@ pub fn issue_lower_read<P: FilterIo>(io: &mut P, state: &DeviceState) {
     if !state.io_target_set() {
         return;
     }
-    let read = match io.create_lower_read() {
-        Ok(r) => r,
-        Err(_) => {
-            state.set_device_configured(false);
-            io.start_recovery_timer(TRANSPORT_RETRY_DUE_TIME);
-            return;
-        }
+    let Ok(read) = io.create_lower_read() else {
+        state.set_device_configured(false);
+        io.start_recovery_timer(TRANSPORT_RETRY_DUE_TIME);
+        return;
     };
-    let memory = match io.create_lower_read_memory(read) {
-        Ok(m) => m,
-        Err(_) => {
-            io.delete_lower_read(read);
-            io.set_failed(FailedAction::AttemptRestart);
-            return;
-        }
+    let Ok(memory) = io.create_lower_read_memory(read) else {
+        io.delete_lower_read(read);
+        io.set_failed(FailedAction::AttemptRestart);
+        return;
     };
     if !nt_success(io.format_lower_read(read, memory)) {
         io.delete_lower_memory(memory);

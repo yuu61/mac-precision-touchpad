@@ -1,4 +1,4 @@
-//! TraceLogging (the C `ModernTrace.h` provider) and the replacement for the WPP trace points.
+//! `TraceLogging` (the C `ModernTrace.h` provider) and the replacement for the WPP trace points.
 //!
 //! Provider: `"AmtPtpDeviceTraceProvider"`, `{871b1e2d-cc5a-4ade-b74e-6cf1004ef149}` (Driver.c:7-10), so
 //! `AmtPtpDevice.wprp` keeps working. It is registered in `DriverEntry` and unregistered by the driver
@@ -11,15 +11,15 @@
 //!
 //! WPP (`TraceEvents`, control GUID `{efc3ce99-...}`) has no Rust equivalent. Its meaningful trace points
 //! (errors, PnP/power transitions, mode switches, input-path anomalies) are written as additional
-//! TraceLogging events on the same provider, under event names the C driver never wrote with fields:
+//! `TraceLogging` events on the same provider, under event names the C driver never wrote with fields:
 //!
 //! | event | content |
 //! |---|---|
-//! | `DevicePnpEvent` | EvtDeviceAdd / queue creation / PrepareHardware (incl. the failing USB setup step: target creation, interface and pipe selection, reader configuration) / D0Entry / D0Exit results |
-//! | `DeviceUsbOperationEvent` | failed control transfers, failed Wellspring-mode switches whose status C ignores (D0Entry) or returns (D0Exit), continuous-reader failures |
+//! | `DevicePnpEvent` | `EvtDeviceAdd` / queue creation / `PrepareHardware` (incl. the failing USB setup step: target creation, interface and pipe selection, reader configuration) / `D0Entry` / `D0Exit` results |
+//! | `DeviceUsbOperationEvent` | failed control transfers, failed Wellspring-mode switches whose status C ignores (`D0Entry`) or returns (`D0Exit`), continuous-reader failures |
 //! | `DeviceStateEvent` | changes of the driver state (Wellspring mode, selective reporting, qualification levels) |
 //! | `DeviceIoctlEvent` | device-control requests that fail or are not supported |
-//! | `InputDiagnosticsEvent` | read-completion anomalies (malformed packets / emergency reset, failed READ_REPORT completion, dropped frames) |
+//! | `InputDiagnosticsEvent` | read-completion anomalies (malformed packets / emergency reset, failed `READ_REPORT` completion, dropped frames) |
 //!
 //! (`DeviceUsbOperationEvent` and `InputDiagnosticsEvent` are names `ModernTrace.h` declares but never
 //! uses.) All events use keyword 0, like the C events.
@@ -131,7 +131,7 @@ pub(crate) fn power_transition(routine: &str, power_state: i32, status: NTSTATUS
     );
 }
 
-/// `DevicePnpEvent` (level Informational): PrepareHardware succeeded.
+/// `DevicePnpEvent` (level Informational): `PrepareHardware` succeeded.
 pub(crate) fn prepare_hardware_done(
     id_vendor: u16,
     id_product: u16,
@@ -156,7 +156,7 @@ pub(crate) fn prepare_hardware_done(
 }
 
 /// `DeviceUsbOperationEvent` (level Error): a control transfer failed (`setup` = the 8 setup bytes).
-pub(crate) fn control_transfer_failed(setup: &[u8; 8], status: NTSTATUS) {
+pub(crate) fn control_transfer_failed(setup: [u8; 8], status: NTSTATUS) {
     tlg::write_event!(
         PROVIDER,
         "DeviceUsbOperationEvent",
@@ -166,7 +166,7 @@ pub(crate) fn control_transfer_failed(setup: &[u8; 8], status: NTSTATUS) {
             "Routine",
             "WdfUsbTargetDeviceSendControlTransferSynchronously"
         ),
-        binary("SetupPacket", setup),
+        binary("SetupPacket", &setup),
         win_ntstatus("Status", &status),
     );
 }
@@ -186,7 +186,7 @@ pub(crate) fn readers_failed(status: NTSTATUS, usbd_status: i32) {
 }
 
 /// `DeviceUsbOperationEvent` (level Warning): a Wellspring-mode switch whose failure the C code only
-/// traces (D0Entry, emergency reset).
+/// traces (`D0Entry`, emergency reset).
 pub(crate) fn mode_switch_failed(routine: &str, enable: bool, status: NTSTATUS) {
     tlg::write_event!(
         PROVIDER,
@@ -200,7 +200,7 @@ pub(crate) fn mode_switch_failed(routine: &str, enable: bool, status: NTSTATUS) 
 }
 
 /// `DeviceStateEvent` (level Informational): the driver state (flags, qualification levels) changed in
-/// `routine`. `PerfCounter` (reset by every D0Entry) is not compared.
+/// `routine`. `PerfCounter` (reset by every `D0Entry`) is not compared.
 pub(crate) fn state_changed(routine: &str, before: &StateSnapshot, after: &StateSnapshot) {
     let without_perf_counter = |snapshot: &StateSnapshot| StateSnapshot {
         perf_counter: 0,
@@ -252,8 +252,8 @@ pub(crate) fn ioctl_failed(io_control_code: u32, status: NTSTATUS) {
 
 /// `InputDiagnosticsEvent`: what a read completion did, for the outcomes worth tracing.
 ///
-/// Emergency resets (UM-B11) and failed READ_REPORT completions (UM-B6) are warnings; frames dropped
-/// because no READ_REPORT is pending or Wellspring mode is off are verbose (they can occur for every
+/// Emergency resets (UM-B11) and failed `READ_REPORT` completions (UM-B6) are warnings; frames dropped
+/// because no `READ_REPORT` is pending or Wellspring mode is off are verbose (they can occur for every
 /// packet). A normal completion is not traced.
 pub(crate) fn read_complete(outcome: ReadCompleteOutcome, length: usize) {
     match outcome {

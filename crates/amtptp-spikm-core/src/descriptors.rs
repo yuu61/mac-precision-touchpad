@@ -15,7 +15,7 @@ use ptp_hid::hidport::{
 use crate::device::{DeviceConfig, Family, ReportType, family_for_product};
 use crate::status::{NtStatus, STATUS_NOT_FOUND};
 
-/// Length of every SpiKm report descriptor: 501 bytes (0x01F5).
+/// Length of every `SpiKm` report descriptor: 501 bytes (0x01F5).
 pub const REPORT_DESCRIPTOR_LEN: usize = REPORT_DESCRIPTOR_SPI_UMAPP_LEN;
 const _: () = assert!(REPORT_DESCRIPTOR_LEN == 501);
 
@@ -81,6 +81,7 @@ pub static HID_DESCRIPTOR: [u8; HID_DESCRIPTOR_LEN] = HID_DESCRIPTOR_SPI_UMAPP;
 
 impl Family {
     /// The family's `Axes`.
+    #[must_use]
     pub const fn axes(self) -> Axes {
         match self {
             Self::F1 => AXES_F1,
@@ -91,6 +92,7 @@ impl Family {
     }
 
     /// The family's HID descriptor (the same 9 bytes for every family).
+    #[must_use]
     pub fn hid_descriptor(self) -> &'static [u8; HID_DESCRIPTOR_LEN] {
         &HID_DESCRIPTOR
     }
@@ -98,6 +100,7 @@ impl Family {
     /// The family's report descriptor for `report_type`: `PrecisionTouchpad` (0) gives the Touch Pad
     /// variant, `Touchscreen` (1) the Touch Screen variant, any other value `None` (C leaves `Descriptor`
     /// NULL).
+    #[must_use]
     pub fn report_descriptor(
         self,
         report_type: ReportType,
@@ -122,6 +125,9 @@ impl Family {
 /// The glue copies them with `WdfMemoryCopyFromBuffer` (a buffer shorter than 9 bytes fails there with
 /// `STATUS_BUFFER_TOO_SMALL`, which is returned as is) and then sets Information to `bytes.len()` (9).
 /// `ReportType` is not consulted.
+///
+/// # Errors
+/// Returns `STATUS_NOT_FOUND` if the product has no HID descriptor.
 pub fn hid_descriptor_for(config: &DeviceConfig) -> Result<&'static [u8], NtStatus> {
     match family_for_product(config.hid_product_id) {
         Some(family) => Ok(family.hid_descriptor()),
@@ -136,6 +142,9 @@ pub fn hid_descriptor_for(config: &DeviceConfig) -> Result<&'static [u8], NtStat
 /// The glue copies them with `WdfMemoryCopyFromBuffer` (shorter than 501 bytes: `STATUS_BUFFER_TOO_SMALL`)
 /// and sets Information to `bytes.len()` (501). C's `CopiedSize == 0` branch
 /// (`STATUS_INVALID_DEVICE_STATE`) is unreachable because the length is the constant 501.
+///
+/// # Errors
+/// Returns `STATUS_NOT_FOUND` if the product or report type has no descriptor.
 pub fn report_descriptor_for(config: &DeviceConfig) -> Result<&'static [u8], NtStatus> {
     match family_for_product(config.hid_product_id) {
         Some(family) => match family.report_descriptor(config.report_type) {
@@ -156,6 +165,7 @@ pub const DEVICE_ATTRIBUTES_INFORMATION: usize = HID_DEVICE_ATTRIBUTES_LEN;
 /// with that status), writes it with [`HidDeviceAttributes::write_to`] (only bytes 0..10; `Reserved` is
 /// left untouched exactly like C, preserved) and sets Information to [`DEVICE_ATTRIBUTES_INFORMATION`].
 /// Any PID is reported, even one outside the table.
+#[must_use]
 pub const fn device_attributes(config: &DeviceConfig) -> HidDeviceAttributes {
     HidDeviceAttributes {
         vendor_id: DEVICE_VID,

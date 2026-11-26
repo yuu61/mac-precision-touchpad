@@ -1,5 +1,7 @@
-//! Replays `fixtures/wire.txt`: the mode-switch SET_FEATURE bytes and the start / resume / timer /
+//! Replays `fixtures/wire.txt`: the mode-switch `SET_FEATURE` bytes and the start / resume / timer /
 //! PnP-restart sequences that send it, with fault injection.
+
+#![cfg(test)]
 
 mod common;
 
@@ -54,7 +56,7 @@ fn replay_wire() {
             .iter()
             .find_map(|p| case.strip_prefix(p))
             .filter(|cfg| ["bt", "usb", "nonapple", "bt_pid0266"].contains(cfg))
-            .map(str::to_string);
+            .map(str::to_owned);
         let before = group
             .as_ref()
             .and_then(|g| pending_by_cfg.iter().find(|(c, _)| c == g))
@@ -68,8 +70,8 @@ fn replay_wire() {
                 None
             }
             "PtpFilterConfigureMultiTouch" => {
-                assert_eq!(snap_in.vendor_id as i128, r.num("vid"));
-                assert_eq!(snap_in.product_id as i128, r.num("pid"));
+                assert_eq!(i128::from(snap_in.vendor_id), r.num("vid"));
+                assert_eq!(i128::from(snap_in.product_id), r.num("pid"));
                 Some(configure_multitouch(&mut m, &state))
             }
             "PtpFilterDeviceD0Exit+PtpFilterDeviceD0Entry+PtpFilterSelfManagedIoRestart" => {
@@ -101,18 +103,18 @@ fn replay_wire() {
                 assert_eq!(r.num("send_flags"), 0x2);
                 assert_eq!(r.num("send_timeout"), 0);
                 assert_eq!(
-                    u8::from(s.in_is_userbuffer) as i128,
+                    i128::from(u8::from(s.in_is_userbuffer)),
                     r.num("send_in_is_userbuffer")
                 );
-                assert_eq!(s.xfer_id as i128, r.num("xfer_id"), "{case}");
-                assert_eq!(s.xfer_len as i128, r.num("xfer_len"), "{case}");
-                assert_eq!(s.rb_off as i128, r.num("rb_off"), "{case}");
+                assert_eq!(i128::from(s.xfer_id), r.num("xfer_id"), "{case}");
+                assert_eq!(i128::from(s.xfer_len), r.num("xfer_len"), "{case}");
+                assert_eq!(i128::from(s.rb_off), r.num("rb_off"), "{case}");
                 assert_eq!(s.raw32, r.bytes("raw32"), "{case}");
             }
             assert_eq!(s.payload, r.bytes("payload"), "{case}");
         }
         if let Some(v) = r.opt("lower_reads_pending") {
-            assert_eq!((before + m.lower_reads_pending) as i128, num(v), "{case}");
+            assert_eq!(i128::from(before + m.lower_reads_pending), num(v), "{case}");
         }
         if let Some(g) = group {
             let total = before + m.lower_reads_pending;

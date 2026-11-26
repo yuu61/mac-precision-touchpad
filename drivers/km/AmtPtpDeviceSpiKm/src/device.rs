@@ -34,7 +34,7 @@ use crate::{PROVIDER, input, keyword, queue};
 /// The four handles are written exactly once, inside [`create_device`], before the device can receive
 /// any request or PnP/power callback; afterwards the context is only accessed through shared references.
 /// All state that changes later is atomic ([`SharedDeviceConfig`], [`DeviceRuntime`]), so concurrent
-/// callbacks at up to DISPATCH_LEVEL never race on plain fields (P2 for SPI-B15).
+/// callbacks at up to `DISPATCH_LEVEL` never race on plain fields (P2 for SPI-B15).
 ///
 /// Dropped C fields (dead): `SpiDevice`, `InputPollThreadHandle`. `HidVendorID`, `HidProductID`,
 /// `HidVersionNumber`, `TrackpadInfo` and `ReportType` are in `config`; `DeviceStatus`, `LastReportTime`,
@@ -46,9 +46,9 @@ pub(crate) struct DeviceContext {
     pub(crate) hid_queue: WDFQUEUE,
     /// `PowerOnRecoveryTimer`: the 5 s one-shot passive-level retry timer.
     pub(crate) power_on_recovery_timer: WDFTIMER,
-    /// `HidReadBufferLookaside`: 1024-byte NonPagedPoolNx buffers for the lower reads.
+    /// `HidReadBufferLookaside`: 1024-byte `NonPagedPoolNx` buffers for the lower reads.
     pub(crate) hid_read_buffer_lookaside: WDFLOOKASIDE,
-    /// What PrepareHardware found out about the device.
+    /// What `PrepareHardware` found out about the device.
     pub(crate) config: SharedDeviceConfig,
     /// `DeviceStatus`, `LastReportTime` and the PTP feature flags.
     pub(crate) runtime: DeviceRuntime,
@@ -74,12 +74,12 @@ declare_context_type!(pub(crate) DeviceContext, DEVICE_CONTEXT_TYPE_INFO, device
 /// `DeviceGetContext(Device)` as a shared reference.
 ///
 /// Returns `None` only if the object has no `DEVICE_CONTEXT`, which cannot happen for the devices this
-/// driver creates (C checked it in PrepareHardware and SetState only; the port checks it everywhere
+/// driver creates (C checked it in `PrepareHardware` and `SetState` only; the port checks it everywhere
 /// instead of dereferencing NULL).
 ///
 /// # Safety
 /// `device` is a live WDFDEVICE created by [`create_device`] (so its context was initialized there), and
-/// the caller runs at IRQL <= DISPATCH_LEVEL.
+/// the caller runs at IRQL <= `DISPATCH_LEVEL`.
 pub(crate) unsafe fn device_context<'a>(device: WDFDEVICE) -> Option<&'a DeviceContext> {
     // SAFETY: valid live device handle (caller contract).
     let context = unsafe { device_get_context(device) };
@@ -90,8 +90,8 @@ pub(crate) unsafe fn device_context<'a>(device: WDFDEVICE) -> Option<&'a DeviceC
 }
 
 /// `KeQueryPerformanceCounter(&x)` exactly as the C driver calls it: the variable is passed as the
-/// optional **PerformanceFrequency** out-parameter and the returned counter is discarded, so this returns
-/// the QPC frequency, a boot-time constant (SPI-B8, preserved: ScanTime is therefore always 0).
+/// optional **`PerformanceFrequency`** out-parameter and the returned counter is discarded, so this returns
+/// the QPC frequency, a boot-time constant (SPI-B8, preserved: `ScanTime` is therefore always 0).
 pub(crate) fn query_performance_counter_as_c() -> i64 {
     let mut frequency = LARGE_INTEGER { QuadPart: 0 };
     // SAFETY: `frequency` is a valid out-parameter; KeQueryPerformanceCounter
@@ -111,7 +111,7 @@ static DEVICE_INTERFACE_CLASS_GUID: GUID = GUID {
     Data4: DEVICE_INTERFACE_GUID.data4,
 };
 
-/// `AmtPtpDeviceSpiKmCreateDevice` (Device.c:24-164), PASSIVE_LEVEL (`PAGE`, as in C).
+/// `AmtPtpDeviceSpiKmCreateDevice` (Device.c:24-164), `PASSIVE_LEVEL` (`PAGE`, as in C).
 ///
 /// In C order: PnP/power callbacks, `WdfDeviceCreate` (context `DEVICE_CONTEXT`), the lookaside list, the
 /// recovery timer, the local I/O target (NULL: `STATUS_INVALID_DEVICE_STATE`), the device interface and,
@@ -125,12 +125,11 @@ static DEVICE_INTERFACE_CLASS_GUID: GUID = GUID {
 /// device type and characteristics from the lower device, as the C driver does.
 ///
 /// # Safety
-/// `device_init` is the unconsumed WDFDEVICE_INIT of the current `EvtDriverDeviceAdd` call.
+/// `device_init` is the unconsumed `WDFDEVICE_INIT` of the current `EvtDriverDeviceAdd` call.
 #[unsafe(link_section = "PAGE")]
-pub(crate) unsafe fn create_device(device_init: PWDFDEVICE_INIT) -> NTSTATUS {
+pub(crate) unsafe fn create_device(mut device_init: PWDFDEVICE_INIT) -> NTSTATUS {
     wdk::paged_code!();
 
-    let mut device_init = device_init;
     let mut pnp_power_callbacks = pnppower_event_callbacks_init();
     pnp_power_callbacks.EvtDevicePrepareHardware = Some(evt_device_prepare_hardware);
     pnp_power_callbacks.EvtDeviceD0Entry = Some(evt_device_d0_entry);
@@ -289,7 +288,7 @@ const LOWER_ATTRIBUTES_DESCRIPTOR_LEN: ULONG = {
     LOWER_ATTRIBUTES_LEN as ULONG
 };
 
-/// `AmtPtpEvtDevicePrepareHardware` (Device.c:166-317), PASSIVE_LEVEL (non-paged, as in C).
+/// `AmtPtpEvtDevicePrepareHardware` (Device.c:166-317), `PASSIVE_LEVEL` (non-paged, as in C).
 ///
 /// 1. Synchronous lower `IOCTL_HID_GET_DEVICE_ATTRIBUTES` into a zeroed 32-byte buffer (no timeout:
 ///    SPI-B23, preserved). Failure returns that status.
@@ -368,20 +367,22 @@ unsafe extern "C" fn evt_device_prepare_hardware(
 /// `ASCII_NAME` as a NUL-terminated UTF-16 array of `N` code units (`N` = length + 1), for a
 /// `DECLARE_CONST_UNICODE_STRING`. Evaluated only in a constant initializer, where a wrong `N` or a
 /// non-ASCII byte is a compile-time error.
-#[allow(clippy::indexing_slicing)] // const evaluation only: out-of-bounds fails the build, not the driver
 const fn ascii_to_utf16z<const N: usize>(ascii_name: &str) -> [u16; N] {
-    let bytes = ascii_name.as_bytes();
+    let mut bytes = ascii_name.as_bytes();
     assert!(
         bytes.len() + 1 == N,
         "N must be the name length plus the NUL"
     );
-    let mut out = [0u16; N];
-    let mut i = 0;
-    while i < bytes.len() {
-        assert!(bytes[i].is_ascii(), "ASCII names only");
+    let mut out = [0_u16; N];
+    let mut units = out.as_mut_slice();
+    while let (Some((&byte, rest)), Some((unit, tail))) =
+        (bytes.split_first(), units.split_first_mut())
+    {
+        assert!(byte.is_ascii(), "ASCII names only");
         // ASCII byte -> the same UTF-16 code unit.
-        out[i] = bytes[i] as u16;
-        i += 1;
+        *unit = byte as u16;
+        bytes = rest;
+        units = tail;
     }
     out
 }
@@ -403,12 +404,12 @@ const DESIRED_REPORT_TYPE_QUERY_LEN: ULONG = {
     DESIRED_REPORT_TYPE_VALUE_LEN as ULONG
 };
 
-/// PrepareHardware step 4 (Device.c:268-303): `WdfDriverOpenParametersRegistryKey(KEY_READ)` on the
+/// `PrepareHardware` step 4 (Device.c:268-303): `WdfDriverOpenParametersRegistryKey(KEY_READ)` on the
 /// driver (`...\Services\AmtPtpDeviceSpiKm\Parameters`, driver-wide), `WdfRegistryQueryValue(
 /// "DesiredReportType", 4 bytes)`, `WdfRegistryClose`. Returns the value when the query succeeded.
 ///
 /// # Safety
-/// `device` is a live WDFDEVICE; PASSIVE_LEVEL.
+/// `device` is a live WDFDEVICE; `PASSIVE_LEVEL`.
 unsafe fn query_desired_report_type(device: WDFDEVICE) -> Option<u32> {
     // SAFETY: valid device handle.
     let driver = unsafe { call_unsafe_wdf_function_binding!(WdfDeviceGetDriver, device) };
@@ -456,7 +457,7 @@ unsafe fn query_desired_report_type(device: WDFDEVICE) -> Option<u32> {
 
     // The registry wrote raw little-endian bytes into `value`; the native byte order of the u32 is
     // those bytes again.
-    desired_report_type_value(query_status, value.to_ne_bytes())
+    desired_report_type_value(query_status, value.to_le_bytes())
 }
 
 /// `AmtPtpEvtDeviceD0Entry` (Device.c:319-351): `DeviceStatus = D0ActiveAndUnconfigured` and
@@ -528,7 +529,7 @@ unsafe extern "C" fn evt_device_d0_exit(
 }
 
 /// `AmtPtpEvtDeviceSelfManagedIoInitOrRestart` (Device.c:397-427), registered for both
-/// SelfManagedIoInit and SelfManagedIoRestart; PASSIVE_LEVEL.
+/// `SelfManagedIoInit` and `SelfManagedIoRestart`; `PASSIVE_LEVEL`.
 ///
 /// Runs the mode switch. Success: `DeviceStatus = D0ActiveAndConfigured` and `LastReportTime` = the QPC
 /// frequency; no lower read is issued for already-queued requests (SPI-B13, preserved). Failure: start the
@@ -572,7 +573,7 @@ unsafe extern "C" fn evt_device_self_managed_io_init_or_restart(device: WDFDEVIC
 /// filled in place here and stays at this stack address until the synchronous send has returned.
 ///
 /// # Safety
-/// PASSIVE_LEVEL (synchronous send). `context` belongs to a live device.
+/// `PASSIVE_LEVEL` (synchronous send). `context` belongs to a live device.
 unsafe fn spi_set_state(context: &DeviceContext, desired_state: bool) -> NTSTATUS {
     let mut packet = SetStatePacket::zeroed();
     packet.fill(desired_state);
@@ -626,7 +627,7 @@ const SET_STATE_PACKET_DESCRIPTOR_LEN: ULONG = {
 ///
 /// Runs the mode switch again. Success: issue exactly one lower read, then
 /// `DeviceStatus = D0ActiveAndConfigured` (`LastReportTime` is not refreshed). Failure: nothing, no
-/// reschedule. It runs whatever the current power state is, also after D0Exit (SPI-B12, preserved).
+/// reschedule. It runs whatever the current power state is, also after `D0Exit` (SPI-B12, preserved).
 unsafe extern "C" fn power_recovery_timer_callback(timer: WDFTIMER) {
     // SAFETY: `timer` is the framework's timer handle for this callback.
     let device: WDFDEVICE =

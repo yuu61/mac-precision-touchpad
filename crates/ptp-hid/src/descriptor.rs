@@ -1,9 +1,9 @@
 //! `const fn` builders for the PTP report descriptors of all four drivers.
 //!
 //! Every C report descriptor follows one template. Only these things vary:
-//! - the contact shape inside each finger collection: a 9-byte contact with a 32-bit contact ID (UsbUm,
-//!   UsbKm, HidFilter), or a 5-byte contact with a 3-bit contact ID (SpiKm);
-//! - the touchpad TLC usage (Touch Pad 0x05, or Touch Screen 0x04 for SpiKm's touchscreen variant);
+//! - the contact shape inside each finger collection: a 9-byte contact with a 32-bit contact ID (`UsbUm`,
+//!   `UsbKm`, `HidFilter`), or a 5-byte contact with a 3-bit contact ID (`SpiKm`);
+//! - the touchpad TLC usage (Touch Pad 0x05, or Touch Screen 0x04 for `SpiKm`'s touchscreen variant);
 //! - four 16-bit axis values ([`Axes`]);
 //! - whether the user-mode-app TLC ([`UMAPP_TLC`]) is appended.
 //!
@@ -12,10 +12,10 @@
 //!
 //! | Driver | Builder | Length |
 //! |---|---|---|
-//! | UsbUm, 6 families | [`report_descriptor_u32_id_umapp`] | 516 |
-//! | UsbKm (T2) | [`report_descriptor_u32_id`] | 493 |
-//! | HidFilter (MT2) | [`report_descriptor_u32_id`] | 493 |
-//! | SpiKm, 4 families × {touchpad, touchscreen} | [`report_descriptor_spi_umapp`] | 501 |
+//! | `UsbUm`, 6 families | [`report_descriptor_u32_id_umapp`] | 516 |
+//! | `UsbKm` (T2) | [`report_descriptor_u32_id`] | 493 |
+//! | `HidFilter` (MT2) | [`report_descriptor_u32_id`] | 493 |
+//! | `SpiKm`, 4 families × {touchpad, touchscreen} | [`report_descriptor_spi_umapp`] | 501 |
 //!
 //! The per-family axis values belong to the core crates. Quirks such as the missing global-item reset in
 //! finger collections 3 and 5 are reproduced verbatim. Do not "clean up" these bytes.
@@ -60,13 +60,14 @@ pub struct Axes {
 pub enum TlcUsage {
     /// Digitizers page usage 0x05, Touch Pad. Used by every PTP descriptor.
     TouchPad = 0x05,
-    /// Digitizers page usage 0x04, Touch Screen. Used only by SpiKm's `*_TOUCHSCREEN_TLC` variants,
+    /// Digitizers page usage 0x04, Touch Screen. Used only by `SpiKm`'s `*_TOUCHSCREEN_TLC` variants,
     /// selected by the `DesiredReportType` registry value.
     TouchScreen = 0x04,
 }
 
 impl TlcUsage {
     /// The usage byte (0x05 or 0x04).
+    #[must_use]
     pub const fn usage(self) -> u8 {
         self as u8
     }
@@ -120,12 +121,12 @@ pub const WINDOWS_CONFIGURATION_TLC_LEN: usize = 47;
 /// Length of [`UMAPP_TLC`].
 pub const UMAPP_TLC_LEN: usize = 23;
 
-/// Length of [`report_descriptor_u32_id`] (UsbKm, HidFilter).
+/// Length of [`report_descriptor_u32_id`] (`UsbKm`, `HidFilter`).
 pub const REPORT_DESCRIPTOR_U32_ID_LEN: usize =
     TOUCHPAD_TLC_U32_ID_LEN + WINDOWS_CONFIGURATION_TLC_LEN;
-/// Length of [`report_descriptor_u32_id_umapp`] (UsbUm).
+/// Length of [`report_descriptor_u32_id_umapp`] (`UsbUm`).
 pub const REPORT_DESCRIPTOR_U32_ID_UMAPP_LEN: usize = REPORT_DESCRIPTOR_U32_ID_LEN + UMAPP_TLC_LEN;
-/// Length of [`report_descriptor_spi_umapp`] (SpiKm).
+/// Length of [`report_descriptor_spi_umapp`] (`SpiKm`).
 pub const REPORT_DESCRIPTOR_SPI_UMAPP_LEN: usize =
     TOUCHPAD_TLC_SPI_LEN + WINDOWS_CONFIGURATION_TLC_LEN + UMAPP_TLC_LEN;
 
@@ -165,7 +166,7 @@ pub const FINGER_HEAD_U32_ID: [u8; FINGER_HEAD_U32_ID_LEN] = [
 /// Head of an SPI 5-byte-contact finger collection, from `BEGIN_COLLECTION` to the padding: Confidence:1,
 /// Tip Switch:1, Contact ID:3 with logical maximum 3, and 3 constant bits.
 ///
-/// Preserved quirk: the logical maximum is 3, but SpiKm emits contact IDs 0..=4.
+/// Preserved quirk: the logical maximum is 3, but `SpiKm` emits contact IDs 0..=4.
 #[rustfmt::skip]
 pub const FINGER_HEAD_SPI: [u8; FINGER_HEAD_SPI_LEN] = [
     BEGIN_COLLECTION, 0x02, // Begin Collection: Logical
@@ -198,6 +199,7 @@ pub const GLOBAL_RESET: [u8; GLOBAL_RESET_LEN] = [
 /// exponent -2, and the four [`Axes`] values. Within this block the value bytes are at offsets 3 (X
 /// logical), 14 (X physical), 21 (Y physical) and 24 (Y logical).
 #[rustfmt::skip]
+#[must_use]
 pub const fn axis_items(axes: Axes) -> [u8; AXIS_ITEMS_LEN] {
     let [xl0, xl1] = axes.x_logical_max.to_le_bytes();
     let [xp0, xp1] = axes.x_physical_max.to_le_bytes();
@@ -231,18 +233,19 @@ const fn finger_collection<const H: usize, const R: usize, const N: usize>(
         assert!(
             H + AXIS_ITEMS_LEN + R + 1 == N,
             "finger collection length mismatch"
-        )
+        );
     };
-    let mut out = [0u8; N];
-    let rest = put(&mut out, head);
-    let rest = put(rest, &axis_items(axes));
-    let rest = put(rest, reset);
-    let _ = put(rest, &[END_COLLECTION]);
+    let mut out = [0_u8; N];
+    let remaining = put(&mut out, head);
+    let remaining = put(remaining, &axis_items(axes));
+    let remaining = put(remaining, reset);
+    put(remaining, &[END_COLLECTION]);
     out
 }
 
 /// `*_PTP_FINGER_COLLECTION_1` with a 9-byte contact (70 bytes). It ends with the [`GLOBAL_RESET`].
 /// In the C template, fingers 1, 2 and 4 use it.
+#[must_use]
 pub const fn finger_collection_u32_id(axes: Axes) -> [u8; FINGER_COLLECTION_U32_ID_LEN] {
     finger_collection(&FINGER_HEAD_U32_ID, axes, &GLOBAL_RESET)
 }
@@ -250,6 +253,7 @@ pub const fn finger_collection_u32_id(axes: Axes) -> [u8; FINGER_COLLECTION_U32_
 /// `*_PTP_FINGER_COLLECTION_2` with a 9-byte contact (64 bytes). It has no [`GLOBAL_RESET`], so finger 4's
 /// bit fields inherit cm, exponent -2 and Y physical max (preserved quirk). In the C template, fingers 3
 /// and 5 use it.
+#[must_use]
 pub const fn finger_collection_u32_id_no_reset(
     axes: Axes,
 ) -> [u8; FINGER_COLLECTION_U32_ID_NO_RESET_LEN] {
@@ -257,11 +261,13 @@ pub const fn finger_collection_u32_id_no_reset(
 }
 
 /// `*_PTP_FINGER_COLLECTION_1` with an SPI 5-byte contact (67 bytes). It ends with the [`GLOBAL_RESET`].
+#[must_use]
 pub const fn finger_collection_spi(axes: Axes) -> [u8; FINGER_COLLECTION_SPI_LEN] {
     finger_collection(&FINGER_HEAD_SPI, axes, &GLOBAL_RESET)
 }
 
 /// `*_PTP_FINGER_COLLECTION_2` with an SPI 5-byte contact (61 bytes). It has no [`GLOBAL_RESET`].
+#[must_use]
 pub const fn finger_collection_spi_no_reset(
     axes: Axes,
 ) -> [u8; FINGER_COLLECTION_SPI_NO_RESET_LEN] {
@@ -271,6 +277,7 @@ pub const fn finger_collection_spi_no_reset(
 /// The first 10 bytes of the touchpad TLC: Digitizer page, the [`TlcUsage`] (at byte 3), Application
 /// collection, Report ID 0x05 and Usage Finger for the first finger collection.
 #[rustfmt::skip]
+#[must_use]
 pub const fn touchpad_tlc_header(usage: TlcUsage) -> [u8; TOUCHPAD_TLC_HEADER_LEN] {
     [
         USAGE_PAGE, 0x0d, // Usage Page: Digitizer
@@ -351,9 +358,9 @@ const fn touchpad_tlc<const F1: usize, const F2: usize, const N: usize>(
                 + TOUCHPAD_TLC_TAIL_LEN
                 == N,
             "touchpad TLC length mismatch"
-        )
+        );
     };
-    let mut out = [0u8; N];
+    let mut out = [0_u8; N];
     let rest = put(&mut out, &touchpad_tlc_header(usage));
     let rest = put(rest, fc1); // finger 1
     let rest = put(rest, &FINGER_SEPARATOR);
@@ -364,13 +371,14 @@ const fn touchpad_tlc<const F1: usize, const F2: usize, const N: usize>(
     let rest = put(rest, fc1); // finger 4
     let rest = put(rest, &FINGER_SEPARATOR);
     let rest = put(rest, fc2); // finger 5
-    let _ = put(rest, &TOUCHPAD_TLC_TAIL);
+    put(rest, &TOUCHPAD_TLC_TAIL);
     out
 }
 
 /// The touchpad TLC with 9-byte contacts (446 bytes), e.g. `AAPL_WELLSPRING_3_PTP_TLC`,
 /// `AAPL_WELLSPRING_T2_PTP_TLC` or `AAPL_MAGIC_TRACKPAD2_PTP_TLC`. Inside each finger collection the axis
 /// value bytes are at offsets 36, 47, 54 and 57.
+#[must_use]
 pub const fn touchpad_tlc_u32_id(usage: TlcUsage, axes: Axes) -> [u8; TOUCHPAD_TLC_U32_ID_LEN] {
     touchpad_tlc(
         usage,
@@ -382,6 +390,7 @@ pub const fn touchpad_tlc_u32_id(usage: TlcUsage, axes: Axes) -> [u8; TOUCHPAD_T
 /// The touchpad TLC with SPI 5-byte contacts (431 bytes), e.g. `AAPL_SPI_SERIES1_PTP_TLC` (with
 /// [`TlcUsage::TouchPad`]) or `AAPL_SPI_SERIES1_TOUCHSCREEN_TLC` (with [`TlcUsage::TouchScreen`]). Inside
 /// each finger collection the axis value bytes are at offsets 33, 44, 51 and 54.
+#[must_use]
 pub const fn touchpad_tlc_spi(usage: TlcUsage, axes: Axes) -> [u8; TOUCHPAD_TLC_SPI_LEN] {
     touchpad_tlc(
         usage,
@@ -423,8 +432,8 @@ pub const WINDOWS_CONFIGURATION_TLC: [u8; WINDOWS_CONFIGURATION_TLC_LEN] = [
 ];
 
 /// `AAPL_PTP_USERMODE_CONFIGURATION_APP_TLC` (23 bytes), identical in all four drivers. It is a vendor TLC
-/// (page 0xFF00, usage 0x01) with feature report 0x09: 3 × 8-bit, logical range 0..255. UsbUm and SpiKm
-/// include it; UsbKm and HidFilter do not.
+/// (page 0xFF00, usage 0x01) with feature report 0x09: 3 × 8-bit, logical range 0..255. `UsbUm` and `SpiKm`
+/// include it; `UsbKm` and `HidFilter` do not.
 #[rustfmt::skip]
 pub const UMAPP_TLC: [u8; UMAPP_TLC_LEN] = [
     USAGE_PAGE_1, 0x00, 0xff, // Usage Page: Vendor defined
@@ -442,7 +451,8 @@ pub const UMAPP_TLC: [u8; UMAPP_TLC_LEN] = [
 
 /// Touchpad TLC (9-byte contacts, Touch Pad usage) followed by [`WINDOWS_CONFIGURATION_TLC`]: 493 bytes.
 ///
-/// UsbKm `AmtPtpT2ReportDescriptor` and HidFilter `PtpReportDescriptorMagicTrackpad2` use it.
+/// `UsbKm` `AmtPtpT2ReportDescriptor` and `HidFilter` `PtpReportDescriptorMagicTrackpad2` use it.
+#[must_use]
 pub const fn report_descriptor_u32_id(axes: Axes) -> [u8; REPORT_DESCRIPTOR_U32_ID_LEN] {
     concat(
         &touchpad_tlc_u32_id(TlcUsage::TouchPad, axes),
@@ -453,7 +463,8 @@ pub const fn report_descriptor_u32_id(axes: Axes) -> [u8; REPORT_DESCRIPTOR_U32_
 /// Touchpad TLC (9-byte contacts, Touch Pad usage), [`WINDOWS_CONFIGURATION_TLC`] and [`UMAPP_TLC`]: 516
 /// bytes.
 ///
-/// UsbUm `AmtPtp{3,5,6,7a,8,Mt2}ReportDescriptor` use it.
+/// `UsbUm` `AmtPtp{3,5,6,7a,8,Mt2}ReportDescriptor` use it.
+#[must_use]
 pub const fn report_descriptor_u32_id_umapp(
     axes: Axes,
 ) -> [u8; REPORT_DESCRIPTOR_U32_ID_UMAPP_LEN] {
@@ -463,8 +474,9 @@ pub const fn report_descriptor_u32_id_umapp(
 /// Touchpad TLC (SPI 5-byte contacts, with the given usage), [`WINDOWS_CONFIGURATION_TLC`] and
 /// [`UMAPP_TLC`]: 501 bytes.
 ///
-/// SpiKm `AmtPtpSpiFamily{1,2,3a,3b}ReportDescriptor` (with [`TlcUsage::TouchPad`]) and
+/// `SpiKm` `AmtPtpSpiFamily{1,2,3a,3b}ReportDescriptor` (with [`TlcUsage::TouchPad`]) and
 /// `...TouchscreenReportDescriptor` (with [`TlcUsage::TouchScreen`]) use it.
+#[must_use]
 pub const fn report_descriptor_spi_umapp(
     usage: TlcUsage,
     axes: Axes,
@@ -580,14 +592,18 @@ mod tests {
                     3 => 4,
                     s => s as usize,
                 };
-                if prefix == BEGIN_COLLECTION {
-                    if depth == 0 {
-                        tlcs += 1;
+                match prefix {
+                    BEGIN_COLLECTION => {
+                        if depth == 0 {
+                            tlcs += 1;
+                        }
+                        depth += 1;
                     }
-                    depth += 1;
-                } else if prefix == END_COLLECTION {
-                    depth -= 1;
-                    assert!(depth >= 0);
+                    END_COLLECTION => {
+                        depth -= 1;
+                        assert!(depth >= 0);
+                    }
+                    _ => {}
                 }
                 i += 1 + size;
             }

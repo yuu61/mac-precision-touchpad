@@ -1,6 +1,8 @@
 //! Replays `fixtures/input_bt.txt` and `fixtures/input_usb.txt`: the lower-read completion
 //! (`PtpFilterInputRequestCompletionCallback`) on every edge and pseudo-random packet.
 
+#![cfg(test)]
+
 mod common;
 
 use amtptp_hidfilter_core::{Bcm5974Param, DeviceSnapshot, DeviceState, complete_lower_read};
@@ -32,7 +34,7 @@ fn ev_for_act(act: &str) -> Vec<String> {
     };
     head.iter()
         .chain(deletes.iter())
-        .map(|s| s.to_string())
+        .map(std::string::ToString::to_string)
         .collect()
 }
 
@@ -140,7 +142,7 @@ fn replay(file: &str, fam: &str, total: usize, acts: &[(&str, usize)]) {
                 // C leaks the request (status=-); P2 completes it with the failure status, Information
                 // untouched, nothing copied.
                 assert_eq!(r.get("status"), "-");
-                assert_eq!(a.completed, Some((0xC000_0023u32 as i32, INFO_IN)));
+                assert_eq!(a.completed, Some((0xC000_0023_u32 as i32, INFO_IN)));
                 assert!(a.buf.iter().all(|&x| x == 0xEE));
             }
             _ => {
@@ -155,7 +157,7 @@ fn replay(file: &str, fam: &str, total: usize, acts: &[(&str, usize)]) {
 
         // LastReportTime, and nothing else, may change.
         assert_eq!(
-            a.state.last_report_time as i128,
+            i128::from(a.state.last_report_time),
             r.num("last_out"),
             "{}",
             r.case()

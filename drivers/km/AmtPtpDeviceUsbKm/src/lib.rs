@@ -1,4 +1,4 @@
-//! AmtPtpDeviceUsbKm: KMDF Precision Touchpad driver for Apple T2 USB trackpads (C: `src/AmtPtpDeviceUsbKm`).
+//! `AmtPtpDeviceUsbKm`: KMDF Precision Touchpad driver for Apple T2 USB trackpads (C: `src/AmtPtpDeviceUsbKm`).
 //!
 //! A KMDF lower filter on interface 2 of the T2 keyboard/trackpad (`USB\VID_05AC&PID_027x&MI_02`) whose
 //! function driver is `mshidkmdf`, so this filter is the real HID minidriver: it answers the HID internal
@@ -20,11 +20,10 @@
 //! | `AmtPtpEvtUsbInterruptPipeReadComplete`, `AmtPtpEvtUsbInterruptReadersFailed` (Interrupt.c) | `interrupt::evt_usb_interrupt_pipe_read_complete`, `interrupt::evt_usb_interrupt_readers_failed` |
 //!
 //! Code placement mirrors the C `#pragma alloc_text`: `DriverEntry` in `INIT`; device add, the driver
-//! cleanup, queue initialization and PrepareHardware in `PAGE` (all PASSIVE_LEVEL). Everything else (I/O,
+//! cleanup, queue initialization and `PrepareHardware` in `PAGE` (all `PASSIVE_LEVEL`). Everything else (I/O,
 //! power and USB-completion code) is non-paged.
 #![no_std]
 
-#[cfg(not(test))]
 extern crate wdk_panic; // #[panic_handler]: a panic is a bugcheck (0x52504E43).
 
 mod context;
@@ -113,7 +112,7 @@ pub unsafe extern "system" fn driver_entry(
 }
 
 /// `AmtPtpDeviceUsbKmEvtDriverContextCleanup` (Driver.c:145-175): the `EvtCleanupCallback` of the WDF
-/// driver object, at PASSIVE_LEVEL when the driver unloads. The C only calls `WPP_CLEANUP`.
+/// driver object, at `PASSIVE_LEVEL` when the driver unloads. The C only calls `WPP_CLEANUP`.
 #[unsafe(link_section = "PAGE")]
 unsafe extern "C" fn evt_driver_context_cleanup(_driver_object: WDFOBJECT) {
     wdk::paged_code!();

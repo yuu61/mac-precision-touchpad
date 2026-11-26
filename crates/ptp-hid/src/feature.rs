@@ -7,7 +7,7 @@
 //!
 //! Conventions shared by all decoders in this module:
 //! - Byte 0 (the report ID) is **not** checked. The C drivers never check it either: the KMDF drivers
-//!   switch on `HID_XFER_PACKET::reportId`, and UsbUm takes the ID of a SET from the output buffer length.
+//!   switch on `HID_XFER_PACKET::reportId`, and `UsbUm` takes the ID of a SET from the output buffer length.
 //! - A buffer that is too short for the bytes the decoder reads gives `None`. What a driver does in that
 //!   case (the C code often reads past the end) is decided by its core crate.
 //!
@@ -47,6 +47,7 @@ impl DeviceCapsReport {
     };
 
     /// Encodes the report, ID included.
+    #[must_use]
     pub const fn to_bytes(self) -> [u8; DEVICE_CAPS_REPORT_LEN] {
         [
             REPORTID_DEVICE_CAPS,
@@ -56,6 +57,7 @@ impl DeviceCapsReport {
     }
 
     /// Decodes bytes 1 and 2. Returns `None` if `buf` is shorter than 3 bytes.
+    #[must_use]
     pub const fn from_bytes(buf: &[u8]) -> Option<Self> {
         match buf.first_chunk::<DEVICE_CAPS_REPORT_LEN>() {
             Some(&[_, max_contact_points, button_type]) => Some(Self {
@@ -69,12 +71,15 @@ impl DeviceCapsReport {
     /// Writes the 3 report bytes to the start of `buf`, as the C GET handlers do. Bytes after the third
     /// are left untouched. Returns [`BufferTooSmall`] (the C drivers: `STATUS_INVALID_BUFFER_SIZE`) and
     /// writes nothing if `buf` is shorter than 3 bytes.
+    ///
+    /// # Errors
+    /// Returns [`BufferTooSmall`] if the buffer cannot hold the report.
     pub fn write_to(self, buf: &mut [u8]) -> Result<(), BufferTooSmall> {
         write_prefix(buf, &self.to_bytes())
     }
 }
 
-/// The bytes every driver returns for GET_FEATURE 0x07: `07 05 00`.
+/// The bytes every driver returns for `GET_FEATURE` 0x07: `07 05 00`.
 pub const DEVICE_CAPS_REPORT: [u8; DEVICE_CAPS_REPORT_LEN] = DeviceCapsReport::PTP.to_bytes();
 
 // ---------------------------------------------------------------------------------------------------
@@ -131,7 +136,10 @@ pub const HQA_REPORT: [u8; HQA_REPORT_LEN] = concat(&[REPORTID_PTPHQA], &HQA_BLO
 ///   returned (the C drivers: `STATUS_INVALID_BUFFER_SIZE`);
 /// - otherwise `buf[0] = 0x08` and `buf[1] = 0xFC` are written, and `buf[2..]` is left untouched.
 ///
-/// The `Information` value differs per driver (UsbUm 257, the KMDF drivers 0) and is the caller's job.
+/// The `Information` value differs per driver (`UsbUm` 257, the KMDF drivers 0) and is the caller's job.
+///
+/// # Errors
+/// Returns [`BufferTooSmall`] if the buffer cannot hold the report.
 pub fn write_hqa_report_as_c(buf: &mut [u8]) -> Result<(), BufferTooSmall> {
     if buf.len() < HQA_REPORT_LEN {
         return Err(BufferTooSmall);
@@ -160,11 +168,13 @@ pub struct InputModeReport {
 
 impl InputModeReport {
     /// Encodes the report, ID included.
+    #[must_use]
     pub const fn to_bytes(self) -> [u8; INPUT_MODE_REPORT_LEN] {
         [REPORTID_REPORTMODE, self.mode]
     }
 
     /// Decodes byte 1. Returns `None` if `buf` is shorter than 2 bytes. Byte 0 is not checked.
+    #[must_use]
     pub const fn from_bytes(buf: &[u8]) -> Option<Self> {
         match buf.first_chunk::<INPUT_MODE_REPORT_LEN>() {
             Some(&[_, mode]) => Some(Self { mode }),
@@ -178,15 +188,15 @@ impl InputModeReport {
 // ---------------------------------------------------------------------------------------------------
 
 /// Length of feature report 0x06 as the descriptor defines it: ID plus one byte with two 1-bit switches
-/// and 6 padding bits. This is also `sizeof(PTP_DEVICE_SELECTIVE_REPORT_MODE_REPORT)` in UsbUm and HidFilter.
+/// and 6 padding bits. This is also `sizeof(PTP_DEVICE_SELECTIVE_REPORT_MODE_REPORT)` in `UsbUm` and `HidFilter`.
 pub const SELECTIVE_REPORT_LEN: usize = 2;
-/// Offset of the switch byte in feature report 0x06 as the descriptor defines it. UsbUm and HidFilter read
+/// Offset of the switch byte in feature report 0x06 as the descriptor defines it. `UsbUm` and `HidFilter` read
 /// it here.
 pub const SELECTIVE_REPORT_BITS_OFFSET: usize = 1;
-/// `sizeof(PTP_DEVICE_SELECTIVE_REPORT_MODE_REPORT)` in UsbKm and SpiKm: their C struct has an extra
+/// `sizeof(PTP_DEVICE_SELECTIVE_REPORT_MODE_REPORT)` in `UsbKm` and `SpiKm`: their C struct has an extra
 /// `DeviceMode` byte at offset 1 that is not in the descriptor.
 pub const SELECTIVE_REPORT_DEVICE_MODE_STRUCT_LEN: usize = 3;
-/// Offset at which UsbKm and SpiKm read the switch byte (after their spurious `DeviceMode` byte). It lies
+/// Offset at which `UsbKm` and `SpiKm` read the switch byte (after their spurious `DeviceMode` byte). It lies
 /// outside the 2-byte report that the descriptor defines (spec A7.2). How each driver deals with that is
 /// decided in its core crate.
 pub const SELECTIVE_REPORT_DEVICE_MODE_BITS_OFFSET: usize = 2;
@@ -207,6 +217,7 @@ pub struct SelectiveReportBits {
 
 impl SelectiveReportBits {
     /// Decodes bits 0 and 1 of the switch byte. The padding bits are ignored.
+    #[must_use]
     pub const fn from_byte(byte: u8) -> Self {
         Self {
             button_report: byte & 0x01 != 0,
@@ -215,12 +226,14 @@ impl SelectiveReportBits {
     }
 
     /// Encodes the switch byte with the padding bits zero.
+    #[must_use]
     pub const fn to_byte(self) -> u8 {
         (self.button_report as u8) | ((self.surface_report as u8) << 1)
     }
 
-    /// Decodes the switch byte at [`SELECTIVE_REPORT_BITS_OFFSET`] (the descriptor's layout, used by UsbUm
-    /// and HidFilter). Returns `None` if `buf` is shorter than 2 bytes. Byte 0 is not checked.
+    /// Decodes the switch byte at [`SELECTIVE_REPORT_BITS_OFFSET`] (the descriptor's layout, used by `UsbUm`
+    /// and `HidFilter`). Returns `None` if `buf` is shorter than 2 bytes. Byte 0 is not checked.
+    #[must_use]
     pub const fn from_report(buf: &[u8]) -> Option<Self> {
         match buf.first_chunk::<SELECTIVE_REPORT_LEN>() {
             Some(&[_, byte]) => Some(Self::from_byte(byte)),
@@ -229,7 +242,8 @@ impl SelectiveReportBits {
     }
 
     /// Decodes the switch byte at [`SELECTIVE_REPORT_DEVICE_MODE_BITS_OFFSET`] (the 3-byte C struct layout of
-    /// UsbKm and SpiKm). Returns `None` if `buf` is shorter than 3 bytes. Bytes 0 and 1 are not checked.
+    /// `UsbKm` and `SpiKm`). Returns `None` if `buf` is shorter than 3 bytes. Bytes 0 and 1 are not checked.
+    #[must_use]
     pub const fn from_device_mode_struct(buf: &[u8]) -> Option<Self> {
         match buf.first_chunk::<SELECTIVE_REPORT_DEVICE_MODE_STRUCT_LEN>() {
             Some(&[_, _, byte]) => Some(Self::from_byte(byte)),
@@ -238,6 +252,7 @@ impl SelectiveReportBits {
     }
 
     /// Encodes feature report 0x06 in the descriptor's 2-byte layout: `[0x06, switch byte]`.
+    #[must_use]
     pub const fn to_report(self) -> [u8; SELECTIVE_REPORT_LEN] {
         [REPORTID_FUNCSWITCH, self.to_byte()]
     }
@@ -265,6 +280,7 @@ pub struct UmAppConfReport {
 
 impl UmAppConfReport {
     /// Encodes the report, ID included.
+    #[must_use]
     pub const fn to_bytes(self) -> [u8; UMAPP_CONF_REPORT_LEN] {
         [
             REPORTID_UMAPP_CONF,
@@ -275,6 +291,7 @@ impl UmAppConfReport {
     }
 
     /// Decodes bytes 1..=3. Returns `None` if `buf` is shorter than 4 bytes. Byte 0 is not checked.
+    #[must_use]
     pub const fn from_bytes(buf: &[u8]) -> Option<Self> {
         match buf.first_chunk::<UMAPP_CONF_REPORT_LEN>() {
             Some(&[_, pressure, single, multiple]) => Some(Self {
@@ -286,9 +303,12 @@ impl UmAppConfReport {
         }
     }
 
-    /// Writes the 4 report bytes to the start of `buf` (UsbUm GET 0x09). Bytes after the fourth are left
-    /// untouched. Returns [`BufferTooSmall`] (UsbUm: `STATUS_INVALID_BUFFER_SIZE`) and writes nothing if
+    /// Writes the 4 report bytes to the start of `buf` (`UsbUm` GET 0x09). Bytes after the fourth are left
+    /// untouched. Returns [`BufferTooSmall`] (`UsbUm`: `STATUS_INVALID_BUFFER_SIZE`) and writes nothing if
     /// `buf` is shorter than 4 bytes.
+    ///
+    /// # Errors
+    /// Returns [`BufferTooSmall`] if the buffer cannot hold the report.
     pub fn write_to(self, buf: &mut [u8]) -> Result<(), BufferTooSmall> {
         write_prefix(buf, &self.to_bytes())
     }
@@ -319,16 +339,16 @@ mod tests {
     #[test]
     fn device_caps_write_to() {
         // HidFilter spec D.5: id 0x07, buffer of length 3 -> `07 05 00`; length 2 -> untouched.
-        let mut buf = [0xAAu8; 3];
+        let mut buf = [0xAA_u8; 3];
         assert_eq!(DeviceCapsReport::PTP.write_to(&mut buf), Ok(()));
         assert_eq!(buf, [0x07, 0x05, 0x00]);
-        let mut short = [0xAAu8; 2];
+        let mut short = [0xAA_u8; 2];
         assert_eq!(
             DeviceCapsReport::PTP.write_to(&mut short),
             Err(BufferTooSmall)
         );
         assert_eq!(short, [0xAA, 0xAA]);
-        let mut long = [0xAAu8; 8];
+        let mut long = [0xAA_u8; 8];
         assert_eq!(DeviceCapsReport::PTP.write_to(&mut long), Ok(()));
         assert_eq!(long, [0x07, 0x05, 0x00, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA]);
     }
@@ -344,16 +364,16 @@ mod tests {
     #[test]
     fn hqa_as_c_writes_two_bytes_only() {
         // HidFilter spec D.5: length 257 prefilled with AA -> `08 FC AA AA ... AA`.
-        let mut buf = [0xAAu8; HQA_REPORT_LEN];
+        let mut buf = [0xAA_u8; HQA_REPORT_LEN];
         assert_eq!(write_hqa_report_as_c(&mut buf), Ok(()));
         assert_eq!(buf[..2], [0x08, 0xFC]);
         assert!(buf[2..].iter().all(|&b| b == 0xAA));
         // Length 256 -> rejected, untouched.
-        let mut short = [0xAAu8; HQA_REPORT_LEN - 1];
+        let mut short = [0xAA_u8; HQA_REPORT_LEN - 1];
         assert_eq!(write_hqa_report_as_c(&mut short), Err(BufferTooSmall));
         assert!(short.iter().all(|&b| b == 0xAA));
         // A longer buffer is accepted; only the first two bytes change.
-        let mut long = [0x55u8; 300];
+        let mut long = [0x55_u8; 300];
         assert_eq!(write_hqa_report_as_c(&mut long), Ok(()));
         assert_eq!(long[..2], [0x08, 0xFC]);
         assert!(long[2..].iter().all(|&b| b == 0x55));
@@ -444,10 +464,10 @@ mod tests {
             Some(r)
         );
         assert_eq!(UmAppConfReport::from_bytes(&[0x09, 0x11, 0x22]), None);
-        let mut buf = [0xAAu8; 6];
+        let mut buf = [0xAA_u8; 6];
         assert_eq!(r.write_to(&mut buf), Ok(()));
         assert_eq!(buf, [0x09, 0x11, 0x22, 0x33, 0xAA, 0xAA]);
-        let mut short = [0xAAu8; 3];
+        let mut short = [0xAA_u8; 3];
         assert_eq!(r.write_to(&mut short), Err(BufferTooSmall));
         assert_eq!(short, [0xAA; 3]);
     }

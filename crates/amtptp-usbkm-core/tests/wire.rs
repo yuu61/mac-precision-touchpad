@@ -1,11 +1,13 @@
-//! Replays `tests/fixtures/wire.txt` (240 records = lifecycle steps of 42 scenarios): DriverEntry,
-//! DeviceAdd, PrepareHardware, D0Entry, D0Exit, cleanup, with failure injection, the WDF call order and
+//! Replays `tests/fixtures/wire.txt` (240 records = lifecycle steps of 42 scenarios): `DriverEntry`,
+//! `DeviceAdd`, `PrepareHardware`, `D0Entry`, `D0Exit`, cleanup, with failure injection, the WDF call order and
 //! the control-transfer wire bytes.
 //!
-//! PrepareHardware / D0Entry / D0Exit run through the core (`lifecycle::*`) over the fake WDF USB side;
-//! status, context, wire bytes and (normalized) WDF call order are compared. DriverEntry and DeviceAdd are
+//! `PrepareHardware` / `D0Entry` / `D0Exit` run through the core (`lifecycle::*`) over the fake WDF USB side;
+//! status, context, wire bytes and (normalized) WDF call order are compared. `DriverEntry` and `DeviceAdd` are
 //! WDF configuration sequences the glue performs; for them the injected framework status, the core's
 //! configuration constants (queues, device interface GUID) and the initial context are asserted.
+
+#![cfg(test)]
 
 mod common;
 
@@ -66,7 +68,7 @@ fn queue_op(q: QueueSpec) -> String {
     )
 }
 
-/// DeviceAdd as the glue performs it (crate docs, "How the driver uses this"), with the framework
+/// `DeviceAdd` as the glue performs it (crate docs, "How the driver uses this"), with the framework
 /// failures injected by the harness. Returns (status, normalized ops).
 fn device_add(s: &mut Scenario) -> (i32, Vec<String>) {
     let inj = |p: &str| s.hw.inject.get(p).copied();

@@ -1,5 +1,5 @@
-//! Hardware-independent logic of the AmtPtpDeviceUsbUm UMDF 2.15 driver (C: `src/AmtPtpDeviceUsbUm`):
-//! Apple "Wellspring" (bcm5974) MacBook trackpads and the Magic Trackpad 2 over USB, exposed as a Windows
+//! Hardware-independent logic of the `AmtPtpDeviceUsbUm` UMDF 2.15 driver (C: `src/AmtPtpDeviceUsbUm`):
+//! Apple "Wellspring" (bcm5974) `MacBook` trackpads and the Magic Trackpad 2 over USB, exposed as a Windows
 //! Precision Touchpad through mshidumdf.
 //!
 //! Everything that does not need WDF lives here, `no_std` and host-testable. The WDF glue
@@ -14,8 +14,8 @@
 //! | [`io`] | WDF DDIs | traits the glue implements |
 //! | [`usb`] | Device.c:255-496, :758-802 | Wellspring-mode control transfers, setup packets |
 //! | [`hid`] | Queue.c, Hid.c | IOCTL routing, descriptor/attribute/string/feature handlers |
-//! | [`input`] | InputInterrupt.c | packet validation, contact decode, ScanTime, read completion |
-//! | [`pnp`] | Device.c, InputInterrupt.c:6-80 | PrepareHardware, D0Entry, D0Exit, constants |
+//! | [`input`] | InputInterrupt.c | packet validation, contact decode, `ScanTime`, read completion |
+//! | [`pnp`] | Device.c, InputInterrupt.c:6-80 | `PrepareHardware`, `D0Entry`, `D0Exit`, constants |
 //! | [`status`] | ntstatus.h | the NTSTATUS values the driver itself returns |
 //!
 //! Behavior follows the C driver exactly (policy P1/P3 of the port), except where the C code has

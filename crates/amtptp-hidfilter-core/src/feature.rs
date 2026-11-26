@@ -25,6 +25,9 @@ use crate::status::{
 /// The first check of both handlers: the IOCTL's transfer buffer (`OutputBufferLength` for GET,
 /// `InputBufferLength` for SET) must hold a `HID_XFER_PACKET` (16 bytes), else
 /// `STATUS_BUFFER_TOO_SMALL`. It runs before the `UserBuffer` NULL check.
+///
+/// # Errors
+/// Returns `STATUS_BUFFER_TOO_SMALL` if the transfer buffer is shorter than a HID packet.
 pub const fn check_xfer_length(transfer_length: usize) -> Result<(), NtStatus> {
     if transfer_length < HID_XFER_PACKET_LEN {
         Err(STATUS_BUFFER_TOO_SMALL)
@@ -33,7 +36,7 @@ pub const fn check_xfer_length(transfer_length: usize) -> Result<(), NtStatus> {
     }
 }
 
-/// GET_FEATURE for `report_id` into `report_buffer` (the `reportBufferLen` bytes at `reportBuffer`).
+/// `GET_FEATURE` for `report_id` into `report_buffer` (the `reportBufferLen` bytes at `reportBuffer`).
 ///
 /// - 0x07 (device caps): needs 3 bytes, else `STATUS_INVALID_BUFFER_SIZE`; writes `07 05 00`.
 /// - 0x08 (HQA): needs 257 bytes, else `STATUS_INVALID_BUFFER_SIZE`; writes `buf[0] = 0x08` and
@@ -52,7 +55,7 @@ pub fn get_feature_report(report_id: u8, report_buffer: &mut [u8]) -> NtStatus {
     }
 }
 
-/// The device-state change a SET_FEATURE asks for. The fields it writes are never read (HF-B20).
+/// The device-state change a `SET_FEATURE` asks for. The fields it writes are never read (HF-B20).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FeatureChange {
     /// Nothing changes (input mode other than 0 or 3).
@@ -71,12 +74,15 @@ pub enum FeatureChange {
     },
 }
 
-/// Decodes SET_FEATURE for `report_id` with `report_buffer` (the `reportBufferLen` bytes at
+/// Decodes `SET_FEATURE` for `report_id` with `report_buffer` (the `reportBufferLen` bytes at
 /// `reportBuffer`). The status is `STATUS_SUCCESS` for 0x04 and 0x06 whatever the value, and
 /// `STATUS_NOT_SUPPORTED` for every other ID.
 ///
 /// C reads byte 1 without checking `reportBufferLen` (HF-B23). This port reads it only if it is inside
 /// the buffer and uses 0 otherwise (port policy P2, out-of-bounds read).
+///
+/// # Errors
+/// Returns `STATUS_NOT_SUPPORTED` for unsupported report IDs.
 pub fn decode_set_feature(report_id: u8, report_buffer: &[u8]) -> Result<FeatureChange, NtStatus> {
     match report_id {
         REPORTID_REPORTMODE => {
@@ -110,18 +116,18 @@ mod tests {
 
     #[test]
     fn spec_d5_vectors() {
-        let mut b = [0xAAu8; 3];
+        let mut b = [0xAA_u8; 3];
         assert_eq!(get_feature_report(7, &mut b), STATUS_SUCCESS);
         assert_eq!(b, [7, 5, 0]);
-        let mut b = [0xAAu8; 2];
+        let mut b = [0xAA_u8; 2];
         assert_eq!(get_feature_report(7, &mut b), STATUS_INVALID_BUFFER_SIZE);
         assert_eq!(b, [0xAA; 2]);
-        let mut b = [0xAAu8; 257];
+        let mut b = [0xAA_u8; 257];
         assert_eq!(get_feature_report(8, &mut b), STATUS_SUCCESS);
         assert_eq!(b[..3], [8, 0xFC, 0xAA]);
-        let mut b = [0xAAu8; 256];
+        let mut b = [0xAA_u8; 256];
         assert_eq!(get_feature_report(8, &mut b), STATUS_INVALID_BUFFER_SIZE);
-        for id in [4u8, 6, 9] {
+        for id in [4_u8, 6, 9] {
             assert_eq!(get_feature_report(id, &mut [0; 8]), STATUS_NOT_SUPPORTED);
         }
         assert_eq!(

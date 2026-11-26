@@ -1,5 +1,5 @@
 //! Windows Precision Touchpad (PTP) HID building blocks shared by the four AmtPtp drivers
-//! (AmtPtpDeviceUsbUm, AmtPtpDeviceUsbKm, AmtPtpDeviceSpiKm, AmtPtpHidFilter).
+//! (`AmtPtpDeviceUsbUm`, `AmtPtpDeviceUsbKm`, `AmtPtpDeviceSpiKm`, `AmtPtpHidFilter`).
 //!
 //! Everything here is hardware-independent and `no_std`. It has no WDK dependency and is host-testable:
 //!

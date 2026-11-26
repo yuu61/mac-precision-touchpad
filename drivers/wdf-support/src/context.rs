@@ -28,7 +28,10 @@
 
 use core::ffi::c_void;
 
-use wdk_sys::{PCWDF_OBJECT_CONTEXT_TYPE_INFO, WDF_OBJECT_CONTEXT_TYPE_INFO, WDFOBJECT, call_unsafe_wdf_function_binding};
+use wdk_sys::{
+    PCWDF_OBJECT_CONTEXT_TYPE_INFO, WDF_OBJECT_CONTEXT_TYPE_INFO, WDFOBJECT,
+    call_unsafe_wdf_function_binding,
+};
 
 /// A `WDF_OBJECT_CONTEXT_TYPE_INFO` that can live in a `static`.
 ///
@@ -81,11 +84,14 @@ impl ContextTypeInfo {
 ///
 /// # Safety
 /// - `handle` must be a valid, live WDF object handle (any `WDFxxx` type).
-/// - Must be called at IRQL <= DISPATCH_LEVEL (KMDF).
+/// - Must be called at IRQL <= `DISPATCH_LEVEL` (KMDF).
 /// - The returned pointer is valid until the object is deleted; the caller is
 ///   responsible for not creating aliasing `&mut` references to the context.
 #[must_use]
-pub unsafe fn get_typed_context(handle: WDFOBJECT, context_type: &'static ContextTypeInfo) -> *mut c_void {
+pub unsafe fn get_typed_context(
+    handle: WDFOBJECT,
+    context_type: &'static ContextTypeInfo,
+) -> *mut c_void {
     // SAFETY: `handle` is a valid WDF object (caller contract) and
     // `unique_type()` points at a 'static, correctly initialized
     // WDF_OBJECT_CONTEXT_TYPE_INFO; WdfObjectGetTypedContextWorker is in the
@@ -177,7 +183,6 @@ macro_rules! declare_context_type {
         /// by WDF and must be initialized with `ptr.write(..)` before it is read
         /// as the Rust type; the caller must not create aliasing `&mut`
         /// references to it.
-        #[allow(dead_code)]
         $vis unsafe fn $getter<H>(handle: *mut H) -> *mut $ctx {
             // SAFETY: forwarded to the caller (valid live handle, IRQL);
             // `$info` is the 'static type info generated above.

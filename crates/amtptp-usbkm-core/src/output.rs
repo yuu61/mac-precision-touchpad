@@ -35,7 +35,7 @@ mod tests {
 
     #[test]
     fn slice_model() {
-        let mut buf = [0xccu8; 4];
+        let mut buf = [0xcc_u8; 4];
         assert_eq!(buf[..].copy_from_buffer(&[1, 2]), STATUS_SUCCESS);
         assert_eq!(buf, [1, 2, 0xcc, 0xcc]);
         assert_eq!(buf[..].copy_from_buffer(&[9; 5]), STATUS_BUFFER_TOO_SMALL);

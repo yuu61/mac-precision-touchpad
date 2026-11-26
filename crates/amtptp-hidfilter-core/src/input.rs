@@ -12,7 +12,7 @@ use ptp_hid::input::{PTP_REPORT_LEN, PtpContact, PtpReport};
 use crate::device::is_apple_vendor;
 
 /// `REPORT_BUFFER_SIZE` (Driver.h:33): size of each lower `IOCTL_HID_READ_REPORT` output buffer
-/// (lookaside list entries, NonPagedPoolNx, tag [`crate::config::READ_BUFFER_POOL_TAG`]).
+/// (lookaside list entries, `NonPagedPoolNx`, tag [`crate::config::READ_BUFFER_POOL_TAG`]).
 pub const REPORT_BUFFER_SIZE: usize = 1024;
 
 /// Size of one raw `TRACKPAD_FINGER_TYPE5` record.
@@ -38,6 +38,7 @@ pub struct InputLayout {
 
 /// `(size_t)(LONG)WdfRequestGetInformation(Request)` (Input.c:150, HF-B29): the low 32 bits of the
 /// `ULONG_PTR`, sign-extended. Values with bit 31 set become huge lengths.
+#[must_use]
 pub const fn response_length(information: usize) -> usize {
     // ULONG_PTR -> LONG truncates to 32 bits; LONG -> size_t sign-extends.
     information as u32 as i32 as isize as usize
@@ -51,7 +52,7 @@ pub enum LowerReadClass {
     /// also wins over a zero length (fixture `vid-1234-len0`).
     UnsupportedVendor,
     /// The response length is 0 (including any failed read): enqueue the recovery work item, which
-    /// issues a new read at PASSIVE_LEVEL.
+    /// issues a new read at `PASSIVE_LEVEL`.
     Empty,
     /// `len < InputHeaderSize` or `(len - InputHeaderSize) % InputFingerSize != 0`: start the 3 s
     /// recovery timer. With `InputFingerSize == 0` C divides by zero; this port classifies it as
@@ -65,6 +66,7 @@ pub enum LowerReadClass {
 }
 
 /// Classifies a completed lower read (Input.c:156-173).
+#[must_use]
 pub fn classify_lower_read(
     vendor_id: u16,
     layout: &InputLayout,
@@ -88,6 +90,7 @@ pub fn classify_lower_read(
 
 /// `ContactCount` for a [`LowerReadClass::Report`] length: `(len - hdr) / fsz`, capped at 5 (the first
 /// five records in packet order are used). Returns 0 for lengths [`classify_lower_read`] rejects.
+#[must_use]
 pub fn contact_count(layout: &InputLayout, length: usize) -> u8 {
     let raw = length
         .checked_sub(layout.header_size)
@@ -104,6 +107,7 @@ pub fn contact_count(layout: &InputLayout, length: usize) -> u8 {
 /// Because `now` is always the QPC frequency, the driver emits 0 except for 0xFF on a report while
 /// `LastReportTime` was never stamped (HF-B6, preserved). A negative delta truncates
 /// (`-100 / 100 = -1` gives 0xFFFF). The subtraction wraps like MSVC instead of overflowing.
+#[must_use]
 pub const fn scan_time(now: i64, last: i64) -> u16 {
     let delta = now.wrapping_sub(last) / 100;
     if delta >= 0xFF {
@@ -119,8 +123,9 @@ pub const fn scan_time(now: i64, last: i64) -> u16 {
 /// - Y: `-(INT)(u32 << 6) >> 19`, i.e. `-Y13` when the X bits are zero and `-Y13 - 1` otherwise
 ///   (HF-B2); negating `INT_MIN` wraps like MSVC.
 /// - Both minus their `min`, clamped below at 0, never above (HF-B5), then truncated to `USHORT`.
-/// - ContactID: low nibble of byte 8. TipSwitch: byte 4 != 0. Confidence: byte 5 <= 172 (the C code
-///   tests TouchMinor twice, HF-B3).
+/// - `ContactID`: low nibble of byte 8. `TipSwitch`: byte 4 != 0. Confidence: byte 5 <= 172 (the C code
+///   tests `TouchMinor` twice, HF-B3).
+#[must_use]
 pub const fn parse_finger(f: &[u8; FINGER_RECORD_LEN], x_min: i32, y_min: i32) -> PtpContact {
     let [
         b0,
@@ -173,6 +178,7 @@ fn byte_at(buffer: &[u8], base: Option<usize>, offset: usize) -> u8 {
 /// `header_size + finger_delta + i * finger_size`, and the button is bit 0 of
 /// `buffer[button_delta]`. Bytes C would read outside `buffer` read as 0. Unused contact slots and the
 /// contact padding bits are zero (C leaves them uninitialised, HF-B4, fixed).
+#[must_use]
 pub fn build_report(
     layout: &InputLayout,
     length: usize,
@@ -191,10 +197,10 @@ pub fn build_report(
             break;
         }
         let base = first.and_then(|f| {
-            i.checked_mul(layout.finger_size)
-                .and_then(|o| f.checked_add(o))
+            let o = i.checked_mul(layout.finger_size)?;
+            f.checked_add(o)
         });
-        let mut record = [0u8; FINGER_RECORD_LEN];
+        let mut record = [0_u8; FINGER_RECORD_LEN];
         for (j, byte) in record.iter_mut().enumerate() {
             *byte = byte_at(buffer, base, j);
         }
@@ -254,7 +260,7 @@ mod tests {
     #[test]
     fn scan_time_formula() {
         for (d, t) in [
-            (0i64, 0u16),
+            (0_i64, 0_u16),
             (99, 0),
             (2550, 25),
             (25499, 254),

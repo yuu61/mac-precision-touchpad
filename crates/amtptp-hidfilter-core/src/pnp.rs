@@ -25,6 +25,7 @@ pub fn prepare_hardware(state: &DeviceState) -> NtStatus {
 }
 
 /// `PtpFilterDeviceD0Entry` (Device.c:132-147): does nothing.
+#[must_use]
 pub const fn d0_entry() -> NtStatus {
     STATUS_SUCCESS
 }
@@ -51,7 +52,7 @@ pub fn self_managed_io_init<P: FilterIo + DetourIo>(io: &mut P, state: &DeviceSt
     if !nt_success(status) {
         return status;
     }
-    let mut attributes = [0u8; HID_DEVICE_ATTRIBUTES_LEN];
+    let mut attributes = [0_u8; HID_DEVICE_ATTRIBUTES_LEN];
     let status = io.query_device_attributes(&mut attributes);
     if !nt_success(status) {
         return status;

@@ -14,7 +14,7 @@ use ptp_hid::descriptor::{
 };
 use ptp_hid::hidport::{HID_DESCRIPTOR_LEN, HID_DESCRIPTOR_U32_ID_UMAPP, HidDeviceAttributes};
 
-/// Length of every UsbUm report descriptor (`DescriptorList[0].wReportLength` = 516).
+/// Length of every `UsbUm` report descriptor (`DescriptorList[0].wReportLength` = 516).
 pub const REPORT_DESCRIPTOR_LEN: usize = REPORT_DESCRIPTOR_U32_ID_UMAPP_LEN;
 
 /// `DEVICE_VERSION` (Hid.h:19): `HID_DEVICE_ATTRIBUTES.VersionNumber`.
@@ -106,12 +106,12 @@ pub enum HidRegistry {
 impl HidRegistry {
     /// The PID switch of `AmtPtpGetHidDescriptor` / `AmtPtpGetReportDescriptor` (both identical; spec 8.3).
     /// `None` for every other PID (the C handlers then return `STATUS_INVALID_DEVICE_STATE`).
-    #[allow(clippy::manual_range_patterns)] // keep the C case groups (family, then "A" variant) visible
+    #[must_use]
     pub const fn for_pid(pid: u16) -> Option<Self> {
         match pid {
             0x0236..=0x0238 => Some(Self::Ws3),
             0x0245..=0x0247 | 0x0252..=0x0254 => Some(Self::Ws5),
-            0x024c..=0x024e | 0x0249..=0x024b => Some(Self::Ws6),
+            0x0249..=0x024e => Some(Self::Ws6),
             0x0262..=0x0264 | 0x0259..=0x025b => Some(Self::Ws7a),
             0x0290..=0x0292 | 0x0272..=0x0274 => Some(Self::Ws8),
             0x0265 => Some(Self::Mt2),
@@ -120,6 +120,7 @@ impl HidRegistry {
     }
 
     /// The 516-byte report descriptor.
+    #[must_use]
     pub const fn report_descriptor(self) -> &'static [u8; REPORT_DESCRIPTOR_LEN] {
         match self {
             Self::Ws3 => &REPORT_DESCRIPTOR_WS3,
@@ -132,11 +133,13 @@ impl HidRegistry {
     }
 
     /// The 9-byte HID descriptor (the same for every registry).
+    #[must_use]
     pub const fn hid_descriptor(self) -> &'static [u8; HID_DESCRIPTOR_LEN] {
         &HID_DESCRIPTOR
     }
 
     /// The axis values of this registry's finger collections.
+    #[must_use]
     pub const fn axes(self) -> Axes {
         match self {
             Self::Ws3 => AXES_WS3,
@@ -149,6 +152,7 @@ impl HidRegistry {
     }
 
     /// The C symbol prefix (`"AmtPtp3"` ... `"AmtPtpMt2"`).
+    #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
             Self::Ws3 => "AmtPtp3",
@@ -161,8 +165,9 @@ impl HidRegistry {
     }
 }
 
-/// The `HID_DEVICE_ATTRIBUTES` the driver reports (Hid.c:219-228): VendorID [`DEVICE_VID`] (0x8910,
-/// deliberately not 0x05AC, P3), ProductID = the USB `idProduct`, VersionNumber [`DEVICE_VERSION`].
+/// The `HID_DEVICE_ATTRIBUTES` the driver reports (Hid.c:219-228): `VendorID` [`DEVICE_VID`] (0x8910,
+/// deliberately not 0x05AC, P3), `ProductID` = the USB `idProduct`, `VersionNumber` [`DEVICE_VERSION`].
+#[must_use]
 pub const fn device_attributes(id_product: u16) -> HidDeviceAttributes {
     HidDeviceAttributes {
         vendor_id: DEVICE_VID,

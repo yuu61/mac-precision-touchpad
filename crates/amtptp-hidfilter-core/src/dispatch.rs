@@ -18,7 +18,7 @@ use crate::status::{
 };
 
 /// Which handler an internal IOCTL code goes to (Queue.c:76-110). Every other code, including the
-/// explicitly listed WRITE_REPORT, ACTIVATE/DEACTIVATE, idle notification and the UMDF codes, is
+/// explicitly listed `WRITE_REPORT`, ACTIVATE/DEACTIVATE, idle notification and the UMDF codes, is
 /// completed with `STATUS_NOT_SUPPORTED`; nothing is passed down.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InternalIoctl {
@@ -42,6 +42,7 @@ pub enum InternalIoctl {
 
 impl InternalIoctl {
     /// Routes an `IoControlCode`.
+    #[must_use]
     pub const fn from_code(io_control_code: u32) -> Self {
         match io_control_code {
             IOCTL_HID_GET_DEVICE_DESCRIPTOR => Self::GetDeviceDescriptor,

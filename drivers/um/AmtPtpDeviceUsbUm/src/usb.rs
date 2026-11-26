@@ -13,8 +13,8 @@
 //! | `AmtPtpEvtUsbInterruptReadersFailed` | [`evt_usb_interrupt_readers_failed`] |
 //!
 //! All USB I/O is synchronous where the C code is synchronous: the mode-switch control transfers run
-//! without a timeout inside the SET_FEATURE dispatch, D0Entry/D0Exit and — for the emergency reset of
-//! UM-B11 — inside the continuous-reader completion. In UMDF every callback runs at PASSIVE_LEVEL on a
+//! without a timeout inside the `SET_FEATURE` dispatch, D0Entry/D0Exit and — for the emergency reset of
+//! UM-B11 — inside the continuous-reader completion. In UMDF every callback runs at `PASSIVE_LEVEL` on a
 //! host thread, so this is a timing risk (a hung device blocks that thread), not an IRQL one.
 
 use core::ptr::{self, null_mut};
@@ -73,7 +73,7 @@ pub(crate) struct UsbSetup<'a> {
 
 impl<'a> UsbSetup<'a> {
     /// The adapter for `device` (whose context is `context`).
-    pub(crate) fn new(device: WDFDEVICE, context: &'a DeviceContext) -> Self {
+    pub(crate) const fn new(device: WDFDEVICE, context: &'a DeviceContext) -> Self {
         Self {
             device,
             context,
@@ -83,13 +83,13 @@ impl<'a> UsbSetup<'a> {
         }
     }
 
-    /// `EndpointAddress` of the interrupt pipe selected by this PrepareHardware (0 if none).
-    pub(crate) fn selected_endpoint_address(&self) -> u8 {
+    /// `EndpointAddress` of the interrupt pipe selected by this `PrepareHardware` (0 if none).
+    pub(crate) const fn selected_endpoint_address(&self) -> u8 {
         self.selected_endpoint_address
     }
 
     /// The step that was running when `pnp::prepare_hardware` stopped (for the failure trace).
-    pub(crate) fn failed_step(&self) -> &'static str {
+    pub(crate) const fn failed_step(&self) -> &'static str {
         self.step
     }
 }
@@ -222,7 +222,7 @@ impl UsbTargetSetup for UsbSetup<'_> {
         // Tell the framework that it is okay to read less than MaximumPacketSize (every visited pipe).
         // SAFETY: valid WDFUSBPIPE just returned by the framework.
         unsafe {
-            call_unsafe_wdf_function_binding!(WdfUsbTargetPipeSetNoMaximumPacketSizeCheck, pipe)
+            call_unsafe_wdf_function_binding!(WdfUsbTargetPipeSetNoMaximumPacketSizeCheck, pipe);
         };
         self.visited = Some((index, pipe, pipe_info.EndpointAddress));
         match pipe_info.PipeType {
@@ -301,7 +301,7 @@ pub(crate) struct DeviceIo<'a> {
 
 impl<'a> DeviceIo<'a> {
     /// The adapter over `context`'s USB device and interrupt pipe.
-    pub(crate) fn new(context: &'a DeviceContext) -> Self {
+    pub(crate) const fn new(context: &'a DeviceContext) -> Self {
         Self { context }
     }
 }
@@ -348,7 +348,7 @@ impl ControlPipe for DeviceIo<'_> {
             )
         };
         if !NT_SUCCESS(status) {
-            trace::control_transfer_failed(&setup_bytes, status);
+            trace::control_transfer_failed(setup_bytes, status);
         }
         status
     }
@@ -356,7 +356,7 @@ impl ControlPipe for DeviceIo<'_> {
 
 /// `WdfUsbTargetPipeGetIoTarget(Pipe)`: a `FORCEINLINE` in `wdfusb.h` (UMDF 2.15) that returns
 /// `(WDFIOTARGET) Pipe` (a WDFUSBPIPE is an I/O target), so it is not in the WDF function table.
-fn pipe_io_target(pipe: WDFUSBPIPE) -> WDFIOTARGET {
+const fn pipe_io_target(pipe: WDFUSBPIPE) -> WDFIOTARGET {
     pipe.cast()
 }
 
@@ -402,7 +402,7 @@ pub(crate) struct UsbStrings {
 }
 
 impl UsbStrings {
-    /// The string source of `context`'s USB device (NULL before the first PrepareHardware).
+    /// The string source of `context`'s USB device (NULL before the first `PrepareHardware`).
     pub(crate) fn new(context: &DeviceContext) -> Self {
         Self {
             usb_device: context.usb_device(),

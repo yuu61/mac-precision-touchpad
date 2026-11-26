@@ -1,8 +1,8 @@
 //! The bytes and parameters of the driver's own requests to the lower Apple SPI PDO, plus the fixed
-//! configuration values of AddDevice.
+//! configuration values of `AddDevice`.
 //!
 //! The driver sends exactly three kinds of internal IOCTLs down, none with a timeout (spec §6.1):
-//! 1. `IOCTL_HID_GET_DEVICE_ATTRIBUTES`, synchronous, in PrepareHardware: output = a zeroed 32-byte
+//! 1. `IOCTL_HID_GET_DEVICE_ATTRIBUTES`, synchronous, in `PrepareHardware`: output = a zeroed 32-byte
 //!    `HID_DEVICE_ATTRIBUTES` ([`LOWER_ATTRIBUTES_LEN`]), no input; then
 //!    [`crate::device::DeviceConfig::identify`].
 //! 2. `IOCTL_HID_SET_FEATURE`, synchronous, the mode switch: input = the 255-byte [`SetStatePacket`],
@@ -22,13 +22,13 @@ use crate::status::{NtStatus, STATUS_INVALID_DEVICE_STATE};
 #[cfg(not(target_pointer_width = "64"))]
 compile_error!("HID_XFER_PACKET is laid out for 64-bit targets (x64, ARM64) only");
 
-/// IOCTL of the PrepareHardware identification request: `IOCTL_HID_GET_DEVICE_ATTRIBUTES` (0x000B0027).
+/// IOCTL of the `PrepareHardware` identification request: `IOCTL_HID_GET_DEVICE_ATTRIBUTES` (0x000B0027).
 pub const LOWER_ATTRIBUTES_IOCTL: u32 = IOCTL_HID_GET_DEVICE_ATTRIBUTES;
 /// Output length of the identification request: `sizeof(HID_DEVICE_ATTRIBUTES)` = 32, zero-filled
 /// before the send.
 pub const LOWER_ATTRIBUTES_LEN: usize = HID_DEVICE_ATTRIBUTES_LEN;
 
-/// IOCTL of the mode switch: `IOCTL_HID_SET_FEATURE` (0x000B0191, METHOD_IN_DIRECT). Sent with
+/// IOCTL of the mode switch: `IOCTL_HID_SET_FEATURE` (0x000B0191, `METHOD_IN_DIRECT`). Sent with
 /// `WdfIoTargetSendInternalIoctlSynchronously` and an **input** memory descriptor of
 /// [`SET_STATE_PACKET_LEN`] bytes; KMDF passes the buffer itself as `Irp->AssociatedIrp.SystemBuffer`.
 pub const SET_STATE_IOCTL: u32 = IOCTL_HID_SET_FEATURE;
@@ -51,7 +51,7 @@ pub const LOWER_READ_BUFFER_LEN: usize = 1024;
 pub const POOL_TAG: u32 = u32::from_le_bytes(*b"APTL");
 const _: () = assert!(POOL_TAG == 0x4C54_5041);
 
-/// AddDevice result when `WdfDeviceGetIoTarget` returns NULL (Device.c:125-129).
+/// `AddDevice` result when `WdfDeviceGetIoTarget` returns NULL (Device.c:125-129).
 pub const NO_IO_TARGET_STATUS: NtStatus = STATUS_INVALID_DEVICE_STATE;
 
 /// A GUID in its C `GUID` field layout.
@@ -100,6 +100,7 @@ impl Default for SetStatePacket {
 
 impl SetStatePacket {
     /// An all-zero buffer (C: `RtlZeroMemory`).
+    #[must_use]
     pub const fn zeroed() -> Self {
         Self {
             bytes: [0; SET_STATE_PACKET_LEN],
@@ -108,8 +109,9 @@ impl SetStatePacket {
 
     /// The buffer contents for `desired_state` when the buffer starts at `buffer_address`. Byte 0..8 hold
     /// `buffer_address + 16` (little-endian, pointer width).
+    #[must_use]
     pub fn image(desired_state: bool, buffer_address: usize) -> [u8; SET_STATE_PACKET_LEN] {
-        let mut bytes = [0u8; SET_STATE_PACKET_LEN];
+        let mut bytes = [0_u8; SET_STATE_PACKET_LEN];
         let report_buffer = buffer_address.wrapping_add(SET_STATE_REPORT_OFFSET);
         let header = xfer_header(report_buffer, SET_STATE_REPORT_LEN, SET_STATE_REPORT_ID);
         let report = [SET_STATE_REPORT_ID, u8::from(desired_state)];
@@ -130,14 +132,14 @@ impl SetStatePacket {
     }
 
     /// Pointer to the first byte, for `WDF_MEMORY_DESCRIPTOR_INIT_BUFFER`.
-    pub fn as_mut_ptr(&mut self) -> *mut u8 {
+    pub const fn as_mut_ptr(&mut self) -> *mut u8 {
         self.bytes.as_mut_ptr()
     }
 }
 
 /// The 16-byte x64/ARM64 `HID_XFER_PACKET`: `reportBuffer` @0 (8 bytes), `reportBufferLen` @8, `reportId`
 /// @12, padding.
-fn xfer_header(
+const fn xfer_header(
     report_buffer: usize,
     report_buffer_len: u32,
     report_id: u8,

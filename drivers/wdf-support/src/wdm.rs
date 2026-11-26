@@ -1,9 +1,9 @@
 //! KMDF-only WDM escape hatches: the IRP behind a `WDFREQUEST` and the
 //! `wdm.h` inline helpers bindgen does not emit.
 //!
-//! The C KMDF drivers read the `HID_XFER_PACKET` of METHOD_NEITHER HID IOCTLs
+//! The C KMDF drivers read the `HID_XFER_PACKET` of `METHOD_NEITHER` HID IOCTLs
 //! (`IOCTL_HID_GET_FEATURE`, `IOCTL_HID_SET_FEATURE`, ...) as
-//! `WdfRequestWdmGetIrp(Request)->UserBuffer`, and AmtPtpHidFilter stores a
+//! `WdfRequestWdmGetIrp(Request)->UserBuffer`, and `AmtPtpHidFilter` stores a
 //! packet pointer into `Irp->UserBuffer` of a request it built itself. These
 //! helpers reproduce exactly those field accesses.
 //!
@@ -23,7 +23,7 @@ use wdk_sys::{PIO_STACK_LOCATION, PIRP, PVOID, WDFREQUEST, call_unsafe_wdf_funct
 /// # Safety
 /// - `request` must be a valid `WDFREQUEST` the driver currently owns or that is
 ///   otherwise guaranteed to stay alive (not completed) while the IRP is used.
-/// - Call at IRQL <= DISPATCH_LEVEL.
+/// - Call at IRQL <= `DISPATCH_LEVEL`.
 /// - The returned IRP is only valid until the request is completed; do not keep
 ///   it beyond that point.
 #[must_use]
@@ -48,7 +48,14 @@ pub unsafe fn io_get_current_irp_stack_location(irp: PIRP) -> PIO_STACK_LOCATION
     // SAFETY: `irp` is valid per the caller contract. `Tail.Overlay` is the
     // active member of the `Tail` union while the IRP is owned by a driver
     // (I/O manager invariant); the read copies a pointer, no reference is made.
-    unsafe { (*irp).Tail.Overlay.__bindgen_anon_2.__bindgen_anon_1.CurrentStackLocation }
+    unsafe {
+        (*irp)
+            .Tail
+            .Overlay
+            .__bindgen_anon_2
+            .__bindgen_anon_1
+            .CurrentStackLocation
+    }
 }
 
 /// `IoGetNextIrpStackLocation(Irp)` (`wdm.h`):
@@ -69,7 +76,7 @@ pub unsafe fn io_get_next_irp_stack_location(irp: PIRP) -> PIO_STACK_LOCATION {
 ///
 /// # Safety
 /// `irp` must point to a valid IRP (see [`io_get_current_irp_stack_location`]).
-/// The returned pointer is whatever the sender stored; for METHOD_NEITHER HID
+/// The returned pointer is whatever the sender stored; for `METHOD_NEITHER` HID
 /// IOCTLs from hidclass it is a kernel `HID_XFER_PACKET*`, but its validity and
 /// size are the caller's responsibility.
 #[must_use]
@@ -108,7 +115,7 @@ pub unsafe fn irp_type3_input_buffer(irp: PIRP) -> PVOID {
 }
 
 /// `WdfRequestWdmGetIrp(Request)->UserBuffer`, the C idiom for the
-/// `HID_XFER_PACKET` of a METHOD_NEITHER HID IOCTL.
+/// `HID_XFER_PACKET` of a `METHOD_NEITHER` HID IOCTL.
 ///
 /// Returns null if the request has no IRP (the C code would dereference NULL
 /// there; treating it as a null buffer is the P2 fix).

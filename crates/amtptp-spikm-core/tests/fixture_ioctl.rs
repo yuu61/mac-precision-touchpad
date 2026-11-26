@@ -1,6 +1,8 @@
 //! Replays `ioctl.txt`: internal-IOCTL routing, unsupported codes, `IOCTL_HID_GET_STRING` forwarding and
 //! `IOCTL_HID_READ_REPORT` dispatch per `DeviceStatus`.
 
+#![cfg(test)]
+
 mod common;
 
 use amtptp_spikm_core::ioctl::{InternalIoctl, NOT_SUPPORTED_STATUS, classify_internal_ioctl};
@@ -16,7 +18,8 @@ const READ_QUEUED: &str = "READ_REPORT queued; lower read decided by DeviceStatu
 const READ_FWD_FAIL: &str = "framework: WdfRequestForwardToIoQueue failed -> completed with it";
 
 /// A runtime in the record's `ds_in` state, reached through the public power API.
-pub fn runtime_in(ds: u32) -> DeviceRuntime {
+#[must_use]
+fn runtime_in(ds: u32) -> DeviceRuntime {
     let rt = DeviceRuntime::new();
     match ds {
         0 => {}
@@ -25,11 +28,11 @@ pub fn runtime_in(ds: u32) -> DeviceRuntime {
         }
         1 => {
             rt.on_d0_entry(10_000_000);
-            let _ = rt.on_self_managed_io_init_or_restart(STATUS_SUCCESS, || 10_000_000);
+            let _status = rt.on_self_managed_io_init_or_restart(STATUS_SUCCESS, || 10_000_000);
         }
         _ => {
             rt.on_d0_entry(10_000_000);
-            let _ = rt.on_self_managed_io_init_or_restart(STATUS_UNSUCCESSFUL, || 0);
+            let _status = rt.on_self_managed_io_init_or_restart(STATUS_UNSUCCESSFUL, || 0);
         }
     }
     assert_eq!(rt.device_status() as u32, ds);
@@ -72,8 +75,8 @@ fn internal_ioctl_routing() {
                         ("1", Some(get_status_from_ops(r)), q_in, 0)
                     }
                 }
-                InternalIoctl::ReadReport => match wdf.first() {
-                    Some((f, s)) => {
+                InternalIoctl::ReadReport => {
+                    if let Some((f, s)) = wdf.first() {
                         assert_eq!(f, "WdfRequestForwardToIoQueue", "{ctx}");
                         tally.add(READ_FWD_FAIL);
                         (
@@ -82,8 +85,7 @@ fn internal_ioctl_routing() {
                             q_in,
                             0,
                         )
-                    }
-                    None => {
+                    } else {
                         tally.add(READ_QUEUED);
                         let issue = rt.should_issue_lower_read();
                         assert_eq!(
@@ -92,8 +94,12 @@ fn internal_ioctl_routing() {
                         );
                         ("queued", None, q_in + 1, u32::from(issue))
                     }
-                },
-                other => panic!("{ctx}: unexpected {other:?}"),
+                }
+                other @ (InternalIoctl::GetDeviceDescriptor
+                | InternalIoctl::GetReportDescriptor
+                | InternalIoctl::GetDeviceAttributes
+                | InternalIoctl::GetFeature
+                | InternalIoctl::SetFeature) => panic!("{ctx}: unexpected {other:?}"),
             };
         assert_eq!(r.get("completed"), completed, "{ctx}: completed");
         match status {

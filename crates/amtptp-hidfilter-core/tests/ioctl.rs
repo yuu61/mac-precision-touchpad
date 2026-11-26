@@ -1,6 +1,8 @@
 //! Replays `fixtures/ioctl.txt`: `FilterEvtIoIntDeviceControl` routing for every probed internal
 //! IOCTL code on a started Bluetooth device.
 
+#![cfg(test)]
+
 mod common;
 
 use amtptp_hidfilter_core::{DeviceState, dispatch_internal_ioctl};
@@ -51,15 +53,12 @@ fn replay_ioctl_routing() {
             (Some(_), true) => panic!("{}: completed and queued", r.case()),
         };
         assert_eq!(disp, r.get("disp"), "{}", r.case());
-        match u.completed {
-            Some((s, info)) => {
-                assert_eq!(st(s), r.get("status"), "{}", r.case());
-                assert_eq!(info as i128, r.num("info"), "{}", r.case());
-            }
-            None => {
-                assert_eq!(r.get("status"), "-");
-                assert_eq!(r.get("info"), "-");
-            }
+        if let Some((s, info)) = u.completed {
+            assert_eq!(st(s), r.get("status"), "{}", r.case());
+            assert_eq!(info as i128, r.num("info"), "{}", r.case());
+        } else {
+            assert_eq!(r.get("status"), "-");
+            assert_eq!(r.get("info"), "-");
         }
         if let Some(changed) = r.opt("out_changed") {
             let any = u.buf.iter().any(|&b| b != 0xCC);

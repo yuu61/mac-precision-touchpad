@@ -93,7 +93,7 @@ pub(crate) unsafe fn initialize(device: WDFDEVICE, context: &DeviceContext) -> N
 
 /// `AmtPtpDeviceEvtIoDeviceControl` (Queue.c:118-213).
 ///
-/// Routes with `hid::route_ioctl`. READ_REPORT is forwarded to `InputQueue` (pending; completed later by
+/// Routes with `hid::route_ioctl`. `READ_REPORT` is forwarded to `InputQueue` (pending; completed later by
 /// the read completion). Every other request is completed here exactly once with the handler's status
 /// and Information (`WdfRequestSetInformation` only where the C handler sets it, i.e. a non-zero value,
 /// then `WdfRequestComplete`). Unsupported codes complete with `STATUS_NOT_SUPPORTED` and are **not**
@@ -194,12 +194,17 @@ fn dispatch_read_report(context: &DeviceContext, request: Request) {
 
 /// `AmtPtpDeviceEvtIoStop` (Queue.c:215-258): a no-op, as in C — it neither acknowledges nor completes
 /// the request. Every request the default queue presents is completed before `EvtIoDeviceControl`
-/// returns (READ_REPORT is forwarded to the non-power-managed `InputQueue`), so the framework only has
+/// returns (`READ_REPORT` is forwarded to the non-power-managed `InputQueue`), so the framework only has
 /// to wait for a dispatch that is still running.
 ///
 /// # Safety
 /// Framework callback of the default queue.
-unsafe extern "C" fn evt_io_stop(_queue: WDFQUEUE, _request: WDFREQUEST, _action_flags: ULONG) {}
+const unsafe extern "C" fn evt_io_stop(
+    _queue: WDFQUEUE,
+    _request: WDFREQUEST,
+    _action_flags: ULONG,
+) {
+}
 
 /// [`ReadQueue`] over `InputQueue`: the pending `IOCTL_HID_READ_REPORT` requests.
 pub(crate) struct InputQueue {
@@ -208,7 +213,7 @@ pub(crate) struct InputQueue {
 
 impl InputQueue {
     /// The adapter over the device's `InputQueue` handle.
-    pub(crate) fn new(queue: WDFQUEUE) -> Self {
+    pub(crate) const fn new(queue: WDFQUEUE) -> Self {
         Self { queue }
     }
 }

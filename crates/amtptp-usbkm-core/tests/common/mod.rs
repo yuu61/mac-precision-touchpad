@@ -2,12 +2,15 @@
 //!
 //! Fixture format (tests/fixtures/README.md): one record per line, fields separated by one space, each
 //! field split at its first `=`; byte strings are lowercase hex, `-` = empty/none.
-#![allow(dead_code)]
+#![allow(
+    dead_code,
+    reason = "Each integration test target uses a different subset of these helpers"
+)]
 
 pub mod fake;
 
+use core::fmt::Write as _;
 use std::collections::BTreeMap;
-use std::fmt::Write as _;
 
 use amtptp_usbkm_core::config::config_index_for_pid;
 use amtptp_usbkm_core::hid::{
@@ -94,7 +97,7 @@ pub fn hex(s: &str) -> Vec<u8> {
     assert!(s.len().is_multiple_of(2), "odd hex length: {s}");
     (0..s.len())
         .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("hex"))
+        .map(|i| u8::from_str_radix(s.get(i..i + 2).expect("ASCII hex bytes"), 16).expect("hex"))
         .collect()
 }
 
@@ -128,7 +131,7 @@ pub fn status_str(s: i32) -> String {
     format!("0x{:08x}", s as u32)
 }
 
-/// `k:v,k:v` → map (st_in / st_out / ctx_out / req fields).
+/// `k:v,k:v` → map (`st_in` / `st_out` / `ctx_out` / req fields).
 pub fn kv(s: &str) -> BTreeMap<String, String> {
     s.split(',')
         .map(|p| {
@@ -162,7 +165,9 @@ impl Tally {
 
     /// Asserts the total and the exact per-bucket counts, and prints the table.
     pub fn assert_exact(&self, file: &str, total: usize, expected: &[(&str, usize)]) {
-        println!("{file}: {:?}", self.buckets);
+        for (bucket, count) in &self.buckets {
+            println!("{file}: {bucket} = {count}");
+        }
         assert_eq!(self.total(), total, "{file}: records accounted");
         let expected: BTreeMap<String, usize> = expected
             .iter()
@@ -209,7 +214,7 @@ pub fn replay_descriptor_ioctl(r: &Record) -> &'static str {
                 framework = true;
                 Err(STATUS_BUFFER_TOO_SMALL)
             } else {
-                Ok(&mut out[..])
+                Ok(&mut *out)
             };
             if route_internal_ioctl(code) == InternalIoctl::GetDeviceDescriptor {
                 hid::get_hid_descriptor(output)
@@ -222,11 +227,16 @@ pub fn replay_descriptor_ioctl(r: &Record) -> &'static str {
                 framework = true;
                 Err(STATUS_BUFFER_TOO_SMALL)
             } else {
-                Ok(&mut out[..])
+                Ok(&mut *out)
             };
             hid::get_device_attributes(output, state.usb_device_ids())
         }
-        other => panic!("{id}: unexpected route {other:?}"),
+        other @ (InternalIoctl::ReadReport
+        | InternalIoctl::GetFeature
+        | InternalIoctl::SetFeature
+        | InternalIoctl::NotSupported) => {
+            panic!("{id}: unexpected route {other:?}");
+        }
     };
     assert_eq!(r.req("completed"), "1", "{id}");
     assert_eq!(

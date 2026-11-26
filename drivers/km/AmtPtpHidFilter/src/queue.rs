@@ -1,7 +1,7 @@
 //! Default-queue callbacks (`Queue.c:56-129`).
 //!
 //! The default queue is parallel and not power-managed (filter device); its callbacks run at
-//! IRQL <= DISPATCH_LEVEL and are non-paged. Only `IRP_MJ_INTERNAL_DEVICE_CONTROL` is handled here;
+//! IRQL <= `DISPATCH_LEVEL` and are non-paged. Only `IRP_MJ_INTERNAL_DEVICE_CONTROL` is handled here;
 //! KMDF forwards every other major function of a filter device to the lower driver.
 
 use amtptp_hidfilter_core::{InternalIoctl, dispatch_internal_ioctl};
@@ -16,12 +16,12 @@ use crate::{KW_QUEUE, PROVIDER};
 /// `FilterEvtIoIntDeviceControl` (Queue.c:56-117): `EvtIoInternalDeviceControl` of the default
 /// queue. The core completes, parks or forwards the request exactly once:
 ///
-/// - GET_DEVICE_DESCRIPTOR / GET_REPORT_DESCRIPTOR / GET_DEVICE_ATTRIBUTES: synchronous (descriptor
+/// - `GET_DEVICE_DESCRIPTOR` / `GET_REPORT_DESCRIPTOR` / `GET_DEVICE_ATTRIBUTES`: synchronous (descriptor
 ///   only for PID 0x0265, attributes with VID 0x8910);
-/// - GET_STRING: `WdfRequestFormatRequestUsingCurrentType` + send-and-forget to the PDO;
-/// - READ_REPORT: forwarded to `HidReadQueue`, plus one lower read when configured;
-/// - GET_FEATURE / SET_FEATURE: handled in software, `Information` untouched (HF-B21);
-/// - every other code, including the listed WRITE_REPORT, ACTIVATE/DEACTIVATE, idle notification
+/// - `GET_STRING`: `WdfRequestFormatRequestUsingCurrentType` + send-and-forget to the PDO;
+/// - `READ_REPORT`: forwarded to `HidReadQueue`, plus one lower read when configured;
+/// - `GET_FEATURE` / `SET_FEATURE`: handled in software, `Information` untouched (HF-B21);
+/// - every other code, including the listed `WRITE_REPORT`, ACTIVATE/DEACTIVATE, idle notification
 ///   and UMDF codes: completed with `STATUS_NOT_SUPPORTED`, never passed down.
 pub(crate) unsafe extern "C" fn evt_io_internal_device_control(
     queue: WDFQUEUE,
@@ -58,7 +58,7 @@ pub(crate) unsafe extern "C" fn evt_io_internal_device_control(
 /// nor completes; the queue is not power-managed, so KMDF only calls it during removal, for requests
 /// the driver still owns from this queue, and there are none (every request is completed
 /// synchronously, forwarded with send-and-forget or moved to `HidReadQueue`).
-pub(crate) unsafe extern "C" fn evt_io_stop(
+pub(crate) const unsafe extern "C" fn evt_io_stop(
     _queue: WDFQUEUE,
     _request: WDFREQUEST,
     _action_flags: ULONG,

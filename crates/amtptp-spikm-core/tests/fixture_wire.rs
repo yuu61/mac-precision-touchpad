@@ -1,9 +1,11 @@
-//! Replays `wire.txt`: PrepareHardware (lower `GET_DEVICE_ATTRIBUTES`, table lookup, `DesiredReportType`),
+//! Replays `wire.txt`: `PrepareHardware` (lower `GET_DEVICE_ATTRIBUTES`, table lookup, `DesiredReportType`),
 //! the mode-switch `SET_FEATURE` buffer and the lower `READ_REPORT` issue.
 //!
 //! The registry is the KMDF model from the fixture README: `nokey` -> the key does not open (`None`);
 //! `novalue` -> `c0000034`; `dword:N` / `binary4:N` -> 4 bytes; `qword:N` -> 8 bytes, larger than the
 //! 4-byte buffer -> `STATUS_BUFFER_OVERFLOW`.
+
+#![cfg(test)]
 
 mod common;
 
@@ -36,8 +38,12 @@ fn registry(spec: &str) -> Option<u32> {
         "nokey" => return None,
         "novalue" => (STATUS_OBJECT_NAME_NOT_FOUND, [0; 4]),
         _ => {
-            let (kind, value) = spec.split_once(':').expect("reg spec");
-            let value: u64 = value.parse().expect("reg value");
+            let Some((kind, value)) = spec.split_once(':') else {
+                panic!("invalid registry fixture {spec}");
+            };
+            let Ok(value) = value.parse::<u64>() else {
+                panic!("invalid registry fixture value in {spec}");
+            };
             match kind {
                 "dword" | "binary4" => (STATUS_SUCCESS, (value as u32).to_le_bytes()),
                 // 8 bytes do not fit the 4-byte buffer: nothing is copied.
@@ -55,19 +61,18 @@ fn attrs(r: &Record) -> [u8; LOWER_ATTRIBUTES_LEN] {
         .expect("32 attribute bytes")
 }
 
-/// One PrepareHardware run as the glue performs it. Returns the status and whether the registry was used.
+/// One `PrepareHardware` run as the glue performs it. Returns the status and whether the registry was used.
 fn prepare(
     cfg: &mut DeviceConfig,
     lower_status: NtStatus,
     lower: &[u8; 32],
     reg: &str,
 ) -> (NtStatus, bool) {
-    match cfg.identify(lower_status, lower) {
-        Err(s) => (s, false),
-        Ok(()) => {
-            cfg.apply_desired_report_type(registry(reg));
-            (STATUS_SUCCESS, true)
-        }
+    if let Err(s) = cfg.identify(lower_status, lower) {
+        (s, false)
+    } else {
+        cfg.apply_desired_report_type(registry(reg));
+        (STATUS_SUCCESS, true)
     }
 }
 
@@ -117,10 +122,10 @@ fn check_prepare_ops(r: &Record, used_registry: bool, ctx: &str) {
     }
 }
 
-/// A device brought up like the harness: PrepareHardware with PID 0x0272 and no registry value, D0Entry.
+/// A device brought up like the harness: `PrepareHardware` with PID 0x0272 and no registry value, `D0Entry`.
 fn bring_up() -> (DeviceConfig, DeviceRuntime) {
     let mut cfg = DeviceConfig::new();
-    let mut lower = [0u8; 32];
+    let mut lower = [0_u8; 32];
     lower[..10].copy_from_slice(&[0x20, 0, 0, 0, 0xac, 0x05, 0x72, 0x02, 0x02, 0x01]);
     assert_eq!(
         prepare(&mut cfg, STATUS_SUCCESS, &lower, "novalue"),
@@ -142,8 +147,8 @@ fn wire_records() {
         if case.starts_with("prep-restart-") {
             // These records carry no `lower_attr`: the lower device answers with the recorded IDs.
             let mut cfg = DeviceConfig::new();
-            let mut lower = [0u8; 32];
-            lower[..4].copy_from_slice(&32u32.to_le_bytes());
+            let mut lower = [0_u8; 32];
+            lower[..4].copy_from_slice(&32_u32.to_le_bytes());
             lower[4..6].copy_from_slice(&r.hex16("hid_vid").to_le_bytes());
             lower[6..8].copy_from_slice(&r.hex16("hid_pid").to_le_bytes());
             lower[8..10].copy_from_slice(&r.hex16("hid_ver").to_le_bytes());
@@ -209,20 +214,17 @@ fn wire_records() {
                     QPC_FREQUENCY
                 });
                 assert_eq!(out.status, r.status("status"), "{ctx}");
-                match out.start_recovery_timer {
-                    Some(due) => {
-                        assert_eq!(due, RECOVERY_TIMER_DUE_TIME);
-                        assert_eq!(r.get("timer_armed"), "1", "{ctx}");
-                        assert_eq!(r.dec::<i64>("timer_due"), due, "{ctx}");
-                        assert!(
-                            ops.contains(&format!("WdfTimerStart(timer,due={due})")),
-                            "{ctx}"
-                        );
-                    }
-                    None => {
-                        assert!(!r.has("timer_armed"), "{ctx}");
-                        assert_eq!(rt.last_report_time(), r.dec::<i64>("lrt_out"), "{ctx}");
-                    }
+                if let Some(due) = out.start_recovery_timer {
+                    assert_eq!(due, RECOVERY_TIMER_DUE_TIME);
+                    assert_eq!(r.get("timer_armed"), "1", "{ctx}");
+                    assert_eq!(r.dec::<i64>("timer_due"), due, "{ctx}");
+                    assert!(
+                        ops.contains(&format!("WdfTimerStart(timer,due={due})")),
+                        "{ctx}"
+                    );
+                } else {
+                    assert!(!r.has("timer_armed"), "{ctx}");
+                    assert_eq!(rt.last_report_time(), r.dec::<i64>("lrt_out"), "{ctx}");
                 }
                 assert_eq!(
                     qpc,
@@ -232,7 +234,7 @@ fn wire_records() {
             } else {
                 assert_eq!(ev, "TimerCallback", "{ctx}");
                 assert_eq!(r.get("status"), "-", "{ctx}");
-                let mut reads = 0u32;
+                let mut reads = 0_u32;
                 rt.on_recovery_timer(lower_status, || reads += 1);
                 assert_eq!(reads, r.dec::<u32>("lower_reads"), "{ctx}: lower_reads");
             }
@@ -244,7 +246,7 @@ fn wire_records() {
             tally.add(SETSTATE);
         } else if case.starts_with("lower-read-") {
             let (_, rt) = bring_up();
-            let _ = rt.on_self_managed_io_init_or_restart(STATUS_SUCCESS, || QPC_FREQUENCY);
+            let _status = rt.on_self_managed_io_init_or_restart(STATUS_SUCCESS, || QPC_FREQUENCY);
             assert_eq!(rt.device_status(), DeviceStatus::D0ActiveAndConfigured);
             assert_eq!(r.dec::<u32>("ds_in"), 1);
             assert_eq!(r.hex32("code"), LOWER_READ_IOCTL);

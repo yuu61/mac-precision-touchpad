@@ -1,6 +1,8 @@
 //! Replays `fixtures/descriptors.txt`: static facts, struct layouts, the HQA reference blob, and the
 //! descriptor / attribute IOCTLs for 8 device configurations x 4 buffer sizes.
 
+#![cfg(test)]
+
 mod common;
 
 use amtptp_hidfilter_core as core_;
@@ -45,7 +47,7 @@ fn port_value(key: &str) -> Option<i128> {
         y: 0xEEF0,
     };
     let rb = report.to_bytes();
-    let contact = &rb[1..1 + PTP_CONTACT_LEN];
+    let contact = &rb[1..=PTP_CONTACT_LEN];
     let v: i128 = match key {
         "sizeof_PTP_REPORT" => PTP_REPORT_LEN as i128,
         "sizeof_PTP_CONTACT" => PTP_CONTACT_LEN as i128,
@@ -53,35 +55,35 @@ fn port_value(key: &str) -> Option<i128> {
         "sizeof_HID_DESCRIPTOR" => core_::HID_DESCRIPTOR.len() as i128,
         "sizeof_HID_DEVICE_ATTRIBUTES" => HID_DEVICE_ATTRIBUTES_LEN as i128,
         "sizeof_report_descriptor" => core_::REPORT_DESCRIPTOR.len() as i128,
-        "PTP_LIST_POOL_TAG" => core_::config::READ_BUFFER_POOL_TAG as i128,
+        "PTP_LIST_POOL_TAG" => i128::from(core_::config::READ_BUFFER_POOL_TAG),
         "REPORT_BUFFER_SIZE" => core_::REPORT_BUFFER_SIZE as i128,
         "HID_XFER_PACKET_SIZE" => core_::HID_XFER_PACKET_SIZE as i128,
-        "IOCTL_HID_GET_DEVICE_DESCRIPTOR" => ioctl::IOCTL_HID_GET_DEVICE_DESCRIPTOR as i128,
-        "IOCTL_HID_GET_REPORT_DESCRIPTOR" => ioctl::IOCTL_HID_GET_REPORT_DESCRIPTOR as i128,
-        "IOCTL_HID_READ_REPORT" => ioctl::IOCTL_HID_READ_REPORT as i128,
-        "IOCTL_HID_WRITE_REPORT" => ioctl::IOCTL_HID_WRITE_REPORT as i128,
-        "IOCTL_HID_GET_STRING" => ioctl::IOCTL_HID_GET_STRING as i128,
-        "IOCTL_HID_ACTIVATE_DEVICE" => ioctl::IOCTL_HID_ACTIVATE_DEVICE as i128,
-        "IOCTL_HID_DEACTIVATE_DEVICE" => ioctl::IOCTL_HID_DEACTIVATE_DEVICE as i128,
-        "IOCTL_HID_GET_DEVICE_ATTRIBUTES" => ioctl::IOCTL_HID_GET_DEVICE_ATTRIBUTES as i128,
+        "IOCTL_HID_GET_DEVICE_DESCRIPTOR" => i128::from(ioctl::IOCTL_HID_GET_DEVICE_DESCRIPTOR),
+        "IOCTL_HID_GET_REPORT_DESCRIPTOR" => i128::from(ioctl::IOCTL_HID_GET_REPORT_DESCRIPTOR),
+        "IOCTL_HID_READ_REPORT" => i128::from(ioctl::IOCTL_HID_READ_REPORT),
+        "IOCTL_HID_WRITE_REPORT" => i128::from(ioctl::IOCTL_HID_WRITE_REPORT),
+        "IOCTL_HID_GET_STRING" => i128::from(ioctl::IOCTL_HID_GET_STRING),
+        "IOCTL_HID_ACTIVATE_DEVICE" => i128::from(ioctl::IOCTL_HID_ACTIVATE_DEVICE),
+        "IOCTL_HID_DEACTIVATE_DEVICE" => i128::from(ioctl::IOCTL_HID_DEACTIVATE_DEVICE),
+        "IOCTL_HID_GET_DEVICE_ATTRIBUTES" => i128::from(ioctl::IOCTL_HID_GET_DEVICE_ATTRIBUTES),
         "IOCTL_HID_SEND_IDLE_NOTIFICATION_REQUEST" => {
-            ioctl::IOCTL_HID_SEND_IDLE_NOTIFICATION_REQUEST as i128
+            i128::from(ioctl::IOCTL_HID_SEND_IDLE_NOTIFICATION_REQUEST)
         }
-        "IOCTL_HID_SET_FEATURE" => ioctl::IOCTL_HID_SET_FEATURE as i128,
-        "IOCTL_HID_GET_FEATURE" => ioctl::IOCTL_HID_GET_FEATURE as i128,
-        "IOCTL_UMDF_HID_SET_OUTPUT_REPORT" => ioctl::IOCTL_UMDF_HID_SET_OUTPUT_REPORT as i128,
-        "IOCTL_UMDF_HID_GET_INPUT_REPORT" => ioctl::IOCTL_UMDF_HID_GET_INPUT_REPORT as i128,
-        "IOCTL_UMDF_HID_GET_FEATURE" => ioctl::IOCTL_UMDF_HID_GET_FEATURE as i128,
-        "IOCTL_UMDF_HID_SET_FEATURE" => ioctl::IOCTL_UMDF_HID_SET_FEATURE as i128,
-        "IOCTL_HID_GET_INPUT_REPORT" => ioctl::IOCTL_HID_GET_INPUT_REPORT as i128,
-        "IOCTL_HID_SET_OUTPUT_REPORT" => ioctl::IOCTL_HID_SET_OUTPUT_REPORT as i128,
-        "IOCTL_HID_GET_INDEXED_STRING" => ioctl::IOCTL_HID_GET_INDEXED_STRING as i128,
+        "IOCTL_HID_SET_FEATURE" => i128::from(ioctl::IOCTL_HID_SET_FEATURE),
+        "IOCTL_HID_GET_FEATURE" => i128::from(ioctl::IOCTL_HID_GET_FEATURE),
+        "IOCTL_UMDF_HID_SET_OUTPUT_REPORT" => i128::from(ioctl::IOCTL_UMDF_HID_SET_OUTPUT_REPORT),
+        "IOCTL_UMDF_HID_GET_INPUT_REPORT" => i128::from(ioctl::IOCTL_UMDF_HID_GET_INPUT_REPORT),
+        "IOCTL_UMDF_HID_GET_FEATURE" => i128::from(ioctl::IOCTL_UMDF_HID_GET_FEATURE),
+        "IOCTL_UMDF_HID_SET_FEATURE" => i128::from(ioctl::IOCTL_UMDF_HID_SET_FEATURE),
+        "IOCTL_HID_GET_INPUT_REPORT" => i128::from(ioctl::IOCTL_HID_GET_INPUT_REPORT),
+        "IOCTL_HID_SET_OUTPUT_REPORT" => i128::from(ioctl::IOCTL_HID_SET_OUTPUT_REPORT),
+        "IOCTL_HID_GET_INDEXED_STRING" => i128::from(ioctl::IOCTL_HID_GET_INDEXED_STRING),
         // HID_OUT_CTL_CODE(102); not in ptp-hid because no driver handles it.
-        "IOCTL_GET_PHYSICAL_DESCRIPTOR" => ioctl::hid_out_ctl_code(102) as i128,
+        "IOCTL_GET_PHYSICAL_DESCRIPTOR" => i128::from(ioctl::hid_out_ctl_code(102)),
         "off_HID_XFER_PACKET_reportBuffer" => core_::XFER_REPORT_BUFFER_OFFSET as i128,
         "off_HID_XFER_PACKET_reportBufferLen" => core_::XFER_REPORT_BUFFER_LEN_OFFSET as i128,
         "off_HID_XFER_PACKET_reportId" => core_::XFER_REPORT_ID_OFFSET as i128,
-        "off_HID_DEVICE_ATTRIBUTES_Size" => find(&attrs, &32u32.to_le_bytes())?,
+        "off_HID_DEVICE_ATTRIBUTES_Size" => find(&attrs, &32_u32.to_le_bytes())?,
         "off_HID_DEVICE_ATTRIBUTES_VendorID" => find(&attrs, &[0x11, 0x11])?,
         "off_HID_DEVICE_ATTRIBUTES_ProductID" => find(&attrs, &[0x22, 0x22])?,
         "off_HID_DEVICE_ATTRIBUTES_VersionNumber" => find(&attrs, &[0x33, 0x33])?,
@@ -140,15 +142,12 @@ fn is_unmirrored(key: &str) -> bool {
 
 fn check_keys(r: &Rec, checked: &mut usize, unmirrored: &mut usize) {
     for (k, v) in r.fields.iter().skip(1) {
-        match port_value(k) {
-            Some(p) => {
-                assert_eq!(p, num(v), "{}: {k}", r.case());
-                *checked += 1;
-            }
-            None => {
-                assert!(is_unmirrored(k), "{}: unexpected key {k}", r.case());
-                *unmirrored += 1;
-            }
+        if let Some(p) = port_value(k) {
+            assert_eq!(p, num(v), "{}: {k}", r.case());
+            *checked += 1;
+        } else {
+            assert!(is_unmirrored(k), "{}: unexpected key {k}", r.case());
+            *unmirrored += 1;
         }
     }
 }
@@ -172,7 +171,7 @@ fn replay_descriptors() {
             _ => {
                 replay_ioctl(r);
                 let s = status(r.get("status"));
-                tally.add(if s == 0xC000_0023u32 as i32 {
+                tally.add(if s == 0xC000_0023_u32 as i32 {
                     "framework status (stub model, README 5)"
                 } else {
                     "driver-decided"

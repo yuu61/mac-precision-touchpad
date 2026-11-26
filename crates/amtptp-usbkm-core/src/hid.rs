@@ -6,7 +6,7 @@
 //! and never forwarded. [`route_internal_ioctl`] is the `switch`; the handlers below take the buffer the
 //! glue retrieved from WDF and return the [`Completion`].
 //!
-//! Output buffers: for the METHOD_NEITHER minidriver IOCTLs KMDF exposes `Irp->UserBuffer` as the output
+//! Output buffers: for the `METHOD_NEITHER` minidriver IOCTLs KMDF exposes `Irp->UserBuffer` as the output
 //! buffer. The glue calls `WdfRequestRetrieveOutputMemory` (descriptors; the copy is then
 //! `WdfMemoryCopyFromBuffer` through [`crate::output::OutputMemory`]) or
 //! `WdfRequestRetrieveOutputBuffer(Request, 32, ..)` (attributes) and passes `Ok(buffer)` or
@@ -67,13 +67,14 @@ pub enum InternalIoctl {
     GetFeature,
     /// `IOCTL_HID_SET_FEATURE` → [`crate::feature::set_feature`].
     SetFeature,
-    /// Everything else (GET_STRING, WRITE_REPORT, ACTIVATE/DEACTIVATE, idle notification, the UMDF
-    /// codes, GET_INPUT_REPORT, any `IOCTL_INTERNAL_USB_*`, unknown codes): complete with
+    /// Everything else (`GET_STRING`, `WRITE_REPORT`, ACTIVATE/DEACTIVATE, idle notification, the UMDF
+    /// codes, `GET_INPUT_REPORT`, any `IOCTL_INTERNAL_USB_*`, unknown codes): complete with
     /// [`not_supported`]. Never forwarded.
     NotSupported,
 }
 
 /// Routes an internal IOCTL code like the C dispatcher.
+#[must_use]
 pub const fn route_internal_ioctl(io_control_code: u32) -> InternalIoctl {
     match io_control_code {
         IOCTL_HID_GET_DEVICE_DESCRIPTOR => InternalIoctl::GetDeviceDescriptor,
@@ -87,11 +88,13 @@ pub const fn route_internal_ioctl(io_control_code: u32) -> InternalIoctl {
 }
 
 /// The completion of every unsupported internal IOCTL: `STATUS_NOT_SUPPORTED`, `Information = 0`.
+#[must_use]
 pub const fn not_supported() -> Completion {
     Completion::status(STATUS_NOT_SUPPORTED)
 }
 
-/// The completion of a READ_REPORT whose `WdfRequestForwardToIoQueue` failed with `status`.
+/// The completion of a `READ_REPORT` whose `WdfRequestForwardToIoQueue` failed with `status`.
+#[must_use]
 pub const fn read_report_forward_failed(status: NtStatus) -> Completion {
     Completion::status(status)
 }
@@ -125,6 +128,7 @@ fn copy_completion<M: OutputMemory + ?Sized>(
 ///
 /// `output` is the `WdfRequestRetrieveOutputMemory` result. The driver passes its `WDFMEMORY` wrapper (the
 /// copy is then the framework's `WdfMemoryCopyFromBuffer`); tests pass a byte slice.
+#[must_use]
 pub fn get_hid_descriptor_to<M: OutputMemory + ?Sized>(
     output: Result<&mut M, NtStatus>,
 ) -> Completion {
@@ -132,6 +136,7 @@ pub fn get_hid_descriptor_to<M: OutputMemory + ?Sized>(
 }
 
 /// [`get_hid_descriptor_to`] on a byte slice (the [`OutputMemory`] model of `WdfMemoryCopyFromBuffer`).
+#[must_use]
 pub fn get_hid_descriptor(output: Result<&mut [u8], NtStatus>) -> Completion {
     get_hid_descriptor_to(output)
 }
@@ -139,6 +144,7 @@ pub fn get_hid_descriptor(output: Result<&mut [u8], NtStatus>) -> Completion {
 /// `AmtPtpGetReportDescriptor` (Hid.c:169-285): copies the 493-byte [`REPORT_DESCRIPTOR`] and completes
 /// with `Information = 493`; `STATUS_BUFFER_TOO_SMALL` if the output is shorter. `output` as in
 /// [`get_hid_descriptor_to`].
+#[must_use]
 pub fn get_report_descriptor_to<M: OutputMemory + ?Sized>(
     output: Result<&mut M, NtStatus>,
 ) -> Completion {
@@ -146,12 +152,14 @@ pub fn get_report_descriptor_to<M: OutputMemory + ?Sized>(
 }
 
 /// [`get_report_descriptor_to`] on a byte slice.
+#[must_use]
 pub fn get_report_descriptor(output: Result<&mut [u8], NtStatus>) -> Completion {
     get_report_descriptor_to(output)
 }
 
 /// The `HID_DEVICE_ATTRIBUTES` the driver reports: the cached USB `idVendor` (0x05AC on real hardware,
 /// not the 0x8910 the other drivers use), the real `idProduct`, and `VersionNumber` [`DEVICE_VERSION`].
+#[must_use]
 pub const fn device_attributes(ids: UsbDeviceIds) -> HidDeviceAttributes {
     HidDeviceAttributes {
         vendor_id: ids.vendor_id,
@@ -167,7 +175,8 @@ pub const fn device_attributes(ids: UsbDeviceIds) -> HidDeviceAttributes {
 /// same status here). Writes `Size`, `VendorID`, `ProductID` and `VersionNumber` only: `Reserved` (bytes
 /// 10..32) keeps the caller's bytes, as in C (spec B17, preserved). Completes with `Information = 32`.
 ///
-/// Before the first PrepareHardware the cached descriptor is all zero, so VendorID and ProductID are 0.
+/// Before the first `PrepareHardware` the cached descriptor is all zero, so `VendorID` and `ProductID` are 0.
+#[must_use]
 pub fn get_device_attributes(output: Result<&mut [u8], NtStatus>, ids: UsbDeviceIds) -> Completion {
     match output {
         Ok(buf) => match device_attributes(ids).write_to(buf) {
@@ -213,11 +222,11 @@ mod tests {
             HID_DESCRIPTOR,
             [0x09, 0x21, 0x00, 0x01, 0x00, 0x01, 0x22, 0xed, 0x01]
         );
-        let mut out = [0xccu8; 10];
+        let mut out = [0xcc_u8; 10];
         assert_eq!(get_hid_descriptor(Ok(&mut out)), Completion::success(9));
         assert_eq!(out[..9], HID_DESCRIPTOR);
         assert_eq!(out[9], 0xcc);
-        let mut short = [0xccu8; 8];
+        let mut short = [0xcc_u8; 8];
         assert_eq!(
             get_hid_descriptor(Ok(&mut short)),
             Completion::status(STATUS_BUFFER_TOO_SMALL)
@@ -268,7 +277,7 @@ mod tests {
             product_id: 0x027a,
             bcd_device: 0x0100,
         };
-        let mut out = [0xccu8; 48];
+        let mut out = [0xcc_u8; 48];
         assert_eq!(
             get_device_attributes(Ok(&mut out), ids),
             Completion::success(32)

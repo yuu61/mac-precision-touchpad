@@ -1,5 +1,7 @@
 //! The golden vectors of the porting spec (`specs/hidfilter.md`, Appendix A.4 and D.1-D.6).
 
+#![cfg(test)]
+
 use amtptp_hidfilter_core::*;
 
 const BT: InputLayout = InputLayout {
@@ -71,7 +73,7 @@ fn d2_whole_bt_packet() {
         03 03 00 00 00 8a 0f 18 09
         03 04 00 00 00 ee 0f e6 08
         00 00 05 01");
-    let mut buffer = vec![0u8; REPORT_BUFFER_SIZE];
+    let mut buffer = vec![0_u8; REPORT_BUFFER_SIZE];
     buffer[..58].copy_from_slice(&packet);
     assert_eq!(
         classify_lower_read(0x004C, &BT, 58),
@@ -114,7 +116,7 @@ fn d3_length_classification() {
 fn d4_scan_time() {
     // Driver level: (LastReportTime before, frequency) -> (ScanTime, LastReportTime after).
     for (last, freq, t) in [
-        (10_000_000i64, 10_000_000i64, 0u16),
+        (10_000_000_i64, 10_000_000_i64, 0_u16),
         (0, 10_000_000, 0xFF),
         (0, 25_500, 0xFF),
         (0, 25_499, 254),
@@ -129,7 +131,7 @@ fn d4_scan_time() {
     }
     // Formula level: delta ticks -> ScanTime.
     for (delta, t) in [
-        (0i64, 0u16),
+        (0_i64, 0_u16),
         (99, 0),
         (2550, 25),
         (25_499, 254),
@@ -145,25 +147,25 @@ fn d4_scan_time() {
 #[test]
 fn d5_feature_requests() {
     assert_eq!(check_xfer_length(8), Err(STATUS_BUFFER_TOO_SMALL));
-    let mut b = [0u8; 3];
+    let mut b = [0_u8; 3];
     assert_eq!(get_feature_report(0x07, &mut b), STATUS_SUCCESS);
     assert_eq!(b, [0x07, 0x05, 0x00]);
-    let mut b = [0xAAu8; 2];
+    let mut b = [0xAA_u8; 2];
     assert_eq!(get_feature_report(0x07, &mut b), STATUS_INVALID_BUFFER_SIZE);
     assert_eq!(b, [0xAA; 2]);
-    let mut b = [0xAAu8; 257];
+    let mut b = [0xAA_u8; 257];
     assert_eq!(get_feature_report(0x08, &mut b), STATUS_SUCCESS);
     assert_eq!(b[..2], [0x08, 0xFC]);
     assert!(b[2..].iter().all(|&x| x == 0xAA));
     assert_eq!(
-        get_feature_report(0x08, &mut [0u8; 256]),
+        get_feature_report(0x08, &mut [0_u8; 256]),
         STATUS_INVALID_BUFFER_SIZE
     );
     for id in [0x04, 0x06, 0x09] {
-        assert_eq!(get_feature_report(id, &mut [0u8; 8]), STATUS_NOT_SUPPORTED);
+        assert_eq!(get_feature_report(id, &mut [0_u8; 8]), STATUS_NOT_SUPPORTED);
     }
     let state = DeviceState::new();
-    for (bytes, on) in [([0x04u8, 0x03], true), ([0x04, 0x00], false)] {
+    for (bytes, on) in [([0x04_u8, 0x03], true), ([0x04, 0x00], false)] {
         state.apply_feature_change(decode_set_feature(0x04, &bytes).unwrap());
         assert_eq!(state.snapshot().ptp_input_on, on);
     }
@@ -171,7 +173,7 @@ fn d5_feature_requests() {
         decode_set_feature(0x04, &[0x04, 0x05]),
         Ok(FeatureChange::None)
     );
-    for (byte, button, touch) in [(0x03u8, true, true), (0x02, false, true)] {
+    for (byte, button, touch) in [(0x03_u8, true, true), (0x02, false, true)] {
         state.apply_feature_change(decode_set_feature(0x06, &[0x06, byte]).unwrap());
         let s = state.snapshot();
         assert_eq!((s.ptp_report_button, s.ptp_report_touch), (button, touch));
@@ -189,17 +191,17 @@ fn d6_identity_and_mode_switch() {
     );
     assert_eq!(report_descriptor_for(0x0265).unwrap().len(), 493);
     assert!(hid_descriptor_for(0x0266).is_none() && report_descriptor_for(0x0266).is_none());
-    let mut attrs = [0xCCu8; 32];
+    let mut attrs = [0xCC_u8; 32];
     device_attributes(0x0265).write_to(&mut attrs).unwrap();
     assert_eq!(attrs[..10], h("20 00 00 00 10 89 65 02 00 01")[..]);
     assert!(attrs[10..].iter().all(|&x| x == 0xCC));
 
     for (transport, id, payload) in [
-        (Transport::Usb, 0x02u8, h("02 01 00 00")),
+        (Transport::Usb, 0x02_u8, h("02 01 00 00")),
         (Transport::Bluetooth, 0xF1, h("F1 02 01")),
     ] {
         let ms = transport.mode_switch();
-        assert_eq!((ms.report_id, ms.payload), (id, &payload[..]));
+        assert_eq!((ms.report_id, ms.payload), (id, (&*payload)));
         let b = XferBuffer::new(ms);
         let bytes = b.as_bytes();
         assert_eq!(bytes[8..12], (payload.len() as u32).to_le_bytes());

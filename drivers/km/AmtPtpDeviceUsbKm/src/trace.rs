@@ -1,11 +1,11 @@
-//! Trace keywords and helpers. The TraceLogging provider itself ([`crate::PROVIDER`], replacing the C WPP
+//! Trace keywords and helpers. The `TraceLogging` provider itself ([`crate::PROVIDER`], replacing the C WPP
 //! tracing of `Trace.h`) is defined in the crate root: `define_provider!` symbols are private to their
 //! module, and children can use the root's.
 //!
 //! The provider id is the C WPP control GUID `AmtPtpDeviceUsbKmTraceGuid`
 //! {b409cf52-f41a-4193-98c2-bad95204203b}, so existing trace sessions keep the same provider GUID.
 //! The keywords reuse the bit values of the C WPP flags (`TRACE_DRIVER` 0x1, `TRACE_DEVICE` 0x2,
-//! `TRACE_QUEUE` 0x4, `TRACE_INPUT` 0x8). The payloads are self-describing TraceLogging events, not WPP
+//! `TRACE_QUEUE` 0x4, `TRACE_INPUT` 0x8). The payloads are self-describing `TraceLogging` events, not WPP
 //! messages (spec §1.2: tracing is not behavior).
 
 use wdk_sys::{_WDF_POWER_DEVICE_STATE, WDF_POWER_DEVICE_STATE};

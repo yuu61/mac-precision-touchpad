@@ -36,10 +36,7 @@
     clippy::panic
 )]
 
-#[cfg(not(any(
-    driver_model__driver_type = "KMDF",
-    driver_model__driver_type = "UMDF"
-)))]
+#[cfg(not(any(driver_model__driver_type = "KMDF", driver_model__driver_type = "UMDF")))]
 compile_error!(
     "wdf-support must be built inside a KMDF or UMDF driver workspace (drivers/km or drivers/um): \
      no [workspace.metadata.wdk.driver-model] was found"
@@ -53,7 +50,4 @@ pub mod request;
 pub mod wdm;
 
 #[doc(hidden)]
-pub mod __private {
-    //! Re-exports used by macro expansions in dependent crates.
-    pub use wdk_sys;
-}
+pub mod __private;

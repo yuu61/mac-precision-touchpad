@@ -1,9 +1,11 @@
-//! Replays `setup.txt`: DriverEntry, EvtDriverDeviceAdd (including failure paths), driver cleanup and
-//! EvtIoStop.
+//! Replays `setup.txt`: `DriverEntry`, `EvtDriverDeviceAdd` (including failure paths), driver cleanup and
+//! `EvtIoStop`.
 //!
 //! These records are WDF configuration; the driver crate (stage 2) reproduces the call sequence. Here the
 //! core's constants are asserted against the arguments the C code passed, the driver-decided status
 //! (no local I/O target) is checked, and every framework-decided status is counted under a named reason.
+
+#![cfg(test)]
 
 mod common;
 

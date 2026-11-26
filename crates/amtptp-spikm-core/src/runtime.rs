@@ -16,18 +16,19 @@ use crate::status::{NtStatus, STATUS_CANCELLED, STATUS_SUCCESS, nt_success};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
 pub enum DeviceStatus {
-    /// `D3` (0): created, or after D0Exit.
+    /// `D3` (0): created, or after `D0Exit`.
     D3 = 0,
-    /// `D0ActiveAndConfigured` (1): the multitouch SET_FEATURE succeeded; upstream reads issue lower
+    /// `D0ActiveAndConfigured` (1): the multitouch `SET_FEATURE` succeeded; upstream reads issue lower
     /// reads.
     D0ActiveAndConfigured = 1,
-    /// `D0ActiveAndUnconfigured` (2): after D0Entry until SetState succeeds.
+    /// `D0ActiveAndUnconfigured` (2): after `D0Entry` until `SetState` succeeds.
     D0ActiveAndUnconfigured = 2,
 }
 
 impl DeviceStatus {
     /// Decodes the stored value. Only the three discriminants are ever stored; anything else maps to
     /// `D3` (unreachable).
+    #[must_use]
     pub const fn from_raw(raw: u32) -> Self {
         match raw {
             1 => Self::D0ActiveAndConfigured,
@@ -42,7 +43,7 @@ impl DeviceStatus {
 pub const RECOVERY_TIMER_DUE_TIME: i64 = -50_000_000;
 /// `WDF_TIMER_CONFIG.Period` of the recovery timer: 0 (one-shot).
 pub const RECOVERY_TIMER_PERIOD: u32 = 0;
-/// Completion status for every request D0Exit drains from `HidQueue` (Information 0).
+/// Completion status for every request `D0Exit` drains from `HidQueue` (Information 0).
 pub const D0_EXIT_DRAIN_STATUS: NtStatus = STATUS_CANCELLED;
 
 /// What `AmtPtpEvtDeviceSelfManagedIoInitOrRestart` decided.
@@ -50,7 +51,7 @@ pub const D0_EXIT_DRAIN_STATUS: NtStatus = STATUS_CANCELLED;
 pub struct SelfManagedIoOutcome {
     /// Return value of the callback: always `STATUS_SUCCESS`.
     pub status: NtStatus,
-    /// `Some(due_time)` when SetState failed: the glue calls `WdfTimerStart(PowerOnRecoveryTimer,
+    /// `Some(due_time)` when `SetState` failed: the glue calls `WdfTimerStart(PowerOnRecoveryTimer,
     /// due_time)` (re-arming a still pending timer, as KMDF does).
     pub start_recovery_timer: Option<i64>,
 }
@@ -72,6 +73,7 @@ impl Default for DeviceRuntime {
 impl DeviceRuntime {
     /// The state after `AmtPtpDeviceSpiKmCreateDevice`: the zeroed context with `DeviceStatus = D3`,
     /// `LastReportTime = 0` and all PTP flags FALSE.
+    #[must_use]
     pub const fn new() -> Self {
         Self {
             status: AtomicU32::new(DeviceStatus::D3 as u32),
@@ -95,14 +97,14 @@ impl DeviceRuntime {
     }
 
     /// The write-only PTP flags (`PtpInputOn`, `PtpReportButton`, `PtpReportTouch`).
-    pub fn ptp_settings(&self) -> &PtpSettings {
+    pub const fn ptp_settings(&self) -> &PtpSettings {
         &self.ptp
     }
 
     /// `AmtPtpEvtDeviceD0Entry` (Device.c:319-351): `DeviceStatus = D0ActiveAndUnconfigured`, then
     /// `KeQueryPerformanceCounter(&LastReportTime)`.
     ///
-    /// `qpc_frequency` is the value `KeQueryPerformanceCounter` writes through its **PerformanceFrequency**
+    /// `qpc_frequency` is the value `KeQueryPerformanceCounter` writes through its **`PerformanceFrequency`**
     /// out-parameter: C passes `&LastReportTime` there and discards the returned counter (SPI-B8,
     /// preserved). The glue does the same: `KeQueryPerformanceCounter(&mut freq)` and passes `freq`.
     /// Returns `STATUS_SUCCESS`; no I/O.
@@ -114,7 +116,7 @@ impl DeviceRuntime {
     }
 
     /// `AmtPtpEvtDeviceSelfManagedIoInitOrRestart` (Device.c:397-427), registered for both
-    /// SelfManagedIoInit and SelfManagedIoRestart, after the glue ran the mode switch
+    /// `SelfManagedIoInit` and `SelfManagedIoRestart`, after the glue ran the mode switch
     /// ([`crate::wire::SetStatePacket`], synchronous `IOCTL_HID_SET_FEATURE`) and got `set_state_status`.
     ///
     /// - Success: `DeviceStatus = D0ActiveAndConfigured`, then `LastReportTime = qpc_frequency()` (the
@@ -123,10 +125,10 @@ impl DeviceRuntime {
     /// - Failure: nothing changes; the outcome asks the glue to start the 5 s recovery timer.
     ///
     /// The callback always returns `STATUS_SUCCESS`.
-    pub fn on_self_managed_io_init_or_restart(
+    pub fn on_self_managed_io_init_or_restart<F: FnOnce() -> i64>(
         &self,
         set_state_status: NtStatus,
-        qpc_frequency: impl FnOnce() -> i64,
+        qpc_frequency: F,
     ) -> SelfManagedIoOutcome {
         if nt_success(set_state_status) {
             self.set_status(DeviceStatus::D0ActiveAndConfigured);
@@ -144,7 +146,7 @@ impl DeviceRuntime {
         }
     }
 
-    /// `AmtPtpPowerRecoveryTimerCallback` (Device.c:541-562, PASSIVE_LEVEL work item), after the glue ran
+    /// `AmtPtpPowerRecoveryTimerCallback` (Device.c:541-562, `PASSIVE_LEVEL` work item), after the glue ran
     /// the mode switch again and got `set_state_status`.
     ///
     /// On success it calls `issue_lower_read` **exactly once** (one `AmtPtpSpiInputIssueRequest`, whatever
@@ -152,10 +154,10 @@ impl DeviceRuntime {
     /// `LastReportTime` is not refreshed. On failure nothing happens and nothing is rescheduled. This runs
     /// whatever the current `DeviceStatus` is, also in D3 (SPI-B12, preserved). Returns whether the read was
     /// issued.
-    pub fn on_recovery_timer(
+    pub fn on_recovery_timer<F: FnOnce()>(
         &self,
         set_state_status: NtStatus,
-        issue_lower_read: impl FnOnce(),
+        issue_lower_read: F,
     ) -> bool {
         if nt_success(set_state_status) {
             issue_lower_read();
@@ -201,12 +203,15 @@ impl DeviceRuntime {
     /// `STATUS_SUCCESS`. On `Err(status)` it completes with `status`. Either way it then deletes the lower
     /// request and its memory (reading the memory handle **before** deleting the request: P2 fix of the
     /// use-after-free SPI-B10).
-    pub fn complete_lower_read(
+    ///
+    /// # Errors
+    /// Returns `STATUS_DEVICE_DATA_ERROR` if the reported length is shorter than the packet header.
+    pub fn complete_lower_read<F: FnOnce() -> i64>(
         &self,
         trackpad: &SpiTrackpadInfo,
         information: u64,
         buffer: &[u8],
-        qpc_frequency: impl FnOnce() -> i64,
+        qpc_frequency: F,
     ) -> Result<[u8; SPI_PTP_REPORT_LEN], NtStatus> {
         let length = lower_read_length(information)?;
         let packet = SpiPacket::new(valid_prefix(buffer, length));
@@ -217,7 +222,7 @@ impl DeviceRuntime {
         Ok(report_bytes(&packet, trackpad, scan_time(current, last)))
     }
 
-    /// SET_FEATURE (see [`PtpSettings::set_feature`]).
+    /// `SET_FEATURE` (see [`PtpSettings::set_feature`]).
     pub fn set_feature(
         &self,
         report_id: u8,

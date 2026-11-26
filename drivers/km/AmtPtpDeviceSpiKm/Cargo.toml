@@ -35,6 +35,7 @@ missing_docs = "warn"
 non_snake_case = { level = "allow", priority = 1 }
 
 [lints.clippy]
+cargo = { level = "deny", priority = -1 }
 # A panic in kernel mode is a bugcheck (wdk-panic -> KeBugCheckEx).
 indexing_slicing = "deny"
 unwrap_used = "deny"

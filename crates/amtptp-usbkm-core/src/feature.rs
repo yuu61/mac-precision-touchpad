@@ -38,7 +38,7 @@ use crate::wellspring::{ControlTransfer, set_wellspring_mode};
 /// `sizeof(HID_XFER_PACKET)` on x64 and ARM64: 16.
 pub const HID_XFER_PACKET_LEN: usize = 16;
 
-/// A GET_FEATURE `HID_XFER_PACKET`: the report ID and the caller's report buffer to fill.
+/// A `GET_FEATURE` `HID_XFER_PACKET`: the report ID and the caller's report buffer to fill.
 #[derive(Debug)]
 pub struct GetFeaturePacket<'a> {
     /// `reportId`.
@@ -47,7 +47,7 @@ pub struct GetFeaturePacket<'a> {
     pub report_buffer: &'a mut [u8],
 }
 
-/// A SET_FEATURE `HID_XFER_PACKET`: the report ID and the report bytes.
+/// A `SET_FEATURE` `HID_XFER_PACKET`: the report ID and the report bytes.
 #[derive(Clone, Copy, Debug)]
 pub struct SetFeaturePacket<'a> {
     /// `reportId`.
@@ -67,9 +67,9 @@ pub struct SetFeaturePacket<'a> {
 ///
 /// `output_buffer_length` is `Parameters.DeviceIoControl.OutputBufferLength`; `packet` is called only when
 /// it is at least [`HID_XFER_PACKET_LEN`].
-pub fn get_feature<'a>(
+pub fn get_feature<'a, F: FnOnce() -> Option<GetFeaturePacket<'a>>>(
     output_buffer_length: usize,
-    packet: impl FnOnce() -> Option<GetFeaturePacket<'a>>,
+    packet: F,
 ) -> Completion {
     if output_buffer_length < HID_XFER_PACKET_LEN {
         return Completion::status(STATUS_BUFFER_TOO_SMALL);
@@ -88,20 +88,22 @@ pub fn get_feature<'a>(
     }
 }
 
-/// The input mode byte `PTP_DEVICE_INPUT_MODE_REPORT.Mode` of a SET_FEATURE 0x04 report.
+/// The input mode byte `PTP_DEVICE_INPUT_MODE_REPORT.Mode` of a `SET_FEATURE` 0x04 report.
 ///
 /// The C reads `reportBuffer[1]` with no length check (spec B14). When the report is shorter than 2
 /// bytes that byte is outside the report, and this returns 0 instead (port policy P2 "treat as 0"), which
 /// makes the request fail with `STATUS_NOT_SUPPORTED` like an explicit mode 0.
+#[must_use]
 pub fn input_mode(report: &[u8]) -> u8 {
     report.get(INPUT_MODE_OFFSET).copied().unwrap_or(0)
 }
 
-/// The `ButtonReport` / `SurfaceReport` bits the C traces for SET_FEATURE 0x06, read through its 3-byte
+/// The `ButtonReport` / `SurfaceReport` bits the C traces for `SET_FEATURE` 0x06, read through its 3-byte
 /// `PTP_DEVICE_SELECTIVE_REPORT_MODE_REPORT` from `reportBuffer[2]` (spec B15). That byte is past the
 /// 2-byte report the descriptor defines, and the values have no effect (selective reporting is ignored),
 /// so this returns `None` instead of reading outside the report. For tracing only.
-pub fn selective_report_trace_bits(report: &[u8]) -> Option<SelectiveReportBits> {
+#[must_use]
+pub const fn selective_report_trace_bits(report: &[u8]) -> Option<SelectiveReportBits> {
     SelectiveReportBits::from_device_mode_struct(report)
 }
 
@@ -109,19 +111,19 @@ pub fn selective_report_trace_bits(report: &[u8]) -> Option<SelectiveReportBits>
 ///
 /// - 0x04 (input mode), mode = [`input_mode`]:
 ///   - 0 (`PTP_COLLECTION_MOUSE`) → `STATUS_NOT_SUPPORTED`;
-///   - 3 (`PTP_COLLECTION_WINDOWS`) → if wellspring mode is off, [`set_wellspring_mode`]`(on)` and return
-///     its failure status; otherwise (or on success) `STATUS_SUCCESS`;
+///   - 3 (`PTP_COLLECTION_WINDOWS`) → if wellspring mode is off, call [`set_wellspring_mode`]
+///     to enable it and return its failure status; otherwise (or on success) `STATUS_SUCCESS`;
 ///   - any other value → `STATUS_SUCCESS` with no action (spec B14, preserved).
 /// - 0x06 (selective reporting) → `STATUS_SUCCESS`, no action: `PtpReportButton`/`PtpReportTouch` are not
 ///   changed (spec B15, preserved). See [`selective_report_trace_bits`] for the traced values.
 /// - any other ID → `STATUS_NOT_SUPPORTED`.
 ///
-/// Must run at PASSIVE_LEVEL (synchronous control transfers). `input_buffer_length` is
+/// Must run at `PASSIVE_LEVEL` (synchronous control transfers). `input_buffer_length` is
 /// `Parameters.DeviceIoControl.InputBufferLength`; `packet` is called only when it is at least
 /// [`HID_XFER_PACKET_LEN`].
-pub fn set_feature<'a, T: ControlTransfer + ?Sized>(
+pub fn set_feature<'a, T: ControlTransfer + ?Sized, F: FnOnce() -> Option<SetFeaturePacket<'a>>>(
     input_buffer_length: usize,
-    packet: impl FnOnce() -> Option<SetFeaturePacket<'a>>,
+    packet: F,
     state: &DeviceState,
     io: &mut T,
 ) -> Completion {
@@ -173,7 +175,7 @@ mod tests {
 
     #[test]
     fn get_feature_reports() {
-        let mut buf = [0xa5u8; 4];
+        let mut buf = [0xa5_u8; 4];
         let c = get_feature(16, || {
             Some(GetFeaturePacket {
                 report_id: 0x07,
@@ -183,7 +185,7 @@ mod tests {
         assert_eq!(c, Completion::status(STATUS_SUCCESS));
         assert_eq!(buf, [0x07, 0x05, 0x00, 0xa5]);
 
-        let mut hqa = [0xa5u8; 257];
+        let mut hqa = [0xa5_u8; 257];
         let c = get_feature(16, || {
             Some(GetFeaturePacket {
                 report_id: 0x08,
@@ -203,7 +205,7 @@ mod tests {
         });
         assert_eq!(c, Completion::status(STATUS_INVALID_BUFFER_SIZE));
 
-        let mut other = [0u8; 8];
+        let mut other = [0_u8; 8];
         let c = get_feature(64, || {
             Some(GetFeaturePacket {
                 report_id: 0x55,

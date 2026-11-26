@@ -1,5 +1,7 @@
 //! Golden vectors taken from the porting spec (`spikm.md`), independent of the C-oracle fixtures.
 
+#![cfg(test)]
+
 use amtptp_spikm_core::descriptors::{
     HID_DESCRIPTOR, REPORT_DESCRIPTOR_F1, REPORT_DESCRIPTOR_F1_TOUCHSCREEN, REPORT_DESCRIPTOR_F2,
     REPORT_DESCRIPTOR_F2_TOUCHSCREEN, REPORT_DESCRIPTOR_F3A, REPORT_DESCRIPTOR_F3A_TOUCHSCREEN,
@@ -15,24 +17,85 @@ use amtptp_spikm_core::input::{SpiPacket, build_report, lower_read_length, scan_
 use amtptp_spikm_core::runtime::DeviceRuntime;
 use amtptp_spikm_core::status::*;
 use amtptp_spikm_core::wire::{POOL_TAG, SetStatePacket};
+use core::fmt::Write as _;
 
 /// Minimal SHA-256 (FIPS 180-4) for checking the spec's descriptor hashes.
 fn sha256(data: &[u8]) -> String {
     const K: [u32; 64] = [
-        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
-        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
-        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
-        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
-        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
-        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
-        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
-        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
-        0xc67178f2,
+        0x428a_2f98,
+        0x7137_4491,
+        0xb5c0_fbcf,
+        0xe9b5_dba5,
+        0x3956_c25b,
+        0x59f1_11f1,
+        0x923f_82a4,
+        0xab1c_5ed5,
+        0xd807_aa98,
+        0x1283_5b01,
+        0x2431_85be,
+        0x550c_7dc3,
+        0x72be_5d74,
+        0x80de_b1fe,
+        0x9bdc_06a7,
+        0xc19b_f174,
+        0xe49b_69c1,
+        0xefbe_4786,
+        0x0fc1_9dc6,
+        0x240c_a1cc,
+        0x2de9_2c6f,
+        0x4a74_84aa,
+        0x5cb0_a9dc,
+        0x76f9_88da,
+        0x983e_5152,
+        0xa831_c66d,
+        0xb003_27c8,
+        0xbf59_7fc7,
+        0xc6e0_0bf3,
+        0xd5a7_9147,
+        0x06ca_6351,
+        0x1429_2967,
+        0x27b7_0a85,
+        0x2e1b_2138,
+        0x4d2c_6dfc,
+        0x5338_0d13,
+        0x650a_7354,
+        0x766a_0abb,
+        0x81c2_c92e,
+        0x9272_2c85,
+        0xa2bf_e8a1,
+        0xa81a_664b,
+        0xc24b_8b70,
+        0xc76c_51a3,
+        0xd192_e819,
+        0xd699_0624,
+        0xf40e_3585,
+        0x106a_a070,
+        0x19a4_c116,
+        0x1e37_6c08,
+        0x2748_774c,
+        0x34b0_bcb5,
+        0x391c_0cb3,
+        0x4ed8_aa4a,
+        0x5b9c_ca4f,
+        0x682e_6ff3,
+        0x748f_82ee,
+        0x78a5_636f,
+        0x84c8_7814,
+        0x8cc7_0208,
+        0x90be_fffa,
+        0xa450_6ceb,
+        0xbef9_a3f7,
+        0xc671_78f2,
     ];
-    let mut h: [u32; 8] = [
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
-        0x5be0cd19,
+    let mut hash_state: [u32; 8] = [
+        0x6a09_e667,
+        0xbb67_ae85,
+        0x3c6e_f372,
+        0xa54f_f53a,
+        0x510e_527f,
+        0x9b05_688c,
+        0x1f83_d9ab,
+        0x5be0_cd19,
     ];
     let mut msg = data.to_vec();
     msg.push(0x80);
@@ -41,9 +104,9 @@ fn sha256(data: &[u8]) -> String {
     }
     msg.extend_from_slice(&((data.len() as u64) * 8).to_be_bytes());
     for block in msg.chunks(64) {
-        let mut w = [0u32; 64];
-        for (i, c) in block.chunks(4).enumerate() {
-            w[i] = u32::from_be_bytes([c[0], c[1], c[2], c[3]]);
+        let mut w = [0_u32; 64];
+        for (slot, word) in w.iter_mut().zip(block.as_chunks::<4>().0) {
+            *slot = u32::from_be_bytes(*word);
         }
         for i in 16..64 {
             let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
@@ -53,7 +116,7 @@ fn sha256(data: &[u8]) -> String {
                 .wrapping_add(w[i - 7])
                 .wrapping_add(s1);
         }
-        let mut v = h;
+        let mut v = hash_state;
         for i in 0..64 {
             let s1 = v[4].rotate_right(6) ^ v[4].rotate_right(11) ^ v[4].rotate_right(25);
             let ch = (v[4] & v[5]) ^ (!v[4] & v[6]);
@@ -76,11 +139,15 @@ fn sha256(data: &[u8]) -> String {
                 v[6],
             ];
         }
-        for (a, b) in h.iter_mut().zip(v) {
-            *a = a.wrapping_add(b);
+        for (state_word, working_word) in hash_state.iter_mut().zip(v) {
+            *state_word = state_word.wrapping_add(working_word);
         }
     }
-    h.iter().map(|x| format!("{x:08x}")).collect()
+    let mut digest = String::with_capacity(64);
+    for word in hash_state {
+        write!(digest, "{word:08x}").expect("formatting a digest into a String");
+    }
+    digest
 }
 
 #[test]
@@ -180,10 +247,10 @@ fn hid_descriptor_spec_5_3() {
 #[test]
 fn attributes_spec_4_2() {
     let mut cfg = DeviceConfig::new();
-    let mut lower = [0u8; 32];
+    let mut lower = [0_u8; 32];
     lower[..10].copy_from_slice(&[0x20, 0, 0, 0, 0xac, 0x05, 0x78, 0x02, 0x34, 0x12]);
     assert_eq!(cfg.identify(STATUS_SUCCESS, &lower), Ok(()));
-    let mut buf = [0xEEu8; 32];
+    let mut buf = [0xEE_u8; 32];
     device_attributes(&cfg).write_to(&mut buf).unwrap();
     assert_eq!(
         buf[..10],
@@ -211,7 +278,7 @@ fn table_and_families_spec_8() {
 }
 
 fn packet_with_fingers(n: u8, click: u8, fingers: &[(i16, i16, i16, i16, i16)]) -> Vec<u8> {
-    let mut b = vec![0u8; 1024];
+    let mut b = vec![0_u8; 1024];
     b[1] = click;
     b[30] = n;
     for (i, &(x, y, major, minor, pressure)) in fingers.iter().enumerate() {
@@ -243,10 +310,10 @@ fn contact_flags_and_quirks() {
     let info = lookup_trackpad(APPLE_VENDOR_ID, 0x0278).unwrap();
     // 255 fingers announced: ContactCount raw (SPI-B6), 5 contacts filled with IDs 0..4 (SPI-B7).
     let fingers = [
-        (0, 0, -1, -32768, -5),
+        (0, 0, -1, -0x8000, -5),
         (1, 1, 2499, 2499, 1),
         (2, 2, 2500, 0, 0),
-        (3, 3, 0, 2500, 32767),
+        (3, 3, 0, 2500, 0x7FFF),
         (4, 4, 0, 0, 1),
     ];
     let pkt = packet_with_fingers(255, 0xFF, &fingers);
@@ -266,7 +333,11 @@ fn contact_flags_and_quirks() {
     assert_eq!(u16::from_le_bytes([r[2], r[3]]), 7456);
     assert_eq!(u16::from_le_bytes([r[4], r[5]]), 9283);
     // X far below XMin -> 0; Y above YMax -> 0; 32767 - (-7456) -> 40223 (beyond the logical max).
-    let pkt = packet_with_fingers(2, 0, &[(-32768, 32767, 0, 0, 0), (32767, -32768, 0, 0, 0)]);
+    let pkt = packet_with_fingers(
+        2,
+        0,
+        &[(-0x8000, 0x7FFF, 0, 0, 0), (0x7FFF, -0x8000, 0, 0, 0)],
+    );
     let r = build_report(&SpiPacket::new(&pkt), info, 0).to_bytes();
     assert_eq!(r[2..6], [0, 0, 0, 0]);
     assert_eq!(u16::from_le_bytes([r[7], r[8]]), 40223);
@@ -278,7 +349,7 @@ fn scan_time_is_zero_in_the_shipped_driver() {
     // SPI-B8: every LastReportTime writer stores the QPC frequency, so delta is always 0.
     let rt = DeviceRuntime::new();
     rt.on_d0_entry(10_000_000);
-    let _ = rt.on_self_managed_io_init_or_restart(STATUS_SUCCESS, || 10_000_000);
+    let _status = rt.on_self_managed_io_init_or_restart(STATUS_SUCCESS, || 10_000_000);
     let info = lookup_trackpad(APPLE_VENDOR_ID, 0x0272).unwrap();
     let pkt = packet_with_fingers(1, 1, &[(100, 2000, 800, 600, 30)]);
     for _ in 0..3 {
@@ -307,7 +378,7 @@ fn b9_bytes_past_length_read_as_zero() {
 fn set_state_buffer_spec_6_2() {
     let img = SetStatePacket::image(true, 0x1000);
     assert_eq!(img.len(), 255);
-    assert_eq!(img[..8], 0x1010u64.to_le_bytes());
+    assert_eq!(img[..8], 0x1010_u64.to_le_bytes());
     assert_eq!(img[8..18], [2, 0, 0, 0, 2, 0, 0, 0, 2, 1]);
     assert!(img[18..].iter().all(|&b| b == 0));
 }

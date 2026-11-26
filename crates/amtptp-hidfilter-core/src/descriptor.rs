@@ -34,27 +34,28 @@ const _: () = assert!(
 
 /// The HID descriptor for `IOCTL_HID_GET_DEVICE_DESCRIPTOR`: only product ID 0x0265 has one
 /// (Hid.c:28-36). `None` means `STATUS_NOT_SUPPORTED`. The vendor ID is not checked.
+#[must_use]
 pub fn hid_descriptor_for(product_id: u16) -> Option<&'static [u8]> {
-    if product_id == HID_PID_MAGIC_TRACKPAD_2 {
-        Some(&HID_DESCRIPTOR)
-    } else {
-        None
+    match product_id {
+        HID_PID_MAGIC_TRACKPAD_2 => Some(&HID_DESCRIPTOR),
+        _ => None,
     }
 }
 
 /// The report descriptor for `IOCTL_HID_GET_REPORT_DESCRIPTOR`: only product ID 0x0265 has one
 /// (Hid.c:113-120). `None` means `STATUS_NOT_SUPPORTED`.
+#[must_use]
 pub fn report_descriptor_for(product_id: u16) -> Option<&'static [u8]> {
-    if product_id == HID_PID_MAGIC_TRACKPAD_2 {
-        Some(&REPORT_DESCRIPTOR)
-    } else {
-        None
+    match product_id {
+        HID_PID_MAGIC_TRACKPAD_2 => Some(&REPORT_DESCRIPTOR),
+        _ => None,
     }
 }
 
 /// `IOCTL_HID_GET_DEVICE_ATTRIBUTES` (Hid.c:78-83): the fake vendor ID 0x8910, the **real** product
 /// ID and version 0x0100, for any product ID. Write it with [`HidDeviceAttributes::write_to`], which
 /// leaves `Reserved` untouched like the C code (HF-B22).
+#[must_use]
 pub const fn device_attributes(product_id: u16) -> HidDeviceAttributes {
     HidDeviceAttributes {
         vendor_id: DEVICE_VID,

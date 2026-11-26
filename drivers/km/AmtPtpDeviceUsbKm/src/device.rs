@@ -3,13 +3,13 @@
 //! - `EvtDriverDeviceAdd`: `WdfFdoInitSetFilter`, then `AmtPtpDeviceUsbKmCreateDevice`. The C also calls
 //!   `WdfPdoInitAllowForwardingRequestToParent`, a PDO-only API that KMDF rejects on a filter's
 //!   `DeviceInit` (error trace + verifier break, no other effect); it is not called here (spec B12, P2).
-//! - CreateDevice: PnP/power callbacks PrepareHardware, D0Entry, D0Exit only (nothing else is set: no
+//! - `CreateDevice`: PnP/power callbacks `PrepareHardware`, `D0Entry`, `D0Exit` only (nothing else is set: no
 //!   power policy, file object, I/O type or request attributes, so a filter inherits them from the lower
 //!   device object); `WdfDeviceCreate` with the `DEVICE_CONTEXT`; the context's initial state; the device
 //!   interface; the queues. The first failure is returned (WDF deletes the device).
-//! - PrepareHardware / D0Entry / D0Exit: the core's sequencing over [`UsbIo`].
+//! - `PrepareHardware` / `D0Entry` / `D0Exit`: the core's sequencing over [`UsbIo`].
 //!
-//! Not present, as in C: ReleaseHardware, SelfManagedIo*, SurpriseRemoval, QueryRemove/Stop, power policy
+//! Not present, as in C: `ReleaseHardware`, `SelfManagedIo`*, `SurpriseRemoval`, QueryRemove/Stop, power policy
 //! callbacks, idle/wake settings.
 
 use amtptp_usbkm_core::lifecycle::{self, DEVICE_INTERFACE_GUID};
@@ -35,7 +35,7 @@ static GUID_DEVINTERFACE_AMTPTPDEVICEUSBKM: GUID = GUID {
     Data4: DEVICE_INTERFACE_GUID.data4,
 };
 
-/// `AmtPtpDeviceUsbKmEvtDeviceAdd` (Driver.c:98-143). PASSIVE_LEVEL, `PAGE` as in C.
+/// `AmtPtpDeviceUsbKmEvtDeviceAdd` (Driver.c:98-143). `PASSIVE_LEVEL`, `PAGE` as in C.
 #[unsafe(link_section = "PAGE")]
 pub(crate) unsafe extern "C" fn evt_device_add(
     _driver: WDFDRIVER,
@@ -67,12 +67,12 @@ pub(crate) unsafe extern "C" fn evt_device_add(
     status
 }
 
-/// `AmtPtpDeviceUsbKmCreateDevice` (Device.c:50-128). PASSIVE_LEVEL, `PAGE` as in C.
+/// `AmtPtpDeviceUsbKmCreateDevice` (Device.c:50-128). `PASSIVE_LEVEL`, `PAGE` as in C.
 ///
 /// # Safety
-/// `device_init` is the unconsumed WDFDEVICE_INIT of the current `EvtDriverDeviceAdd`.
+/// `device_init` is the unconsumed `WDFDEVICE_INIT` of the current `EvtDriverDeviceAdd`.
 #[unsafe(link_section = "PAGE")]
-unsafe fn create_device(device_init: PWDFDEVICE_INIT) -> NTSTATUS {
+unsafe fn create_device(mut device_init: PWDFDEVICE_INIT) -> NTSTATUS {
     wdk::paged_code!();
 
     let mut callbacks = pnppower_event_callbacks_init();
@@ -89,7 +89,6 @@ unsafe fn create_device(device_init: PWDFDEVICE_INIT) -> NTSTATUS {
     }
 
     let mut attributes = object_attributes_init_context_type(&DEVICE_CONTEXT_TYPE_INFO);
-    let mut device_init = device_init;
     let mut device: WDFDEVICE = core::ptr::null_mut();
     // SAFETY: WdfDeviceCreate consumes `device_init` (and sets it to NULL); `attributes` carries the
     // DEVICE_CONTEXT type info; `device` is a valid out-pointer.
@@ -150,7 +149,7 @@ unsafe fn create_device(device_init: PWDFDEVICE_INIT) -> NTSTATUS {
     unsafe { queue_initialize(device, context) }
 }
 
-/// `AmtPtpDeviceUsbKmEvtDevicePrepareHardware` (Device.c:130-272). PASSIVE_LEVEL, `PAGE` as in C. The
+/// `AmtPtpDeviceUsbKmEvtDevicePrepareHardware` (Device.c:130-272). `PASSIVE_LEVEL`, `PAGE` as in C. The
 /// resource lists are unused (USB device).
 #[unsafe(link_section = "PAGE")]
 unsafe extern "C" fn evt_device_prepare_hardware(
@@ -180,10 +179,10 @@ unsafe extern "C" fn evt_device_prepare_hardware(
     status
 }
 
-/// `AmtPtpEvtDeviceD0Entry` (Device.c:275-359). PASSIVE_LEVEL, non-paged as in C.
+/// `AmtPtpEvtDeviceD0Entry` (Device.c:275-359). `PASSIVE_LEVEL`, non-paged as in C.
 ///
 /// Wellspring mode on (failure ignored, B11), `LastReportTime` = the QPC out-parameter (B1), start the
-/// interrupt pipe target (its failure fails D0Entry).
+/// interrupt pipe target (its failure fails `D0Entry`).
 unsafe extern "C" fn evt_device_d0_entry(
     device: WDFDEVICE,
     previous_state: WDF_POWER_DEVICE_STATE,
@@ -224,7 +223,7 @@ unsafe extern "C" fn evt_device_d0_entry(
     status
 }
 
-/// `AmtPtpEvtDeviceD0Exit` (Device.c:361-416). PASSIVE_LEVEL, non-paged as in C.
+/// `AmtPtpEvtDeviceD0Exit` (Device.c:361-416). `PASSIVE_LEVEL`, non-paged as in C.
 ///
 /// Stop the interrupt pipe target (cancelling the reader's reads), wellspring mode off, and return the
 /// mode-switch status (spec B10, preserved).
