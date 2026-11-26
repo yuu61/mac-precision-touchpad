@@ -1,0 +1,348 @@
+# Building, packaging and signing the Rust drivers
+
+The four drivers are built by Cargo and packaged by `cargo xtask` (`xtask/`, std only, no external
+dependencies). This replaces `AmtPtpDriver.sln`, the driver `.vcxproj` files and
+`AmtPtpDeviceUniversalPkg.vcxproj`.
+
+## Requirements
+
+- Rust stable with the `x86_64-pc-windows-msvc` and `aarch64-pc-windows-msvc` targets
+  (`rustup target add aarch64-pc-windows-msvc`).
+- Visual Studio Build Tools (MSVC linker, x64 and ARM64).
+- Windows SDK + WDK 10.0.28000 (or newer), including stampinf, Inf2Cat and InfVerif. An
+  installed WDK and an eWDK prompt both work.
+  - Kit root, in this order: `WDK_ROOT`; `WDKContentRoot`; `MicrosoftKitRoot\Windows Kits\
+    <WDKKitVersion, default 10.0>`; the registry value
+    `HKLM\SOFTWARE\Microsoft\Windows Kits\Installed Roots\KitsRoot10` (64-bit, then 32-bit
+    view); `C:\Program Files (x86)\Windows Kits\10`. A `WDKContentRoot` or `MicrosoftKitRoot`
+    that is not an existing directory is skipped with a warning.
+  - Kit version, in this order: `WDK_VERSION`; `Version_Number` (only when `WDK_ROOT` is unset,
+    because it describes the shell's kit); the highest `bin\10.*` that has `stampinf.exe`.
+  - Which variable affects what:
+    - `WDKContentRoot`, `MicrosoftKitRoot`, the registry and `Version_Number` are what
+      wdk-build 0.6.0 uses (`detect_wdk_content_root`, `detect_windows_sdk_version`). They pick
+      the kit for the driver build **and** for the packaging tools, so by default both use the
+      same kit. An eWDK or NuGet shell, which sets `WDKContentRoot` and `Version_Number` and has
+      no KitsRoot10, needs no extra settings.
+    - `WDK_ROOT` / `WDK_VERSION` are xtask-only overrides. They pick stampinf, Inf2Cat,
+      InfVerif and signtool, **not** the kit the binaries are compiled against; wdk-build never
+      reads them.
+    - xtask does not export `WDKContentRoot` / `Version_Number` to the driver builds to make
+      `WDK_ROOT` steer them too. wdk-build emits no `rerun-if-env-changed`, so a changed value
+      would leave stale wdk-sys bindings and link paths in `drivers/<km|um>/target`.
+  - Tool locations in WDK 10.0.28000: stampinf is in `bin\<ver>\x64`, Inf2Cat only in
+    `bin\<ver>\x86`, InfVerif in `Tools\<ver>\x64`, signtool in `bin\<ver>\x64`.
+- LLVM (libclang) for wdk-sys's bindgen. When `LIBCLANG_PATH` is unset and
+  `C:\Program Files\LLVM\bin` exists, xtask sets `LIBCLANG_PATH` to that directory for the driver
+  builds. Set `LIBCLANG_PATH` yourself if LLVM is installed elsewhere. MSYS2 can put an
+  unrelated libclang on PATH.
+
+## Commands
+
+Run these from the repository root. `.cargo/config.toml` defines the `cargo xtask` alias.
+
+```text
+cargo xtask build   [--arch x64|arm64|all] [--release]
+cargo xtask package [--arch x64|arm64|all] [--release] [--inf universal|hidfilter|all]
+                    [--driver-version a.b.c.d] [--sign <signtool sign args...>]
+cargo xtask test
+cargo xtask help
+```
+
+- `--arch`: defaults to the host architecture. `all` means x64 and arm64.
+- `--release`: uses the release profile. The default is the dev profile.
+- `build`: runs `cargo build --target <triple> [--release]` in `drivers/km` (KMDF: UsbKm, SpiKm,
+  HidFilter) and in `drivers/um` (UMDF: UsbUm), with `current_dir` set to each workspace.
+  - The binaries go to `drivers/<km|um>/target/<triple>/<debug|release>/<Name>.dll` and `.pdb`.
+  - The target dir must stay inside each driver workspace, because wdk-build walks up from
+    OUT_DIR to the first `Cargo.lock`. `RUSTFLAGS`-style variables would replace the workspace's
+    `+crt-static` rustflags. So xtask removes `CARGO_TARGET_DIR`, `CARGO_BUILD_TARGET_DIR`,
+    `CARGO_BUILD_TARGET`, `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS` and `CARGO_BUILD_RUSTFLAGS`
+    from the driver builds' environment.
+- `package`: builds first. It only builds the workspaces the selected INFs need, so
+  `--inf hidfilter` builds only `drivers/km`. Then, for each arch and INF:
+  1. It empties `target/package/<arch>/<inf-name>/` and `target/package/<arch>/<inf-name>.symbols/`,
+     so no stale `.cat`, `.inf` or `.pdb` is left. It also removes the shared
+     `target/package/<arch>/symbols/` directory of older xtask versions when it exists.
+  2. It copies the binaries. KMDF `<Name>.dll` becomes `<Name>.sys`, because the INF's
+     `[SourceDisksFiles]` fixes these names; the UMDF `.dll` keeps its name. The PDBs go to the
+     sibling `target/package/<arch>/<inf-name>.symbols/`, outside the package directory, so
+     Inf2Cat does not catalog them. In the packaged `AmtPtpDeviceUsbUm.dll` it clears
+     `IMAGE_DLLCHARACTERISTICS_FORCE_INTEGRITY` (0x80); see
+     [FORCE_INTEGRITY](#force_integrity-on-the-umdf-dll).
+  3. It writes `package/<inf-name>.inx` as `<inf-name>.inf` with CRLF line endings. The `.inx`
+     files are LF in git.
+  4. It runs `stampinf -f <inf> -d * -a amd64|arm64 -c <inf-name>.cat -v <version|*> -k 1.23
+     -u 2.15.0`. The KMDF and UMDF versions are read from `[workspace.metadata.wdk.driver-model]`
+     in `drivers/km/Cargo.toml` and `drivers/um/Cargo.toml`, so the INF always matches the
+     framework the binaries were built against.
+  5. It checks the stamped file: no `$KEYWORD$` left, `DriverVer` and `CatalogFile` set, and every
+     `KmdfLibraryVersion` and `UmdfLibraryVersion` value as requested.
+  6. It runs `InfVerif /u <inf>`. See [InfVerif mode](#infverif-mode) for why `/u`.
+  7. With `--sign`, it signs the binaries.
+  8. It runs `Inf2Cat /driver:<dir> /os:<list> /uselocaltime` and checks that the `.cat` exists.
+     Inf2Cat writes the catalog name in lower case; xtask renames it to the `CatalogFile`
+     spelling.
+     - `/uselocaltime` is needed because `stampinf -d *` writes the local date, while Inf2Cat
+       checks in UTC by default. East of UTC it would otherwise reject a fresh DriverVer as
+       future-dated.
+     - OS list for x64: `10_RS3_X64,10_RS4_X64,10_RS5_X64,ServerRS5_X64,10_19H1_X64,10_VB_X64,
+       ServerFE_X64,10_CO_X64,10_NI_X64,10_GE_X64,Server2025_X64`.
+     - OS list for arm64: `10_RS3_ARM64,10_RS4_ARM64,10_RS5_ARM64,10_19H1_ARM64,10_VB_ARM64,
+       10_CO_ARM64,10_NI_ARM64,10_GE_ARM64`.
+     - For x64 these are every id from 1709 (RS3) on that `Inf2Cat /?` of WDK 10.0.28000
+       accepts. `Server2016_X64` (1607) and the generic `Server10_X64` are below the floor.
+     - ARM64 is client only. Inf2Cat also accepts `ServerRS5_ARM64`, `ServerFE_ARM64` and
+       `Server2025_ARM64`; add them to `Arch::inf2cat_os` in `xtask/src/cli.rs` if ARM64 Server
+       is ever targeted.
+  9. With `--sign`, it signs the `.cat`.
+  - Any failing step stops the run with a message naming the tool, its exit code and the full
+    command line (with signtool's `/p` value redacted). The exit status is non-zero.
+- `--driver-version a.b.c.d`: the DriverVer version, with each part from 0 to 65535. The default
+  is stampinf's `*`, which is the current time `h.m.s.ms`. The DriverVer date is always the
+  current date.
+- `--inf`: `universal` is `package/AmtPtpDevice.inx` with all four drivers. `hidfilter` is
+  `package/AmtPtpHidFilter.inx` with AmtPtpHidFilter only. The default `all` packages both.
+- `test`: runs these steps, all of them, then reports every failure:
+  - `cargo test --workspace` in the host workspace (core crates and xtask);
+  - `cargo clippy --workspace --all-targets -- -D warnings` in the host workspace;
+  - `cargo clippy -- -D warnings` in `drivers/km` and in `drivers/um`.
+
+  Clippy in a driver workspace lints only that workspace's members, not the path dependencies
+  `drivers/wdf-support` and `drivers/rc-embed`. To lint those, run
+  `cargo check --config "build.rustc-wrapper='<toolchain>/bin/clippy-driver.exe'"` in the
+  driver workspace.
+
+### Package layout
+
+```text
+target/package/<x64|arm64>/
+  AmtPtpDevice/              AmtPtpDevice.inf  AmtPtpDevice.cat
+                             AmtPtpDeviceUsbKm.sys  AmtPtpDeviceUsbUm.dll
+                             AmtPtpDeviceSpiKm.sys  AmtPtpHidFilter.sys
+  AmtPtpDevice.symbols/      AmtPtpDeviceUsbKm.pdb  AmtPtpDeviceUsbUm.pdb
+                             AmtPtpDeviceSpiKm.pdb  AmtPtpHidFilter.pdb
+  AmtPtpHidFilter/           AmtPtpHidFilter.inf  AmtPtpHidFilter.cat  AmtPtpHidFilter.sys
+  AmtPtpHidFilter.symbols/   AmtPtpHidFilter.pdb
+```
+
+- Each package directory is flat: the INF, CAT and binaries. That is the input
+  `es/New-CabinetFile.ps1 -ContentDirectory` expects.
+- The directory does not record the profile. A dev-profile `package` overwrites a release one.
+  Use `--release` for anything you distribute.
+- Each package has its own `.symbols` directory, emptied together with the package, so its PDBs
+  always match that package's binaries. Both hold an `AmtPtpHidFilter.pdb` on purpose: both
+  packages ship `AmtPtpHidFilter.sys`, and `--inf universal` / `--inf hidfilter` can rebuild one
+  package without the other. Every link stamps a new PDB GUID, so a single shared PDB would stop
+  matching the package that was not rebuilt.
+- The PDBs keep their cargo names. The debugger matches on the PDB GUID, not on the image name,
+  so `AmtPtpDeviceUsbKm.pdb` serves `AmtPtpDeviceUsbKm.sys`.
+
+### Signing
+
+- The packages are unsigned by default. xtask never creates certificates.
+- `--sign` passes **everything after it** to `signtool sign`, so `--sign` must be the last
+  option. xtask adds `/fd sha256` when the arguments contain no `/fd`. The C build's ARM64 driver
+  projects lacked it; see crosscut C3 and D.
+- It signs the binaries before Inf2Cat and the catalog after it.
+- Run `--sign` from PowerShell or cmd, or from Git Bash with `MSYS2_ARG_CONV_EXCL='*'`.
+  Otherwise MSYS rewrites slash options such as `/f` and `/fd` into drive paths before xtask
+  sees them.
+- Examples:
+  - Production, the old `ReleaseSigned` configuration:
+    `cargo xtask package --arch all --release --sign /sha1 <thumbprint> /tr http://timestamp.digicert.com /td sha256`.
+    Microsoft must attestation-sign or WHQL-sign a package for Windows 10 1607+ with Secure Boot.
+    An EV signature from `--sign` is the input to that submission, not a replacement for it.
+  - Test signing, the old Debug/Release `TestSign`, with a certificate you created yourself and
+    imported into the certificate store:
+    `cargo xtask package --release --sign /sha1 <thumbprint>`.
+- Passwords: prefer `/sha1 <thumbprint>` with a store certificate over `/f <pfx> /p <password>`.
+  xtask prints every command it runs and repeats it in error messages. For signtool it shows the
+  argument after `/p` or `-p` (exact match, case-insensitive; `/ph`, `/p7`, `/p7co`, `/p7ce` are
+  not secrets) as `<redacted>`. That only covers xtask's own output: with `/p` the password is
+  still on the command lines of the cargo, xtask and signtool processes and in shell history.
+  The MSBuild DriverSign flow took the certificate from a project property and passed no
+  password.
+
+### FORCE_INTEGRITY on the UMDF DLL
+
+- wdk-build 0.6.0 (`lib.rs:1303-1305`) links **every** driver, UMDF included, with
+  `/INTEGRITYCHECK`, which sets `IMAGE_DLLCHARACTERISTICS_FORCE_INTEGRITY` (0x80). The raw cargo
+  output has DllCharacteristics 0x1E0.
+- The C binaries never had it. The shipped C package (DriverVer 06/02/2021, 2021.3979.1.1000)
+  has DllCharacteristics 0x4160 on AmtPtpDeviceUsbUm.dll, UsbKm.sys, SpiKm.sys and
+  HidFilter.sys. The vcxprojs pass no `/INTEGRITYCHECK`, and it is off by default.
+- With the flag, the memory manager refuses to map an image that has no signature valid for
+  code integrity. This applies in user mode too: an unsigned `/INTEGRITYCHECK` DLL fails
+  `LoadLibraryW` with 577 (`ERROR_INVALID_IMAGE_HASH`), and the same DLL without the flag loads.
+  - An unsigned package's UsbUm DLL could not load in WUDFHost, even with testsigning on,
+    because there is no signature at all. The C one loads, because UMDF requires no signature.
+  - A test-signed one is expected to fail on a machine without testsigning. This was not tested.
+    With testsigning on, it most likely loads.
+  - Devices bound only to UsbUm (Wellspring `MI_01`, MT2 USB `0265&MI_01` and `0272&MI_02`)
+    would fail to start. That breaks P1.
+- link.exe cannot undo the flag. `/INTEGRITYCHECK:NO` is not a link.exe option (LNK4056, "extra
+  argument ... ignored") and still sets 0x80, and a build script cannot remove an argument
+  wdk-build already emitted.
+- So in step 2, xtask clears bit 0x80 of DllCharacteristics (optional header + 70) in the
+  **packaged copy** of `AmtPtpDeviceUsbUm.dll`, before signtool and Inf2Cat hash it. It checks
+  for `MZ`, `PE\0\0`, PE32+ and a zero PE CheckSum first; the UMDF link sets no checksum, so
+  nothing else changes. The packaged DLL then has 0x160: like the C DLL, no 0x80.
+- The raw `cargo xtask build` output in `drivers/um/target` still carries the flag. Install the
+  UMDF driver only from `target/package`.
+- The KM `.sys` files keep FORCE_INTEGRITY. Signatures are enforced for kernel drivers on x64
+  and ARM64 anyway, and their PE checksum is non-zero, so patching them would also need a
+  checksum recompute. Whether the flag changes anything for a
+  production attestation-signed package was not checked; Microsoft signs those binaries.
+
+## Framework versions and OS floor
+
+- **KMDF 1.23** for all three kernel-mode drivers, in one workspace. The C projects only pinned
+  1.23 for SpiKm; UsbKm and HidFilter used the WDK default (crosscut C1).
+  - The INF has one `$KMDFVERSION$` per wdfsect, so the package needs a single KMDF version that
+    satisfies every KM binary.
+  - KMDF 1.23 is the Windows 10 1709 (build 16299) framework. SpiKm's C project already pinned it,
+    and it was verified to bind and link on x64 and ARM64 with wdk-sys 0.5.2 before the port was
+    pinned to it. A KMDF 1.23 driver loads on 1709 and every later release, so 1709 is the floor.
+  - stampinf `-k 1.23` writes `KmdfLibraryVersion = 1.23`.
+- **UMDF 2.15** for AmtPtpDeviceUsbUm, unchanged from the C INF's hard-coded
+  `UmdfLibraryVersion=2.15.0`, which is now `$UMDFVERSION$` stamped by `-u 2.15.0`.
+- **OS floor: Windows 10 1709 (10.0.16299)** for the package as a whole, for both x64 and ARM64.
+  - The UMDF driver needs **Windows 10 1803 (10.0.17134)** because of run-from-driver-store. See
+    INF change 3.
+  - Windows 11 is covered: it is 10.0.22000+ and matches the same decorations.
+- 32-bit x86 is not built. It was removed from the C build in 8e0cc7c.
+
+## INF changes
+
+- `package/AmtPtpDevice.inx` is `src/AmtPtpDeviceUniversalPkg/AmtPtpDevice.inf` and
+  `package/AmtPtpHidFilter.inx` is `src/AmtPtpHidFilter/AmtPtpHidFilter.inf`, with only the
+  changes below. Line endings are LF, per `.gitattributes`.
+- **Unchanged (P1):**
+  - every hardware ID, including the duplicate USB `0273/0274/0290/0291&MI_02` bindings to both
+    UsbKm and UsbUm and SPI `0280`, which has no device-table entry;
+  - every install, service, `.Wdf`, AddReg and filter section;
+  - every service name and flag;
+  - every string;
+  - the two-INF split, in which the universal and HidFilter INFs claim the MT2 USB device in
+    conflicting ways (crosscut C2).
+- `src/AmtPtpDeviceUniversalPkg/AmtPtpDevice.inf` and the models body of the `...17134` section
+  were diffed mechanically. They are byte-identical apart from line endings.
+
+| # | INF | Change | Why |
+|---|---|---|---|
+| 1 | both | `DriverVer` is left empty in the `.inx` and stamped by stampinf (`-d * -v <ver or *>`) | Required. It was stamped by the MSBuild StampInf task before. HidFilter's original `DriverVer= ; TODO: set DriverVer in stampinf property pages` line is kept verbatim; stampinf replaces the whole line. |
+| 2 | universal | `UmdfLibraryVersion=2.15.0` becomes `UmdfLibraryVersion=$UMDFVERSION$` | Required. stampinf `-u 2.15.0` writes the same value back, so the stamped INF is unchanged here. The value now comes from `drivers/um/Cargo.toml`. `$KMDFVERSION$` (three wdfsects in universal, one in HidFilter) was already a keyword and is stamped `-k 1.23`. |
+| 3 | universal | `[Manufacturer] %ManufacturerName%=Standard,NT$ARCH$` becomes `Standard,NT$ARCH$.10.0...16299,NT$ARCH$.10.0...17134`, with two models sections. `[Standard.NT$ARCH$.10.0...17134]` is the original `[Standard.NT$ARCH$]` body, byte-identical and in the same order. `[Standard.NT$ARCH$.10.0...16299]` is the same body minus the 27 `AmtPtpDeviceUsbUm_Install` lines. | InfVerif `/u` errors, see the text below. Without a decoration: `ERROR(1199) ... The syntax 'DIRID 13 (CopyFiles)' was introduced in OS version 10.0.16299, but DDInstall sections utilizing the syntax will install on earlier OS versions. Those DDInstall sections should be restricted to only install on 10.0.16299 or higher using a TargetOSVersion decoration.` With only `...16299`, this error remains: `ERROR(1199) ... The syntax 'DIRID 13 (UMDF)' was introduced in OS version 10.0.17134, but DDInstall sections utilizing the syntax will install on earlier OS versions. Those DDInstall sections should be restricted to only install on 10.0.17134 or higher using a TargetOSVersion decoration.` |
+| 4 | HidFilter | `NT$ARCH$.10.0` becomes `NT$ARCH$.10.0...16299` in `[Manufacturer]` and in the models section name | InfVerif `/u` on the stamped original (`NTamd64.10.0`): `ERROR(1199) ... The syntax 'DIRID 13 (CopyFiles)' was introduced in OS version 10.0.16299, but DDInstall sections utilizing the syntax will install on earlier OS versions. ...`, exit code 1627. KMDF 1.23 already requires 1709. |
+| 5 | universal | Comment lines (`;`) at `[Manufacturer]` and in the `...16299` section explain the split | Documentation only. INF comments have no install semantics. |
+
+### Why change 3 has two decorations and not one
+
+- Windows picks the single models section with the highest decoration that is less than or equal
+  to the running build.
+- On **10.0.17134+ (1803+)** the `...17134` section applies. It holds the complete original
+  binding list, so install semantics there are exactly those of the C INF, including the duplicate
+  IDs and their order: UsbKm lines first, then UsbUm.
+- On **10.0.16299 to 17133 (1709 only)** the `...16299` section applies.
+  - It has no UsbUm entries. Wellspring `MI_01`, MT2 USB `0265&MI_01` and USB `0272&MI_02` are
+    not matched there.
+  - The duplicate IDs `0273/0274/0290/0291&MI_02` bind only to UsbKm.
+  - This is not a regression. Microsoft Learn says: "The UMDF platform will fail to load the main
+    UMDF driver binaries from any location other than the %SystemRoot%\System32\Drivers\Umdf
+    directory or, in Windows 10 1803 and later, a run from Driver Store location" ("Restricting
+    the loading location of UMDF drivers").
+  - The C INF installs UsbUm with `ServiceBinary=%13%\AmtPtpDeviceUsbUm.dll`, so on 1709 its UsbUm
+    install could not load either.
+- **Rejected alternative: a single `...17134` decoration.** It also passes InfVerif, but it would
+  raise the floor of the three KMDF drivers (T2 USB, SPI, MT2 Bluetooth) from 1709 to 1803 for
+  no technical reason.
+- **Rejected alternative: moving UMDF to `12,UMDF`.** It would change the install location (P1).
+
+### InfVerif mode
+
+- xtask runs **`InfVerif /u` (Universal)**.
+- The C projects all had `DriverTargetPlatform Universal`, which is what the MSBuild InfVerif
+  step used.
+- `/w` (Windows Driver, DCH) and `/h` (WHQL) would require an install-semantics change. Under
+  those modes, InfVerif reports six `2084` errors: five in universal (`mshidkmdf` from the
+  HidFilter, UsbKm and SpiKm `.Services` sections, plus `WUDFRd` and `mshidumdf` from UsbUm's)
+  and one in HidFilter (`mshidkmdf`):
+
+  ```text
+  ERROR(2084) ... line N: Service binary 'C:\WINDOWS\System32\Drivers\mshidkmdf.sys' should reference a CopyFiles destination file.
+  ERROR(2084) ... Service binary 'C:\WINDOWS\System32\drivers\WUDFRd.sys' ...
+  ERROR(2084) ... Service binary 'C:\WINDOWS\System32\drivers\mshidumdf.sys' ...
+  ```
+
+  They come from the INF's own service-install sections for the inbox `mshidkmdf`, `mshidumdf`
+  and `WUDFRd` services. Clearing them means replacing those sections with `Include`/`Needs` of
+  the inbox INFs, or dropping them, which changes how the function driver and the reflector are
+  installed. P1 forbids that.
+- Under `/u` the same findings are `WARNING(2084)`. They are accepted, as they were for the C
+  package. With changes 1 to 4, `/u` reports no errors for either INF.
+- Moving to `/w` (DCH) would be a separate, deliberate change.
+
+## The old MSBuild / Azure DevOps pipeline no longer applies
+
+- The C drivers were built by `AmtPtpDriver.sln` and the `.vcxproj` files, with MSBuild's
+  StampInf, Inf2Cat and DriverSign tasks.
+- Release builds came from an external Azure DevOps pipeline, the README build badge
+  (`ligstd.visualstudio.com`, definitionId=22). It hooked into the vcxprojs through
+  `$(BuildEnvironment)=='AzurePipeline'` and `$(PipelineReleaseID)`, the latter giving the
+  `2021.<id>.1.1000` DriverVer.
+- That pipeline cannot build the Rust drivers, and its badge no longer reflects this code. The
+  repository has no in-repo build CI; `.github/workflows/github-issue-sync.yml` only syncs issues.
+- The replacement is `cargo xtask package`.
+  - `ReleaseSigned` becomes `--release --sign ...`.
+  - The pipeline DriverVer becomes `--driver-version a.b.c.d`.
+  - Debug/Release `TestSign` becomes `--sign` with a test certificate.
+- The "For developers" section of README.md (KMDF 1.23/1.15, UMDF 2.15, "DDK 2004",
+  `ReleaseSigned`) and the badge are updated in the integration phase, not here.
+
+## Verification record
+
+Done on 2026-11-26 with WDK 10.0.28000, Rust 1.100, and the stub drivers from the scaffolding
+phase:
+
+- `cargo xtask package --arch x64 --release` and `--arch arm64 --release`, each packaging both
+  INFs, exited 0. A final `--arch all --release` run also exited 0. For all four packages:
+  - stampinf stamped `DriverVer=<date>,<h.m.s.ms>`, `CatalogFile`, `NTamd64` / `NTarm64`,
+    `KmdfLibraryVersion = 1.23` and `UmdfLibraryVersion=2.15.0`.
+  - `InfVerif /u` reported no errors. The only findings were the `WARNING(2084)` lines above: five
+    for AmtPtpDevice.inf (target OS `NT<arch>.10.0...17134`) and one for AmtPtpHidFilter.inf.
+  - Inf2Cat reported `Signability test complete. Errors: None Warnings: None` and `Catalog
+    generation complete.`
+- `--driver-version 19.0.0.200` stamps `DriverVer = <date>,19.0.0.200`.
+- `cargo xtask build --arch all --release` built all four workspace/arch combinations, exited 0,
+  and printed the output directories.
+- Inf2Cat exits with -2 when a file listed in the INF is missing, and xtask stops on any non-zero
+  exit. InfVerif exits with 1627 when it reports errors.
+- Diffing the stamped arm64 `AmtPtpDevice.inf` against the C INF shows only the changes in the
+  table above, with `$ARCH$` replaced by `arm64`, plus the comment lines.
+- PE headers: `.sys` files are machine 0x8664 or 0xAA64 with subsystem 1 (Native). The
+  `AmtPtpDeviceUsbUm.dll` files are 0x8664 or 0xAA64 with subsystem 2 (Windows GUI DLL).
+- `cargo xtask test`: host `cargo test --workspace` and the three clippy runs (`-D warnings`)
+  passed.
+- Packages are unsigned. Nothing was signed, test-signed, installed or loaded.
+
+Review fixes, 2026-11-26 (FORCE_INTEGRITY, per-package symbols, `/p` redaction, eWDK discovery):
+
+- `cargo test -p xtask` (21 tests, including the PE patch, `/p` redaction and discovery-order
+  tests) and `cargo clippy -p xtask --all-targets -- -D warnings` passed.
+- `cargo xtask package --arch x64 --release --inf all` exited 0; Inf2Cat reported no errors or
+  warnings for either package. `llvm-readobj --file-headers`:
+  - packaged `AmtPtpDeviceUsbUm.dll`: DllCharacteristics 0x160, CheckSum 0;
+  - `drivers/um/target/x86_64-pc-windows-msvc/release/AmtPtpDeviceUsbUm.dll`: still 0x1E0;
+  - packaged `.sys` files: unchanged, 0x1E0 with non-zero checksums.
+- `cargo xtask package --arch arm64 --release --inf all`, run with only the eWDK variables
+  `WDKContentRoot` and `Version_Number` set (pointing at the installed kit; no real eWDK was
+  available), exited 0 and used that root: the printed root kept the variable's trailing `\`.
+  The packaged ARM64 `AmtPtpDeviceUsbUm.dll` has 0x160.
+- Both runs removed the old shared `symbols/` directory and wrote `AmtPtpDevice.symbols/`, with
+  four PDBs, and `AmtPtpHidFilter.symbols/`, with one.
+- `Version_Number=10.0.99999.0` fails before the build with "Version_Number=..., but ... has no
+  stampinf.exe". A missing `WDKContentRoot` is skipped with a warning, and one without `bin\` is
+  an error.
+- The redaction was checked by unit test only. No `--sign` run was made, because no certificate
+  exists and none is created.

@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  WPR profile for the AmtPtp drivers. All four drivers log with TraceLogging
+  (self-describing ETW events, no TMF files needed):
+    AmtPtpDeviceTraceProvider       871B1E2D-CC5A-4ADE-B74E-6CF1004EF149  AmtPtpDeviceUsbUm.dll
+    AmtPtpDeviceUsbKmTraceProvider  B409CF52-F41A-4193-98C2-BAD95204203B  AmtPtpDeviceUsbKm.sys
+    AmtPtpDeviceSpiKmTraceProvider  9B319D80-FE25-41E4-80EF-7D8528F7F1B5  AmtPtpDeviceSpiKm.sys
+    AmtPtpHidFilterTraceProvider    EEB34803-F3EC-4BB1-97CE-B42405D7F3C2  AmtPtpHidFilter.sys
+  Usage: wpr -start drivers\AmtPtpDevice.wprp -filemode ... wpr -stop trace.etl
+-->
+<WindowsPerformanceRecorder Version="1.0" Author="AmtPtpDevice Authors" Copyright="AmtPtpDevice Authors" Company="AmtPtpDevice Authors">
+  <Profiles>
+    <EventCollector Id="EventCollector_AmtPtpDeviceTraceProvider" Name="AmtPtpDeviceTraceProvider">
+      <BufferSize Value="64" />
+      <Buffers Value="4" />
+    </EventCollector>
+    <EventProvider Id="EventProvider_AmtPtpDeviceTraceProvider" Name="871B1E2D-CC5A-4ADE-B74E-6CF1004EF149" />
+    <EventProvider Id="EventProvider_AmtPtpDeviceUsbKmTraceProvider" Name="B409CF52-F41A-4193-98C2-BAD95204203B" />
+    <EventProvider Id="EventProvider_AmtPtpDeviceSpiKmTraceProvider" Name="9B319D80-FE25-41E4-80EF-7D8528F7F1B5" />
+    <EventProvider Id="EventProvider_AmtPtpHidFilterTraceProvider" Name="EEB34803-F3EC-4BB1-97CE-B42405D7F3C2" />
+    <Profile Id="AmtPtpDeviceTraceProvider.Verbose.File" Name="AmtPtpDeviceTraceProvider"
+             Description="AmtPtpDeviceTraceProvider" LoggingMode="File" DetailLevel="Verbose">
+      <Collectors>
+        <EventCollectorId Value="EventCollector_AmtPtpDeviceTraceProvider">
+          <EventProviders>
+            <EventProviderId Value="EventProvider_AmtPtpDeviceTraceProvider" />
+            <EventProviderId Value="EventProvider_AmtPtpDeviceUsbKmTraceProvider" />
+            <EventProviderId Value="EventProvider_AmtPtpDeviceSpiKmTraceProvider" />
+            <EventProviderId Value="EventProvider_AmtPtpHidFilterTraceProvider" />
+          </EventProviders>
+        </EventCollectorId>
+      </Collectors>
+    </Profile>
+    <Profile Id="AmtPtpDeviceTraceProvider.Light.File" Name="AmtPtpDeviceTraceProvider"
+             Description="AmtPtpDeviceTraceProvider" Base="AmtPtpDeviceTraceProvider.Verbose.File"
+             LoggingMode="File" DetailLevel="Light" />
+    <Profile Id="AmtPtpDeviceTraceProvider.Verbose.Memory" Name="AmtPtpDeviceTraceProvider"
+             Description="AmtPtpDeviceTraceProvider" Base="AmtPtpDeviceTraceProvider.Verbose.File"
+             LoggingMode="Memory" DetailLevel="Verbose" />
+    <Profile Id="AmtPtpDeviceTraceProvider.Light.Memory" Name="AmtPtpDeviceTraceProvider"
+             Description="AmtPtpDeviceTraceProvider" Base="AmtPtpDeviceTraceProvider.Verbose.File"
+             LoggingMode="Memory" DetailLevel="Light" />
+  </Profiles>
+</WindowsPerformanceRecorder>
