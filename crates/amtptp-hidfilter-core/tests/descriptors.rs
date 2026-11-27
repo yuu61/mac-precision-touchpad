@@ -6,7 +6,6 @@
 mod common;
 
 use amtptp_hidfilter_core as core_;
-use amtptp_hidfilter_core::detour;
 use common::*;
 use ptp_hid::feature::{
     DEVICE_CAPS_REPORT_LEN, HQA_BLOB, HQA_REPORT_LEN, INPUT_MODE_REPORT_LEN, SELECTIVE_REPORT_LEN,
@@ -98,31 +97,37 @@ fn port_value(key: &str) -> Option<i128> {
         "off_PTP_CONTACT_ContactID" => find(contact, &[0xBB, 0xAA, 0x99, 0x88])?,
         "off_PTP_CONTACT_X" => find(contact, &[0xDD, 0xCC])?,
         "off_PTP_CONTACT_Y" => find(contact, &[0xF0, 0xEE])?,
-        "off_DRIVER_EXTENSION_EXT_IoClientExtension" => {
-            detour::DRIVER_EXTENSION_IO_CLIENT_EXTENSION_OFFSET as i128
-        }
-        "off_IO_CLIENT_EXTENSION_ClientIdentificationAddress" => {
-            detour::IO_CLIENT_EXTENSION_CLIENT_ID_OFFSET as i128
-        }
-        "off_HIDCLASS_DRIVER_EXTENSION_MajorFunction" => {
-            detour::HIDCLASS_EXTENSION_MAJOR_FUNCTION_OFFSET as i128
-        }
-        "sizeof_HIDCLASS_DRIVER_EXTENSION" => detour::HIDCLASS_DRIVER_EXTENSION_LEN as i128,
         "sizeof_TRACKPAD_FINGER_TYPE5" => core_::FINGER_RECORD_LEN as i128,
         "sizeof_PTP_DEVICE_CAPS_FEATURE_REPORT" => DEVICE_CAPS_REPORT_LEN as i128,
         "sizeof_PTP_DEVICE_HQA_CERTIFICATION_REPORT" => HQA_REPORT_LEN as i128,
         "sizeof_PTP_DEVICE_INPUT_MODE_REPORT" => INPUT_MODE_REPORT_LEN as i128,
         "sizeof_PTP_DEVICE_SELECTIVE_REPORT_MODE_REPORT" => SELECTIVE_REPORT_LEN as i128,
-        "IRP_MJ_INTERNAL_DEVICE_CONTROL" => detour::IRP_MJ_INTERNAL_DEVICE_CONTROL as i128,
-        "IRP_MJ_MAXIMUM_FUNCTION" => detour::IRP_MJ_MAXIMUM_FUNCTION as i128,
         _ => return None,
     };
     Some(v)
 }
 
-/// Keys that describe private C layout (the Rust context layout is free, spec 3.1) or
-/// `HIDCLASS_DRIVER_EXTENSION` members the port never touches.
+/// Keys that describe private C layout (the Rust context layout is free, spec 3.1), or the undocumented
+/// structures of the HIDCLASS detour, which the port removed (the data source replaces it).
 fn is_unmirrored(key: &str) -> bool {
+    is_removed_detour_layout(key) || is_private_layout(key)
+}
+
+/// The detour's layout: `DRIVER_EXTENSION`, `IO_CLIENT_EXTENSION`, `HIDCLASS_DRIVER_EXTENSION` and
+/// the major-function indexes it patched.
+fn is_removed_detour_layout(key: &str) -> bool {
+    key.starts_with("off_HIDCLASS_DRIVER_EXTENSION_")
+        || matches!(
+            key,
+            "off_DRIVER_EXTENSION_EXT_IoClientExtension"
+                | "off_IO_CLIENT_EXTENSION_ClientIdentificationAddress"
+                | "sizeof_HIDCLASS_DRIVER_EXTENSION"
+                | "IRP_MJ_INTERNAL_DEVICE_CONTROL"
+                | "IRP_MJ_MAXIMUM_FUNCTION"
+        )
+}
+
+fn is_private_layout(key: &str) -> bool {
     key.starts_with("off_DEVICE_CONTEXT_")
         || key.starts_with("off_WORKER_REQUEST_CONTEXT_")
         || key.starts_with("off_QUEUE_CONTEXT_")
@@ -132,11 +137,6 @@ fn is_unmirrored(key: &str) -> bool {
                 | "sizeof_WORKER_REQUEST_CONTEXT"
                 | "sizeof_QUEUE_CONTEXT"
                 | "sizeof_BCM5974_PARAM"
-                | "off_HIDCLASS_DRIVER_EXTENSION_AddDevice"
-                | "off_HIDCLASS_DRIVER_EXTENSION_DriverUnload"
-                | "off_HIDCLASS_DRIVER_EXTENSION_ReferenceCount"
-                | "off_HIDCLASS_DRIVER_EXTENSION_ListEntry"
-                | "off_HIDCLASS_DRIVER_EXTENSION_DevicesArePolled"
         )
 }
 
@@ -179,11 +179,12 @@ fn replay_descriptors() {
             }
         }
     }
-    // 22 DEVICE_CONTEXT offsets + 2 + 2 context offsets + 4 private sizes + 5 HIDCLASS members.
-    assert_eq!(unmirrored, 35, "keys not mirrored (private C layout)");
+    // Private C layout: 22 DEVICE_CONTEXT offsets + 2 + 2 context offsets + 4 private sizes + 5
+    // HIDCLASS members. The removed detour: 4 offsets and sizes + 2 major-function indexes.
+    assert_eq!(unmirrored, 35 + 6, "keys not mirrored (private C layout, removed detour)");
     assert_eq!(
         checked,
-        28 + 27,
+        28 + 27 - 6,
         "keys checked against the port (facts + layout)"
     );
     let total = tally.assert(&[

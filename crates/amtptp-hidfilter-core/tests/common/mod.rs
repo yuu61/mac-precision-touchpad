@@ -9,7 +9,7 @@ use core::fmt::Write as _;
 use std::collections::VecDeque;
 
 use amtptp_hidfilter_core::{
-    AddDeviceIo, Bcm5974Param, DetourIo, DeviceSnapshot, FailedAction, FilterIo, NtStatus,
+    AddDeviceIo, Bcm5974Param, DeviceSnapshot, FailedAction, FilterIo, NtStatus,
     ReadTicket, ReadTracker, XferBuffer, XferPacket, XferPacketMut,
 };
 
@@ -112,6 +112,8 @@ pub fn status(s: &str) -> NtStatus {
 /// Parses an `st_in` / `st_out` value (README 2.1).
 pub fn parse_state(text: &str) -> DeviceSnapshot {
     let mut state = DeviceSnapshot::default();
+    // C's `IsHidIoDetourCompleted` and `HidIoTarget != NULL` together are the port's open data source.
+    let (mut detour, mut target) = (false, false);
     for pair in text.split(',') {
         let (key, value) = pair
             .split_once(':')
@@ -134,8 +136,8 @@ pub fn parse_state(text: &str) -> DeviceSnapshot {
             "x" => state.x = axis(value),
             "y" => state.y = axis(value),
             "cfg" => state.device_configured = value == "1",
-            "detour" => state.detour_completed = value == "1",
-            "target" => state.io_target_set = value == "1",
+            "detour" => detour = value == "1",
+            "target" => target = value == "1",
             "inp_on" => state.ptp_input_on = value == "1",
             "touch" => state.ptp_report_touch = value == "1",
             "btn" => state.ptp_report_button = value == "1",
@@ -143,6 +145,7 @@ pub fn parse_state(text: &str) -> DeviceSnapshot {
             _ => panic!("unknown state key {key}"),
         }
     }
+    state.source_open = detour && target;
     state
 }
 
@@ -195,8 +198,7 @@ pub fn started(vid: u16, hdr: usize) -> DeviceSnapshot {
             max: 2586,
         },
         device_configured: true,
-        detour_completed: true,
-        io_target_set: true,
+        source_open: true,
         // Both selective-reporting switches on: what the C input path behaved like (it ignored them).
         ptp_report_touch: true,
         ptp_report_button: true,
@@ -259,7 +261,8 @@ impl Upper {
 #[derive(Debug, Default, Clone)]
 pub struct Faults {
     pub forward: Option<NtStatus>,
-    pub string_send: Option<NtStatus>,
+    /// `copy_string`'s result: `Ok(bytes)` or the failure status (default: no strings yet).
+    pub string: Option<Result<usize, NtStatus>>,
     pub lower_create: Option<NtStatus>,
     pub lookaside: Option<NtStatus>,
     pub lower_format: Option<NtStatus>,
@@ -270,42 +273,9 @@ pub struct Faults {
     pub irp_null: bool,
     pub cfg_send_false: Option<NtStatus>,
     pub cfg_send_true_status: Option<NtStatus>,
-    pub attributes: Option<NtStatus>,
     /// `AddDevice`: (event name of the failing create, status).
     pub add: Option<(&'static str, NtStatus)>,
     pub wdm_null: bool,
-}
-
-/// The fake WDM world for the detour (README 1).
-#[derive(Debug, Clone)]
-pub struct World {
-    pub own_valid: bool,
-    pub lower: bool,
-    pub lower_driver: bool,
-    pub driver_extension: bool,
-    pub client_extension: bool,
-    pub client_id: Vec<u8>,
-    pub patched: bool,
-    pub refs: i64,
-    pub id_reads: usize,
-}
-
-impl Default for World {
-    fn default() -> Self {
-        let mut client_id = b"HIDCLASS".to_vec();
-        client_id.resize(16, 0);
-        Self {
-            own_valid: true,
-            lower: true,
-            lower_driver: true,
-            driver_extension: true,
-            client_extension: true,
-            client_id,
-            patched: false,
-            refs: 0,
-            id_reads: 0,
-        }
-    }
 }
 
 /// One recorded mode-switch send.
@@ -331,11 +301,9 @@ pub struct Mock {
     pub faults: Faults,
     pub freq: i64,
     pub counter: i64,
-    pub attr: (u16, u16, u16),
     pub lower_buf: Vec<u8>,
     pub lower_reads_pending: i64,
     pub sends: Vec<Send>,
-    pub world: World,
     /// The lower-read tracker (not in the C oracle, so its calls are not recorded in `ev`).
     pub tracker: ReadTracker<usize>,
     /// `WdfTimerStop` calls (not in the C oracle).
@@ -524,31 +492,13 @@ impl FilterIo for Mock {
         self.read_queue.len()
     }
 
-    fn format_using_current_type(&mut self, request: usize) {
-        self.rec(format!(
-            "WdfRequestFormatRequestUsingCurrentType(req={})",
-            Self::up(request)
-        ));
-    }
-
-    fn send_and_forget(&mut self, request: usize) -> bool {
-        let ok = self.faults.string_send.is_none();
-        self.rec(format!(
-            "WdfRequestSend(req={},target=target,opts=0x8,timeout=0)={}",
-            Self::up(request),
-            if ok { "TRUE" } else { "FALSE" }
-        ));
-        ok
-    }
-
-    fn request_status(&mut self, request: usize) -> NtStatus {
-        let s = self.faults.string_send.unwrap_or(0);
-        self.rec(format!(
-            "WdfRequestGetStatus(req={})={}",
-            Self::up(request),
-            st(s)
-        ));
-        s
+    fn copy_string(&mut self, request: usize) -> Result<usize, NtStatus> {
+        let result = self
+            .faults
+            .string
+            .unwrap_or(Err(amtptp_hidfilter_core::STATUS_INVALID_DEVICE_STATE));
+        self.rec(format!("CopyString(req={})", Self::up(request)));
+        result
     }
 
     fn create_lower_read(&mut self) -> Result<usize, NtStatus> {
@@ -643,20 +593,6 @@ impl FilterIo for Mock {
         self.freq
     }
 
-    fn query_device_attributes(&mut self, output: &mut [u8; 32]) -> NtStatus {
-        assert_eq!(*output, [0_u8; 32], "attributes buffer must arrive zeroed");
-        let s = self.faults.attributes.unwrap_or(0);
-        self.rec(format!("WdfIoTargetSendInternalIoctlSynchronously(target=target,req=null,ioctl=0x000b0027,in=null,out=buffer,out_len=32,opts=null,bytes_ret=null)={}", st(s)));
-        if s == 0 {
-            let (v, p, n) = self.attr;
-            output[..4].copy_from_slice(&32_u32.to_le_bytes());
-            output[4..6].copy_from_slice(&v.to_le_bytes());
-            output[6..8].copy_from_slice(&p.to_le_bytes());
-            output[8..10].copy_from_slice(&n.to_le_bytes());
-        }
-        s
-    }
-
     fn create_mode_switch_request(&mut self) -> Result<(), NtStatus> {
         let s = self.faults.cfg_create.unwrap_or(0);
         self.rec(format!(
@@ -737,54 +673,6 @@ impl FilterIo for Mock {
 
     fn delete_mode_switch_request(&mut self, _r: ()) {
         self.rec("WdfObjectDelete(obj=cfg_req)".into());
-    }
-}
-
-impl DetourIo for Mock {
-    type LowerDevice = ();
-    type DriverObject = ();
-    type DriverExtension = ();
-    type ClientExtension = ();
-
-    fn own_device_object_valid(&mut self) -> bool {
-        self.world.own_valid
-    }
-
-    fn get_lower_device_object(&mut self) -> Option<()> {
-        self.rec("IoGetLowerDeviceObject(dev=self)".into());
-        self.world.lower.then(|| {
-            self.world.refs += 1;
-        })
-    }
-
-    fn lower_driver_object(&mut self, _l: ()) -> Option<()> {
-        self.world.lower_driver.then_some(())
-    }
-
-    fn driver_extension(&mut self, _d: ()) -> Option<()> {
-        self.world.driver_extension.then_some(())
-    }
-
-    fn io_client_extension(&mut self, _e: ()) -> Option<()> {
-        self.world.client_extension.then_some(())
-    }
-
-    fn client_id_byte(&mut self, _c: (), index: usize) -> u8 {
-        self.world.id_reads += 1;
-        self.world.client_id[index]
-    }
-
-    fn patch_internal_device_control(&mut self, _d: (), _c: ()) {
-        self.world.patched = true;
-    }
-
-    fn acquire_default_io_target(&mut self) {
-        self.rec("WdfDeviceGetIoTarget(dev=device)".into());
-    }
-
-    fn dereference_lower_device(&mut self, _l: ()) {
-        self.world.refs -= 1;
-        self.rec("ObfDereferenceObject(obj=lower_do)".into());
     }
 }
 

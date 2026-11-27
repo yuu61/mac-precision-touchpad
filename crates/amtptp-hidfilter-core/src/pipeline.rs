@@ -32,10 +32,10 @@ use crate::status::{NtStatus, nt_success};
 ///   every slot is taken. Delete memory and request; the upper read stays parked.
 /// - `WdfRequestSend` returns FALSE: `DeviceConfigured = FALSE`, timer 3 s, delete memory and request.
 ///
-/// P2 (HF-B25): without an I/O target (detour not applied) C would format against a NULL handle and
-/// bugcheck; the port issues nothing. That state is unreachable in practice.
+/// Without an open data source nothing is issued (C, before the detour, would have formatted the read
+/// against a NULL handle, HF-B25).
 pub fn issue_lower_read<P: FilterIo>(io: &mut P, state: &DeviceState) {
-    if !state.io_target_set() {
+    if !state.source_open() {
         return;
     }
     let Ok(read) = io.create_lower_read() else {
@@ -100,7 +100,7 @@ pub fn issue_backlog_reads<P: FilterIo>(io: &mut P, state: &DeviceState) {
 /// `PtpFilterWorkItemCallback` (Input.c:30-37), enqueued after an empty, failed or other report:
 ///
 /// 1. if a report other than the multitouch report asked for it, and the device is configured, in D0
-///    and detoured, send the mode switch again ([`configure_multitouch`], `PASSIVE_LEVEL`). Not in C:
+///    and its source is open, send the mode switch again ([`configure_multitouch`], `PASSIVE_LEVEL`). Not in C:
 ///    when the trackpad restarts (its power switch) while the HID device stays, it comes back in mouse
 ///    mode, and nothing else would switch it back (hardware: a stream of 8-byte reports with ID 0x02 and
 ///    a dead cursor until the device was re-added). A failure is not retried here; the next such report
@@ -111,7 +111,7 @@ pub fn work_item_callback<P: FilterIo>(io: &mut P, state: &DeviceState) {
     if state.take_mode_switch_request()
         && state.device_configured()
         && state.in_d0()
-        && state.detour_completed()
+        && state.source_open()
     {
         let _status = configure_multitouch(io, state);
     }

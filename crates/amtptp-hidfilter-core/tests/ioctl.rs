@@ -1,5 +1,8 @@
 //! Replays `fixtures/ioctl.txt`: `FilterEvtIoIntDeviceControl` routing for every probed internal
 //! IOCTL code on a started Bluetooth device.
+//!
+//! `IOCTL_HID_GET_STRING` changed with the data source: C forwarded it to the PDO (through the detour),
+//! the port answers it from the strings it read from the vendor collection (`copy_string`).
 
 #![cfg(test)]
 
@@ -7,7 +10,7 @@ mod common;
 
 use amtptp_hidfilter_core::{DeviceState, dispatch_internal_ioctl};
 use common::*;
-use ptp_hid::ioctl::{IOCTL_HID_GET_FEATURE, IOCTL_HID_SET_FEATURE};
+use ptp_hid::ioctl::{IOCTL_HID_GET_FEATURE, IOCTL_HID_GET_STRING, IOCTL_HID_SET_FEATURE};
 
 const TOTAL: usize = 519;
 
@@ -39,6 +42,25 @@ fn replay_ioctl_routing() {
             _ => None,
         };
         let req = m.add_upper(upper);
+        if code == IOCTL_HID_GET_STRING {
+            // The source's product string, "Magic Trackpad" and its NUL in UTF-16: 30 bytes.
+            m.faults.string = Some(Ok(30));
+            dispatch_internal_ioctl(&mut m, &state, req, outlen, inlen, code);
+            assert_eq!(r.get("disp"), "forwarded", "{}", r.case());
+            assert_eq!(
+                m.ev,
+                [
+                    "CopyString(req=upper1)",
+                    "WdfRequestSetInformation(req=upper1,info=30)",
+                    "WdfRequestComplete(req=upper1,status=0x00000000,info=30)",
+                ],
+                "{}",
+                r.case()
+            );
+            assert_eq!(m.uppers[req].completed, Some((0, 30)), "{}", r.case());
+            tally.add("GET_STRING answered from the data source");
+            continue;
+        }
         dispatch_internal_ioctl(&mut m, &state, req, outlen, inlen, code);
 
         let u = &m.uppers[req];
@@ -73,6 +95,10 @@ fn replay_ioctl_routing() {
             tally.add("routing (sweep, no ev)");
         }
     }
-    let total = tally.assert(&[("routing + ev", 28), ("routing (sweep, no ev)", 491)]);
+    let total = tally.assert(&[
+        ("routing + ev", 27),
+        ("GET_STRING answered from the data source", 1),
+        ("routing (sweep, no ev)", 491),
+    ]);
     assert_eq!(total, TOTAL);
 }

@@ -187,6 +187,22 @@ impl XferBuffer {
     pub const fn as_mut_ptr(&mut self) -> *mut u8 {
         self.bytes.as_mut_ptr()
     }
+
+    /// The report the packet carries: the `reportBufferLen` bytes after the 16-byte header, i.e. the
+    /// report ID and then the report (`F1 02 01` on Bluetooth). The class `IOCTL_HID_SET_FEATURE`
+    /// takes exactly these bytes as its input buffer.
+    #[must_use]
+    pub fn report_mut(&mut self) -> &mut [u8] {
+        let len = self
+            .bytes
+            .get(XFER_REPORT_BUFFER_LEN_OFFSET..XFER_REPORT_BUFFER_LEN_OFFSET + 4)
+            .and_then(|field| <[u8; 4]>::try_from(field).ok())
+            .map_or(0, u32::from_le_bytes);
+        let len = usize::try_from(len).unwrap_or(0);
+        self.bytes
+            .get_mut(HID_XFER_PACKET_LEN..HID_XFER_PACKET_LEN.saturating_add(len))
+            .unwrap_or_default()
+    }
 }
 
 /// Copies `src` to `dst[offset..]`, never panicking (bytes that do not fit are dropped; every caller
@@ -222,10 +238,10 @@ pub struct DeviceSnapshot {
     pub y: Bcm5974Param,
     /// `DeviceConfigured`.
     pub device_configured: bool,
-    /// `IsHidIoDetourCompleted`.
-    pub detour_completed: bool,
-    /// `HidIoTarget != NULL` (the glue owns the handle itself).
-    pub io_target_set: bool,
+    /// The data source is open: the glue has opened the vendor collection (`Col03`) that HIDCLASS
+    /// delivers the multitouch reports on. It replaces C's `IsHidIoDetourCompleted` and
+    /// `HidIoTarget != NULL` (the HIDCLASS detour is gone, `bth`).
+    pub source_open: bool,
     /// `PtpInputOn` (written by `SET_FEATURE` 0x04, never read: HF-B20).
     pub ptp_input_on: bool,
     /// `PtpReportTouch`: the Surface Switch of `SET_FEATURE` 0x06; the input report honours it (P3 fix of
@@ -305,8 +321,9 @@ pub struct DeviceState {
     y: AxisState,
     /// `DeviceConfigured` ([`POWER_CONFIGURED`]), in D0 ([`POWER_IN_D0`]) and the epoch.
     power: AtomicU32,
-    detour_completed: AtomicBool,
-    io_target_set: AtomicBool,
+    /// See [`DeviceSnapshot::source_open`]. `Release` when the glue publishes the opened source,
+    /// `Acquire` before using it.
+    source_open: AtomicBool,
     ptp_input_on: AtomicBool,
     ptp_report_touch: AtomicBool,
     ptp_report_button: AtomicBool,
@@ -342,8 +359,7 @@ impl DeviceState {
             x: Bcm5974Param { min: 0, max: 0 },
             y: Bcm5974Param { min: 0, max: 0 },
             device_configured: false,
-            detour_completed: false,
-            io_target_set: false,
+            source_open: false,
             ptp_input_on: false,
             ptp_report_touch: SelectiveReportBits::POWER_ON.surface_report,
             ptp_report_button: SelectiveReportBits::POWER_ON.button_report,
@@ -370,8 +386,7 @@ impl DeviceState {
             } else {
                 0
             }),
-            detour_completed: AtomicBool::new(s.detour_completed),
-            io_target_set: AtomicBool::new(s.io_target_set),
+            source_open: AtomicBool::new(s.source_open),
             ptp_input_on: AtomicBool::new(s.ptp_input_on),
             ptp_report_touch: AtomicBool::new(s.ptp_report_touch),
             ptp_report_button: AtomicBool::new(s.ptp_report_button),
@@ -426,8 +441,7 @@ impl DeviceState {
             x: self.x.load(),
             y: self.y.load(),
             device_configured: self.device_configured(),
-            detour_completed: self.detour_completed(),
-            io_target_set: self.io_target_set(),
+            source_open: self.source_open(),
             ptp_input_on: self.ptp_input_on.load(Ordering::Relaxed),
             ptp_report_touch: self.ptp_report_touch.load(Ordering::Relaxed),
             ptp_report_button: self.ptp_report_button.load(Ordering::Relaxed),
@@ -537,24 +551,14 @@ impl DeviceState {
             .is_ok()
     }
 
-    /// `IsHidIoDetourCompleted`.
-    pub fn detour_completed(&self) -> bool {
-        self.detour_completed.load(Ordering::Relaxed)
+    /// Whether the data source is open ([`DeviceSnapshot::source_open`]).
+    pub fn source_open(&self) -> bool {
+        self.source_open.load(Ordering::Acquire)
     }
 
-    /// Sets `IsHidIoDetourCompleted = TRUE` (Detour.c:76).
-    pub fn set_detour_completed(&self) {
-        self.detour_completed.store(true, Ordering::Relaxed);
-    }
-
-    /// `HidIoTarget != NULL`.
-    pub fn io_target_set(&self) -> bool {
-        self.io_target_set.load(Ordering::Relaxed)
-    }
-
-    /// Records that the glue stored the default I/O target (Detour.c:77).
-    pub fn set_io_target_set(&self) {
-        self.io_target_set.store(true, Ordering::Relaxed);
+    /// Records that the data source opened or closed.
+    pub(crate) fn set_source_open(&self, open: bool) {
+        self.source_open.store(open, Ordering::Release);
     }
 
     /// Cached QPC frequency in ticks per second.
@@ -625,6 +629,15 @@ mod tests {
         );
         assert_eq!(Transport::Usb.params().header_size, 12);
         assert_eq!(Transport::Bluetooth.params().header_size, 4);
+    }
+
+    #[test]
+    fn xfer_buffer_report_is_the_report_id_and_payload() {
+        let mut bt = XferBuffer::new(Transport::Bluetooth.mode_switch());
+        bt.link_report_buffer();
+        assert_eq!(bt.report_mut(), &[0xF1, 0x02, 0x01]);
+        let mut usb = XferBuffer::new(Transport::Usb.mode_switch());
+        assert_eq!(usb.report_mut(), &[0x02, 0x01, 0x00, 0x00]);
     }
 
     #[test]

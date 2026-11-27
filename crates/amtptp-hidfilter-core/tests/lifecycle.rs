@@ -1,6 +1,10 @@
 //! Replays `fixtures/lifecycle.txt`: `AddDevice` (with faults), `PrepareHardware`, D0Entry/D0Exit, the
-//! detour variants, the read-issue path and its faults, the work item, `READ_REPORT` and `GET_STRING`
-//! dispatch, and the pipeline FIFO order.
+//! read-issue path and its faults, the work item, `READ_REPORT` and `GET_STRING` dispatch, and the
+//! pipeline FIFO order.
+//!
+//! The HIDCLASS detour is gone (the data source replaces it, `amtptp_hidfilter_core::bth`): its
+//! records are counted as removed, `SelfManagedIoInit` is checked against the new start (static
+//! identity, no I/O until the source opens), and `GET_STRING` against the data source's strings.
 
 #![cfg(test)]
 
@@ -8,7 +12,7 @@ mod common;
 
 use amtptp_hidfilter_core::{
     DeviceSnapshot, DeviceState, REPORT_BUFFER_SIZE, ReadTicket, STATUS_SUCCESS, add_device,
-    complete_lower_read, config, d0_entry, d0_exit, detour_hid_stack, dispatch_internal_ioctl,
+    complete_lower_read, config, d0_entry, d0_exit, dispatch_internal_ioctl,
     issue_lower_read, prepare_hardware, recovery_timer_callback, self_managed_io_init,
     work_item_callback,
 };
@@ -20,6 +24,9 @@ const SKIP_DRIVER_ENTRY: &str = "skipped: DriverEntry/driver cleanup are glue-on
 const ADD_EXACT: &str = "AddDevice exact";
 const ADD_P2: &str = "AddDevice P2-fixed (HF-B16/HF-B17)";
 const P3: &str = "P3-fixed (HF-B30 IDs kept; work item and timer gated)";
+const REMOVED_DETOUR: &str = "removed: the HIDCLASS detour (replaced by the data source)";
+const SOURCE_INIT: &str = "data source: SelfManagedIoInit sets the static identity and waits for the source";
+const SOURCE_STRING: &str = "data source: GET_STRING answered from the source's strings";
 
 /// The corrected expectation of the records whose C behaviour is fixed: (events, `st_out`,
 /// `lower_reads_pending`).
@@ -48,52 +55,6 @@ fn state_in(r: &Rec) -> DeviceSnapshot {
         Some(s) => parse_state(s),
         // GET_STRING records carry only st_out; the operation does not change state.
         None => parse_state(r.get("st_out")),
-    }
-}
-
-fn detour_world(case: &str, r: &Rec) -> World {
-    let mut w = World::default();
-    if let Some(id) = r.opt("client_id") {
-        w.client_id = hex(id);
-    }
-    let variant = case
-        .strip_prefix("smio-init-detour-")
-        .or_else(|| case.strip_prefix("detour-"))
-        .unwrap_or("");
-    match variant {
-        "own-drvobj-null" => w.own_valid = false,
-        "lower-null" => w.lower = false,
-        "lower-drvobj-null" => w.lower_driver = false,
-        "drvext-null" => w.driver_extension = false,
-        "clientext-null" => w.client_extension = false,
-        "id-lowercase" => w.client_id = padded(b"hidclass"),
-        "id-HIDCLAS" => w.client_id = padded(b"HIDCLAS"),
-        "id-HIDCLASSX" => w.client_id = padded(b"HIDCLASSX"),
-        "id-empty" => w.client_id = padded(b""),
-        "id-XIDCLASS" => w.client_id = padded(b"XIDCLASS"),
-        _ => {}
-    }
-    w
-}
-
-fn padded(s: &[u8]) -> Vec<u8> {
-    let mut v = s.to_vec();
-    v.resize(16, 0);
-    v
-}
-
-fn check_detour_extras(r: &Rec, m: &Mock) {
-    if let Some(p) = r.opt("patched") {
-        let want = p == "slot15=mini15@cli+0xa8";
-        assert!(want || p == "none", "{p}");
-        assert_eq!(m.world.patched, want, "{}", r.case());
-    }
-    if let Some(refs) = r.opt("lower_refs") {
-        assert_eq!(i128::from(m.world.refs), num(refs), "{}", r.case());
-    }
-    if let Some(id) = r.opt("client_id") {
-        // The detour variants with a client_id field must see exactly that ID.
-        assert_eq!(m.world.client_id, hex(id), "{}", r.case());
     }
 }
 
@@ -251,8 +212,11 @@ fn replay_lifecycle() {
         }
         let snap = state_in(r);
         let state = DeviceState::with(&snap);
+        if op == "PtpFilterDetourWindowsHIDStack" {
+            tally.add(REMOVED_DETOUR);
+            continue;
+        }
         let mut m = Mock::new();
-        m.world = detour_world(case, r);
         let mut ret = None;
         match op {
             "PtpFilterPrepareHardware" => ret = Some(prepare_hardware(&state)),
@@ -275,12 +239,18 @@ fn replay_lifecycle() {
                     );
                 }
             }
-            "PtpFilterDetourWindowsHIDStack" => ret = Some(detour_hid_stack(&mut m, &state)),
             "PtpFilterSelfManagedIoInit" => {
-                if case == "smio-init-attributes-fail" {
-                    m.faults.attributes = Some(SEND_FAIL);
-                }
-                ret = Some(self_managed_io_init(&mut m, &state));
+                // Every record starts before the detour, i.e. without a data source.
+                assert!(!snap.source_open, "{case}");
+                assert_eq!(self_managed_io_init(&mut m, &state), STATUS_SUCCESS, "{case}");
+                assert!(m.ev.is_empty(), "{case}: {:?}", m.ev);
+                let mut want = snap;
+                want.vendor_id = 0x004C;
+                want.product_id = 0x0265;
+                want.version_number = 0;
+                assert_eq!(state.snapshot(), want, "{case}");
+                tally.add(SOURCE_INIT);
+                continue;
             }
             "PtpFilterInputIssueTransportRequest" => {
                 match case {
@@ -303,13 +273,31 @@ fn replay_lifecycle() {
                 assert_eq!(d0_entry(&state), 0);
                 recovery_timer_callback(&mut m, &state);
             }
+            "FilterEvtIoIntDeviceControl" if case.starts_with("get-string") => {
+                // Before the source is open there are no strings: completed with the failure.
+                let req = m.add_upper(Upper::with_output(128, 0xCC));
+                dispatch_internal_ioctl(&mut m, &state, req, 128, 0, IOCTL_HID_GET_STRING);
+                assert_eq!(
+                    m.ev,
+                    [
+                        "CopyString(req=upper1)",
+                        // Information untouched (the mock's sentinel 0x5A5A).
+                        "WdfRequestComplete(req=upper1,status=0xc0000184,info=23130)",
+                    ],
+                    "{case}"
+                );
+                assert_eq!(
+                    m.uppers[req].completed,
+                    Some((amtptp_hidfilter_core::STATUS_INVALID_DEVICE_STATE, 0x5A5A)),
+                    "{case}"
+                );
+                assert!(!m.read_queue.contains(&req));
+                assert_eq!(state.snapshot(), snap, "{case}");
+                tally.add(SOURCE_STRING);
+                continue;
+            }
             "FilterEvtIoIntDeviceControl" => {
-                let code = if case.starts_with("get-string") {
-                    if case == "get-string-send-fails" {
-                        m.faults.string_send = Some(FORMAT_FAIL);
-                    }
-                    IOCTL_HID_GET_STRING
-                } else {
+                let code = {
                     if case == "read-report-forward-fails" {
                         m.faults.forward = Some(FORMAT_FAIL);
                     }
@@ -355,7 +343,6 @@ fn replay_lifecycle() {
         }
         assert_eq!(m.ev, expected_events, "{case}");
         assert_eq!(state.snapshot(), expected_state, "{case}");
-        check_detour_extras(r, &m);
         if let Some(d) = r.opt("readq_depth") {
             assert_eq!(m.read_queue.len() as i128, num(d), "{case}");
         }
@@ -369,7 +356,10 @@ fn replay_lifecycle() {
         (ADD_EXACT, 5),
         (ADD_P2, 4),
         (P3, 3),
-        ("exact", 38),
+        (REMOVED_DETOUR, 13),
+        (SOURCE_INIT, 11),
+        (SOURCE_STRING, 2),
+        ("exact", 12),
     ]);
     assert_eq!(total, TOTAL);
 }
