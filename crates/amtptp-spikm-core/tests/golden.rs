@@ -16,6 +16,7 @@ use amtptp_spikm_core::runtime::{DeviceRuntime, ReadTracker};
 use amtptp_spikm_core::status::*;
 use amtptp_spikm_core::wire::{POOL_TAG, SetStatePacket};
 use ptp_hid::descriptor::{SPI_CONTACT_ID_LOGICAL_MAX, SPI_CONTACT_ID_MAX_OFFSETS};
+use ptp_hid::feature::SelectiveReportBits;
 use core::fmt::Write as _;
 
 /// Minimal SHA-256 (FIPS 180-4) for checking the spec's descriptor hashes.
@@ -300,7 +301,7 @@ fn packet_with_fingers(n: u8, click: u8, fingers: &[(i16, i16, i16, i16, i16)]) 
 fn worked_example_spec_7_4() {
     let info = lookup_trackpad(APPLE_VENDOR_ID, 0x0272).unwrap();
     let pkt = packet_with_fingers(1, 0, &[(100, 2000, 800, 600, 30)]);
-    let report = build_report(&SpiPacket::new(&pkt), info, 0).to_bytes();
+    let report = build_report(&SpiPacket::new(&pkt), info, 0, SelectiveReportBits::POWER_ON).to_bytes();
     assert_eq!(report[..6], [0x05, 0x03, 0xF2, 0x12, 0x7A, 0x12]);
     assert!(
         report[6..28].iter().all(|&b| b == 0),
@@ -351,6 +352,30 @@ fn declared_contacts_must_match_the_frame() {
     assert_eq!((report[28], report[29]), (5, 1));
 }
 
+/// `SET_FEATURE` 0x06 `[06, bits]` (bit 0 Surface Switch, bit 1 Button Switch) for each of the four
+/// combinations, then one frame with a contact and the button down.
+#[test]
+fn selective_reporting_shapes_the_input_report() {
+    let info = lookup_trackpad(APPLE_VENDOR_ID, 0x0272).unwrap();
+    let pkt = packet_with_fingers(1, 1, &[(100, 2000, 800, 600, 30)]);
+    for (bits, contacts, button) in [(0_u8, 0_u8, 0_u8), (1, 1, 0), (2, 0, 1), (3, 1, 1)] {
+        let rt = DeviceRuntime::new();
+        rt.on_d0_entry(10_000_000);
+        assert_eq!(rt.set_feature(6, 2, Some(&[6, bits])), STATUS_SUCCESS);
+        let r = rt.complete_lower_read(info, 76, &pkt, || 0).unwrap();
+        assert_eq!((r[28], r[29]), (contacts, button), "switch byte {bits:#04x}");
+        if contacts == 0 {
+            assert!(r[1..26].iter().all(|&b| b == 0), "no contact data");
+        } else {
+            assert_eq!(r[1..6], [0x03, 0xF2, 0x12, 0x7A, 0x12]);
+        }
+        // A restart (PrepareHardware) restores both switches.
+        rt.ptp_settings().reset_selective_reporting();
+        let r = rt.complete_lower_read(info, 76, &pkt, || 0).unwrap();
+        assert_eq!((r[28], r[29]), (1, 1));
+    }
+}
+
 #[test]
 fn contact_flags_and_quirks() {
     let info = lookup_trackpad(APPLE_VENDOR_ID, 0x0278).unwrap();
@@ -364,7 +389,7 @@ fn contact_flags_and_quirks() {
         (4, 4, 0, 0, 1),
     ];
     let pkt = packet_with_fingers(255, 0xFF, &fingers);
-    let r = build_report(&SpiPacket::new(&pkt), info, 0).to_bytes();
+    let r = build_report(&SpiPacket::new(&pkt), info, 0, SelectiveReportBits::POWER_ON).to_bytes();
     let flag = |i: usize| r[1 + 5 * i];
     assert_eq!(
         flag(0),
@@ -385,7 +410,7 @@ fn contact_flags_and_quirks() {
         0,
         &[(-0x8000, 0x7FFF, 0, 0, 0), (0x7FFF, -0x8000, 0, 0, 0)],
     );
-    let r = build_report(&SpiPacket::new(&pkt), info, 0).to_bytes();
+    let r = build_report(&SpiPacket::new(&pkt), info, 0, SelectiveReportBits::POWER_ON).to_bytes();
     assert_eq!(r[2..6], [0, 0, 0, 0]);
     assert_eq!(u16::from_le_bytes([r[7], r[8]]), 40223);
     assert_eq!(u16::from_le_bytes([r[9], r[10]]), 42051);

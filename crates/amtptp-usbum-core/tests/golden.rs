@@ -425,7 +425,7 @@ fn type4_short_response_sends_zero_padding() {
     // before the mode byte is patched in.
     let state = DeviceState::new();
     state.set_config_row(lookup_config_row(0x0272));
-    state.set_button_report_on(true); // as after PrepareHardware: D0Entry switches the mode on
+    state.set_button_report_on(true); // as after PrepareHardware
     let mut usb = FakeUsb {
         reg: [0x02, 0x00, 0x5a, 0xa5, 0, 0, 0, 0],
         resp: 1,
@@ -433,7 +433,7 @@ fn type4_short_response_sends_zero_padding() {
     };
     let outcome = d0_entry(&state, &mut usb, || 5);
     assert_eq!(outcome.status, STATUS_SUCCESS);
-    assert_eq!(outcome.mode_switch_status, Some(STATUS_SUCCESS));
+    assert_eq!(outcome.mode_switch_status, STATUS_SUCCESS);
     assert_eq!(
         usb.wire,
         [
@@ -569,6 +569,78 @@ fn input_scan_time_uses_the_cached_qpc_frequency() {
     }
 }
 
+/// `SET_FEATURE` 0x06 `[06, bits]` (bit 0 Surface Switch, bit 1 Button Switch) for each combination,
+/// then a WS3 frame with one contact and the button down.
+#[test]
+fn selective_reporting_shapes_the_input_report() {
+    let state = started(0x0236);
+    let mut usb = FakeUsb::default();
+    assert_eq!(d0_entry(&state, &mut usb, || 10_000_000).status, STATUS_SUCCESS);
+    state.set_wellspring_mode_on(true);
+    let mut packet = vec![0_u8; 30 + 28];
+    packet[15] = 1; // button
+    packet[30 + 2..30 + 4].copy_from_slice(&1000_i16.to_le_bytes()); // X
+    packet[30 + 16..30 + 18].copy_from_slice(&200_i16.to_le_bytes()); // touch major: tip
+    for (bits, contacts, button) in [(0_u8, 0_u8, 0_u8), (1, 1, 0), (2, 0, 1), (3, 1, 1)] {
+        let mut req = FakeReq::new(vec![0x06, bits], 6, 0xa5);
+        assert_eq!(
+            set_feature(&state, &mut req, &mut usb),
+            IoctlOutcome::success(2)
+        );
+        let mut queue = FakeQueue::with_lengths(&[50]);
+        assert_eq!(
+            on_read_complete(&state, &packet, &mut queue, &mut usb, || 0),
+            ReadCompleteOutcome::Completed
+        );
+        let (request, _, _) = queue.completed.last().expect("report completed");
+        assert_eq!(
+            (request.out[48], request.out[49]),
+            (contacts, button),
+            "switch byte {bits}"
+        );
+    }
+}
+
+/// UM-B10 (P3): Windows turns both selective-reporting switches off, the device is suspended and resumed.
+/// `D0Entry` still switches the trackpad into multitouch (Wellspring) mode, so turning the switches back
+/// on brings the contacts back without an input-mode report.
+#[test]
+fn d0_entry_switches_the_mode_after_selective_reporting_off() {
+    let state = started(0x0236);
+    let mut usb = FakeUsb {
+        reg: [0x01, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07],
+        resp: 4,
+        ..FakeUsb::default()
+    };
+    state.set_wellspring_mode_on(true);
+    let mut req = FakeReq::new(vec![0x06, 0x00], 6, 0xa5);
+    assert_eq!(set_feature(&state, &mut req, &mut usb), IoctlOutcome::success(2));
+    assert!(!state.is_button_report_on() && !state.is_surface_report_on());
+
+    assert_eq!(d0_exit(&state, &mut usb), STATUS_SUCCESS);
+    assert!(!state.is_wellspring_mode_on());
+    usb.wire.clear();
+    let outcome = d0_entry(&state, &mut usb, || 10_000_000);
+    assert_eq!(outcome.mode_switch_status, STATUS_SUCCESS);
+    assert!(state.is_wellspring_mode_on());
+    assert_eq!(
+        usb.wire_string(),
+        "in/a101000300000400/08010203/00000000,out/2109000300000400/01010203/00000000"
+    );
+
+    let mut req = FakeReq::new(vec![0x06, 0x03], 6, 0xa5);
+    assert_eq!(set_feature(&state, &mut req, &mut usb), IoctlOutcome::success(2));
+    let mut packet = vec![0_u8; 30 + 28];
+    packet[30 + 16..30 + 18].copy_from_slice(&200_i16.to_le_bytes());
+    let mut queue = FakeQueue::with_lengths(&[50]);
+    assert_eq!(
+        on_read_complete(&state, &packet, &mut queue, &mut usb, || 0),
+        ReadCompleteOutcome::Completed
+    );
+    let (request, _, _) = queue.completed.last().expect("report completed");
+    assert_eq!(request.out[48], 1, "one contact");
+}
+
 // ------------------------------------------------------------------------------------------------
 // SET_FEATURE with short reports (B8, excluded fixture case 2) and GET_STRING edge cases (B7)
 // ------------------------------------------------------------------------------------------------
@@ -589,7 +661,8 @@ fn started(pid: u16) -> DeviceState {
 
 #[test]
 fn short_set_feature_reads_missing_bytes_as_zero() {
-    // ID 6 with a 1-byte report: byte 1 is read as 0 -> both selective-report flags off.
+    // ID 6 with a 1-byte report: no switch byte, so both selective-report flags stay as they are (C read
+    // the missing byte as 0 and turned both off).
     let state = started(0x0236);
     state.set_button_report_on(true);
     state.set_surface_report_on(true);
@@ -597,7 +670,7 @@ fn short_set_feature_reads_missing_bytes_as_zero() {
     let mut req = FakeReq::new(vec![0x06], 6, 0xa5);
     let outcome = set_feature(&state, &mut req, &mut usb);
     assert_eq!(outcome, IoctlOutcome::success(2));
-    assert!(!state.is_button_report_on() && !state.is_surface_report_on());
+    assert!(state.is_button_report_on() && state.is_surface_report_on());
 
     // ID 9 with 2 bytes: (byte1, 0, 0).
     let mut req = FakeReq::new(vec![0x09, 7], 9, 0xa5);

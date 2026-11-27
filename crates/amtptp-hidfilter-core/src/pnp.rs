@@ -12,7 +12,9 @@ use crate::status::{
     STATUS_UNSUCCESSFUL, nt_success,
 };
 
-/// `PtpFilterPrepareHardware` (Device.c:104-130): clear `DeviceConfigured`. Returns `STATUS_SUCCESS`.
+/// `PtpFilterPrepareHardware` (Device.c:104-130): clear `DeviceConfigured` and turn both
+/// selective-reporting switches on (not in C: the state is not kept across a power reset). Returns
+/// `STATUS_SUCCESS`.
 ///
 /// VID, PID and version are kept (P3 fix of HF-B30). They identify the lower device, which a PnP stop
 /// and restart (resource rebalance: `D0Exit`, `PrepareHardware`, `D0Entry`, `SelfManagedIoRestart`)
@@ -21,6 +23,7 @@ use crate::status::{
 /// success. Transport parameters and the reporting clock are kept too.
 pub fn prepare_hardware(state: &DeviceState) -> NtStatus {
     state.set_device_configured(false);
+    state.reset_selective_reporting();
     STATUS_SUCCESS
 }
 

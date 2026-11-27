@@ -131,14 +131,16 @@ fn select_interrupt_interface<T: UsbTargetSetup>(usb: &mut T) -> NtStatus {
 pub struct D0EntryOutcome {
     /// The callback's return value (the `WdfIoTargetStart` status).
     pub status: NtStatus,
-    /// Status of `SetWellspringMode(TRUE)` if it ran (a failure is only traced).
-    pub mode_switch_status: Option<NtStatus>,
+    /// Status of `SetWellspringMode(TRUE)` (a failure is only traced).
+    pub mode_switch_status: NtStatus,
 }
 
 /// `AmtPtpEvtDeviceD0Entry`.
 ///
-/// 1. If `IsButtonReportOn || IsWellspringModeOn`: `SetWellspringMode(TRUE)`; a failure is ignored
-///    (UM-B10, P3 PRESERVED gate).
+/// 1. `SetWellspringMode(TRUE)`; a failure is ignored. C ran it only if `IsButtonReportOn ||
+///    IsWellspringModeOn` (UM-B10); since `D0Exit` always turns the mode off, that skipped the switch
+///    whenever Windows had turned the button switch off, leaving the trackpad in mouse mode until an input
+///    mode report. The mode no longer depends on selective reporting (P3 fix).
 /// 2. `Cache the QPC frequency and restart the reporting clock`.
 /// 3. `WdfIoTargetStart` on the interrupt pipe; its status is the return value.
 pub fn d0_entry<T, F>(
@@ -150,14 +152,11 @@ where
     T: ControlPipe + InterruptPipeTarget,
     F: FnOnce() -> i64,
 {
-    let mode_switch_status =
-        (state.is_button_report_on() || state.is_wellspring_mode_on()).then(|| {
-            match state.config() {
-                Some(cfg) => set_wellspring_mode(state, cfg, io, true),
-                // P2: C would dereference DeviceInfo == NULL; D0Entry never runs without a config row.
-                None => STATUS_INVALID_DEVICE_STATE,
-            }
-        });
+    let mode_switch_status = match state.config() {
+        Some(cfg) => set_wellspring_mode(state, cfg, io, true),
+        // P2: C would dereference DeviceInfo == NULL; D0Entry never runs without a config row.
+        None => STATUS_INVALID_DEVICE_STATE,
+    };
     state.set_qpc_frequency(query_performance_frequency());
     let status = io.start();
     D0EntryOutcome {

@@ -2,6 +2,7 @@
 
 #![cfg(test)]
 
+use ptp_hid::feature::SelectiveReportBits;
 use amtptp_hidfilter_core::*;
 
 const BT: InputLayout = InputLayout {
@@ -79,7 +80,27 @@ fn d2_whole_bt_packet() {
         classify_lower_read(0x004C, &BT, 58),
         LowerReadClass::Report { length: 58 }
     );
-    assert_eq!(build_report(&BT, 58, &buffer, 0).to_vec(), expected);
+    assert_eq!(build_report(&BT, 58, &buffer, 0, SelectiveReportBits::POWER_ON).to_vec(), expected);
+}
+
+/// `SET_FEATURE` 0x06 `[06, bits]` for each combination, then a one-contact Bluetooth packet with the
+/// button down; `PrepareHardware` restores both switches.
+#[test]
+fn selective_reporting_shapes_the_input_report() {
+    let packet = h("31 01 00 00 00 00 00 00 14 14 00 00 00");
+    let mut buffer = vec![0_u8; REPORT_BUFFER_SIZE];
+    buffer[..packet.len()].copy_from_slice(&packet);
+    let state = DeviceState::new();
+    for (bits, contacts, button) in [(0_u8, 0_u8, 0_u8), (1, 1, 0), (2, 0, 1), (3, 1, 1)] {
+        state.apply_feature_change(decode_set_feature(0x06, &[0x06, bits]).unwrap());
+        let r = build_report(&BT, packet.len(), &buffer, 0, state.selective_reporting());
+        assert_eq!((r[48], r[49]), (contacts, button), "switch byte {bits}");
+        if contacts == 0 {
+            assert!(r[1..46].iter().all(|&b| b == 0), "no contact data");
+        }
+    }
+    assert_eq!(prepare_hardware(&state), STATUS_SUCCESS);
+    assert_eq!(state.selective_reporting(), SelectiveReportBits::POWER_ON);
 }
 
 #[test]
@@ -103,7 +124,7 @@ fn d3_length_classification() {
     assert_eq!(contact_count(&BT, 13), 1);
     assert_eq!(contact_count(&BT, 58), 5);
     // BT length 4 with buf[1] bit 0 set: ContactCount 0, button 1.
-    let r = build_report(&BT, 4, &[0x31, 0x01, 0, 0], 0);
+    let r = build_report(&BT, 4, &[0x31, 0x01, 0, 0], 0, SelectiveReportBits::POWER_ON);
     assert_eq!((r[48], r[49]), (0, 1));
 }
 
@@ -136,7 +157,7 @@ fn d5_feature_requests() {
         decode_set_feature(0x04, &[0x04, 0x05]),
         Ok(FeatureChange::None)
     );
-    for (byte, button, touch) in [(0x03_u8, true, true), (0x02, false, true)] {
+    for (byte, button, touch) in [(0x03_u8, true, true), (0x02, true, false), (0x01, false, true)] {
         state.apply_feature_change(decode_set_feature(0x06, &[0x06, byte]).unwrap());
         let s = state.snapshot();
         assert_eq!((s.ptp_report_button, s.ptp_report_touch), (button, touch));

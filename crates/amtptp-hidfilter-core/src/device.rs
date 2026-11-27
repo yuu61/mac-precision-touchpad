@@ -12,6 +12,7 @@ pub use bcm5974::config::{
     Bcm5974Param, MAGIC_TRACKPAD_2_PID as HID_PID_MAGIC_TRACKPAD_2,
     USB_VENDOR_ID_APPLE as HID_VID_APPLE_USB,
 };
+use ptp_hid::feature::SelectiveReportBits;
 use ptp_hid::scan_time::ScanClock;
 
 use crate::feature::FeatureChange;
@@ -226,9 +227,10 @@ pub struct DeviceSnapshot {
     pub io_target_set: bool,
     /// `PtpInputOn` (written by `SET_FEATURE` 0x04, never read: HF-B20).
     pub ptp_input_on: bool,
-    /// `PtpReportTouch` (written by `SET_FEATURE` 0x06, never read: HF-B20).
+    /// `PtpReportTouch`: the Surface Switch of `SET_FEATURE` 0x06; the input report honours it (P3 fix of
+    /// HF-B20: C never read it).
     pub ptp_report_touch: bool,
-    /// `PtpReportButton` (written by `SET_FEATURE` 0x06, never read: HF-B20).
+    /// `PtpReportButton`: the Button Switch of `SET_FEATURE` 0x06; the input report honours it.
     pub ptp_report_button: bool,
     /// Cached QPC frequency in ticks per second.
     pub qpc_frequency: i64,
@@ -318,8 +320,10 @@ impl Default for DeviceState {
 }
 
 impl DeviceState {
-    /// All fields zero / FALSE: the state after `PtpFilterCreateDevice` (KMDF zero-fills the context
-    /// and the C code then sets the IDs to 0 and `DeviceConfigured = FALSE` again).
+    /// All fields zero / FALSE except the two selective-reporting switches, which start on
+    /// ([`SelectiveReportBits::POWER_ON`]): the state after `PtpFilterCreateDevice` (KMDF zero-fills the
+    /// context and the C code then sets the IDs to 0 and `DeviceConfigured = FALSE` again; C left the
+    /// switches FALSE, which it never read).
     #[must_use]
     pub const fn new() -> Self {
         Self::with(&DeviceSnapshot {
@@ -336,8 +340,8 @@ impl DeviceState {
             detour_completed: false,
             io_target_set: false,
             ptp_input_on: false,
-            ptp_report_touch: false,
-            ptp_report_button: false,
+            ptp_report_touch: SelectiveReportBits::POWER_ON.surface_report,
+            ptp_report_button: SelectiveReportBits::POWER_ON.button_report,
             qpc_frequency: 0,
         })
     }
@@ -551,6 +555,23 @@ impl DeviceState {
         self.scan_clock.restart(value);
     }
 
+    /// The selective-reporting switches the input report honours.
+    pub fn selective_reporting(&self) -> SelectiveReportBits {
+        SelectiveReportBits {
+            surface_report: self.ptp_report_touch.load(Ordering::Relaxed),
+            button_report: self.ptp_report_button.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Back to [`SelectiveReportBits::POWER_ON`] (`PrepareHardware`: the state is not kept across a
+    /// power reset).
+    pub(crate) fn reset_selective_reporting(&self) {
+        self.apply_feature_change(FeatureChange::SelectiveReporting {
+            button_report: SelectiveReportBits::POWER_ON.button_report,
+            surface_report: SelectiveReportBits::POWER_ON.surface_report,
+        });
+    }
+
     /// Applies a decoded `SET_FEATURE` ([`crate::decode_set_feature`]).
     pub fn apply_feature_change(&self, change: FeatureChange) {
         match change {
@@ -623,6 +644,13 @@ mod tests {
             ..DeviceSnapshot::default()
         };
         assert_eq!(DeviceState::with(&s).snapshot(), s);
-        assert_eq!(DeviceState::new().snapshot(), DeviceSnapshot::default());
+        assert_eq!(
+            DeviceState::new().snapshot(),
+            DeviceSnapshot {
+                ptp_report_touch: true,
+                ptp_report_button: true,
+                ..DeviceSnapshot::default()
+            }
+        );
     }
 }

@@ -318,8 +318,8 @@ unsafe extern "C" fn evt_device_prepare_hardware(
     outcome.status
 }
 
-/// `AmtPtpEvtDeviceD0Entry` (Device.c:498-585) → `pnp::d0_entry`: enable Wellspring mode if
-/// `IsButtonReportOn || IsWellspringModeOn` (failure only traced, UM-B10), snapshot QPC into
+/// `AmtPtpEvtDeviceD0Entry` (Device.c:498-585) → `pnp::d0_entry`: enable Wellspring mode (C only did
+/// if `IsButtonReportOn || IsWellspringModeOn`, UM-B10; failure only traced), snapshot QPC into
 /// `PerfCounter`, start the interrupt pipe's I/O target (its status is returned).
 ///
 /// # Safety
@@ -339,10 +339,8 @@ unsafe extern "C" fn evt_device_d0_entry(
         &mut io,
         wdf_support::time::query_performance_frequency,
     );
-    if let Some(mode_status) = outcome.mode_switch_status
-        && !NT_SUCCESS(mode_status)
-    {
-        trace::mode_switch_failed("AmtPtpEvtDeviceD0Entry", true, mode_status);
+    if !NT_SUCCESS(outcome.mode_switch_status) {
+        trace::mode_switch_failed("AmtPtpEvtDeviceD0Entry", true, outcome.mode_switch_status);
     }
     trace::state_changed("AmtPtpEvtDeviceD0Entry", &before, &context.state.snapshot());
     if !NT_SUCCESS(outcome.status) {

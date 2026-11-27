@@ -427,7 +427,7 @@ pub const fn touchpad_tlc_spi(usage: TlcUsage, axes: Axes) -> [u8; TOUCHPAD_TLC_
 
 /// `AAPL_PTP_WINDOWS_CONFIGURATION_TLC` (47 bytes), identical in all four drivers. It holds the Digitizer
 /// Configuration TLC with feature report 0x04 (Input Mode; logical max [`MAX_FINGERS`] = 16, sic) and
-/// feature report 0x06 (two 1-bit switches, usages 0x57 then 0x58, plus 6 padding bits).
+/// feature report 0x06 (two 1-bit switches, Surface 0x57 then Button 0x58, plus 6 padding bits).
 #[rustfmt::skip]
 pub const WINDOWS_CONFIGURATION_TLC: [u8; WINDOWS_CONFIGURATION_TLC_LEN] = [
     USAGE_PAGE, 0x0d, // Usage Page: Digitizer
@@ -445,8 +445,8 @@ pub const WINDOWS_CONFIGURATION_TLC: [u8; WINDOWS_CONFIGURATION_TLC_LEN] = [
     END_COLLECTION, // End Collection
     BEGIN_COLLECTION, 0x00, // Begin Collection: Physical
     REPORT_ID, REPORTID_FUNCSWITCH, // Report ID: Function Switch
-    USAGE, BUTTON_SWITCH, // Usage: 0x57 (C name BUTTON_SWITCH)
-    USAGE, SURFACE_SWITCH, // Usage: 0x58 (C name SURFACE_SWITCH)
+    USAGE, SURFACE_SWITCH, // Usage: 0x57 Surface Switch (bit 0)
+    USAGE, BUTTON_SWITCH, // Usage: 0x58 Button Switch (bit 1)
     REPORT_SIZE, 0x01, // Report Size: 0x01
     REPORT_COUNT, 0x02, // Report Count: 0x02
     LOGICAL_MAXIMUM, 0x01, // Logical Maximum: 0x01

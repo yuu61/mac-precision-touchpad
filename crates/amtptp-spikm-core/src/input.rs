@@ -6,6 +6,7 @@
 //! `X` @4, `Y` @6, `TouchMajor` @18, `TouchMinor` @20 and `Pressure` @26.
 
 use ptp_hid::common::PTP_CONTACT_SLOTS;
+use ptp_hid::feature::SelectiveReportBits;
 use ptp_hid::input::{SPI_PTP_REPORT_LEN, SpiPtpContact, SpiPtpReport};
 
 use crate::device::SpiTrackpadInfo;
@@ -192,13 +193,18 @@ const fn positive_difference(a: i16, b: i16) -> u16 {
 ///   Y = `YMax - Y` if positive else 0, Tip = `Pressure > 0`, Confidence = `TouchMajor < 2500 &&
 ///   TouchMinor < 2500`.
 /// - `ScanTime` = `scan_time`.
+/// - Selective reporting (P3 fix of SPI-B3): with the surface switch off no contact is reported
+///   (`ContactCount` 0); with the button switch off `IsButtonClicked` is 0.
 #[must_use]
 pub fn build_report(
     packet: &SpiPacket<'_>,
     trackpad: &SpiTrackpadInfo,
     scan_time: u16,
+    selective: SelectiveReportBits,
 ) -> SpiPtpReport {
-    let filled = if packet.num_of_fingers() > MAX_FILLED_CONTACTS {
+    let filled = if !selective.surface_report {
+        0
+    } else if packet.num_of_fingers() > MAX_FILLED_CONTACTS {
         MAX_FILLED_CONTACTS
     } else {
         packet.num_of_fingers()
@@ -206,7 +212,11 @@ pub fn build_report(
     let mut report = SpiPtpReport {
         scan_time,
         contact_count: filled,
-        is_button_clicked: packet.click_occurred(),
+        is_button_clicked: if selective.button_report {
+            packet.click_occurred()
+        } else {
+            0
+        },
         ..SpiPtpReport::EMPTY
     };
     for (index, slot) in report
@@ -235,8 +245,9 @@ pub fn report_bytes(
     packet: &SpiPacket<'_>,
     trackpad: &SpiTrackpadInfo,
     scan_time: u16,
+    selective: SelectiveReportBits,
 ) -> [u8; SPI_PTP_REPORT_LEN] {
-    build_report(packet, trackpad, scan_time).to_bytes()
+    build_report(packet, trackpad, scan_time, selective).to_bytes()
 }
 
 /// The valid prefix of a lower read buffer: the first `min(length, buffer.len())` bytes, where `length`

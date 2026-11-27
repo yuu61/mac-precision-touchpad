@@ -207,7 +207,7 @@ impl DeviceRuntime {
         self.scan_clock.frequency()
     }
 
-    /// The write-only PTP flags (`PtpInputOn`, `PtpReportButton`, `PtpReportTouch`).
+    /// The PTP flags (`PtpInputOn`, `PtpReportButton`, `PtpReportTouch`).
     pub const fn ptp_settings(&self) -> &PtpSettings {
         &self.ptp
     }
@@ -407,7 +407,8 @@ impl DeviceRuntime {
     ///   initialized.
     /// - `query_counter`: samples the QPC counter once after the length gate.
     ///
-    /// On success the 30 report bytes are returned. The glue then
+    /// On success the 30 report bytes are returned, honouring the selective-reporting switches. The glue
+    /// then
     /// does `WdfRequestRetrieveOutputMemory` + `WdfMemoryCopyFromBuffer(mem, 0, bytes, 30)` (either failing
     /// completes with that status, Information 0), `WdfRequestSetInformation(30)` and completes with
     /// `STATUS_SUCCESS`. On `Err(status)` it completes with `status`. Either way it then deletes the lower
@@ -428,7 +429,12 @@ impl DeviceRuntime {
         let packet = SpiPacket::new(valid_prefix(buffer, length));
         check_declared_fingers(&packet)?;
         let scan_time = self.scan_clock.sample(query_counter());
-        Ok(report_bytes(&packet, trackpad, scan_time))
+        Ok(report_bytes(
+            &packet,
+            trackpad,
+            scan_time,
+            self.ptp.selective_reporting(),
+        ))
     }
 
     /// `SET_FEATURE` (see [`PtpSettings::set_feature`]).

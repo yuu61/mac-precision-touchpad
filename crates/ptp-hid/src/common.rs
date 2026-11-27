@@ -23,16 +23,12 @@ pub const REPORTID_DEVICE_CAPS: u8 = 0x07;
 /// `REPORTID_UMAPP_CONF`: the user-mode settings-app configuration feature report.
 pub const REPORTID_UMAPP_CONF: u8 = 0x09;
 
-/// `BUTTON_SWITCH` (HidCommon.h), used as the first usage of report 0x06.
-///
-/// Preserved naming bug: in the HID Usage Tables, Digitizers page 0x57 is *Surface Switch*. The C struct
-/// and this crate nevertheless call bit 0 of report 0x06 "button report". See
-/// [`crate::feature::SelectiveReportBits`].
-pub const BUTTON_SWITCH: u8 = 0x57;
-/// `SURFACE_SWITCH` (HidCommon.h), used as the second usage of report 0x06.
-///
-/// Preserved naming bug: in the HID Usage Tables, Digitizers page 0x58 is *Button Switch*.
-pub const SURFACE_SWITCH: u8 = 0x58;
+/// Digitizers usage 0x57, *Surface Switch*: the first usage of report 0x06 (bit 0, see
+/// [`crate::feature::SelectiveReportBits`]). The C header `HidCommon.h` called it `BUTTON_SWITCH`.
+pub const SURFACE_SWITCH: u8 = 0x57;
+/// Digitizers usage 0x58, *Button Switch*: the second usage of report 0x06 (bit 1). The C header called it
+/// `SURFACE_SWITCH`.
+pub const BUTTON_SWITCH: u8 = 0x58;
 
 /// `MAX_FINGERS` (16). In the descriptors it appears only as the logical maximum of the Input Mode usage
 /// in the Windows configuration TLC (`25 10`). It is not the contact limit; that is

@@ -95,7 +95,8 @@ pub fn work_item_callback<P: FilterIo>(io: &mut P, state: &DeviceState) {
 /// 2. length 0: enqueue the recovery work item;
 /// 3. malformed length: recovery timer 3 s;
 /// 4. no parked upper read: drop the packet;
-/// 5. otherwise stamp `LastReportTime` (the QPC frequency), build the report, retrieve the upper output
+/// 5. otherwise stamp `LastReportTime` (the QPC frequency), build the report (honouring the
+///    selective-reporting switches), retrieve the upper output
 ///    memory, copy 50 bytes, `Information = 50`, complete with the copy status (SUCCESS). If retrieving
 ///    or copying fails: `WdfDeviceSetFailed(AttemptRestart)` and, unlike C, which leaks the request
 ///    (HF-B9), complete it with that failure status (port policy P2).
@@ -134,6 +135,7 @@ fn deliver_report<P: FilterIo>(
         length,
         io.lower_read_buffer(memory),
         scan_time,
+        state.selective_reporting(),
     );
     let upper_memory = match io.retrieve_output_memory(upper) {
         Ok(m) => m,

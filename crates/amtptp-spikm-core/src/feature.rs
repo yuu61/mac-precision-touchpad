@@ -21,7 +21,7 @@ use ptp_hid::common::{
 };
 use ptp_hid::feature::{
     DEVICE_CAPS_REPORT, DEVICE_CAPS_REPORT_LEN, HQA_REPORT, HQA_REPORT_LEN,
-    INPUT_MODE_OFFSET, SELECTIVE_REPORT_DEVICE_MODE_BITS_OFFSET, SelectiveReportBits,
+    INPUT_MODE_OFFSET, SELECTIVE_REPORT_BITS_OFFSET, SelectiveReportBits,
 };
 
 use crate::status::{
@@ -117,9 +117,10 @@ pub fn get_feature(
     }
 }
 
-/// The most bytes the SET handler reads from `reportBuffer` (byte 2 of report 0x06). The glue passes
-/// `min(reportBufferLen, SET_FEATURE_READ_LEN)` bytes.
-pub const SET_FEATURE_READ_LEN: usize = SELECTIVE_REPORT_DEVICE_MODE_BITS_OFFSET + 1;
+/// The most bytes the SET handler reads from `reportBuffer` (byte 1 of reports 0x04 and 0x06). The glue
+/// passes `min(reportBufferLen, SET_FEATURE_READ_LEN)` bytes.
+pub const SET_FEATURE_READ_LEN: usize = SELECTIVE_REPORT_BITS_OFFSET + 1;
+const _: () = assert!(INPUT_MODE_OFFSET < SET_FEATURE_READ_LEN);
 
 /// Byte `offset` of a SET report as the port reads it (P2 for SPI-B2):
 /// - at or past `reportBufferLen` the byte reads as 0 (C read past the end of the report);
@@ -140,9 +141,10 @@ fn set_report_byte(
     }
 }
 
-/// `PtpInputOn`, `PtpReportButton` and `PtpReportTouch`: written by `SET_FEATURE` 0x04/0x06 and **never
-/// read** by the driver (preserved known issue SPI-B3). Atomics, because `SET_FEATURE` can run concurrently
-/// at `DISPATCH_LEVEL` (SPI-B15).
+/// `PtpInputOn`, `PtpReportButton` and `PtpReportTouch`, written by `SET_FEATURE` 0x04/0x06. The input
+/// report honours the two selective-reporting switches ([`PtpSettings::selective_reporting`], P3 fix of
+/// SPI-B3: C never read them); `PtpInputOn` is still write-only. Atomics, because `SET_FEATURE` can run
+/// concurrently at `DISPATCH_LEVEL` (SPI-B15).
 #[derive(Debug, Default)]
 pub struct PtpSettings {
     input_on: AtomicBool,
@@ -151,14 +153,36 @@ pub struct PtpSettings {
 }
 
 impl PtpSettings {
-    /// All three flags FALSE, as in the zeroed device context.
+    /// `PtpInputOn` FALSE, as in the zeroed device context, and both selective-reporting switches on
+    /// ([`SelectiveReportBits::POWER_ON`]; C started with them FALSE, which it never read).
     #[must_use]
     pub const fn new() -> Self {
         Self {
             input_on: AtomicBool::new(false),
-            report_button: AtomicBool::new(false),
-            report_touch: AtomicBool::new(false),
+            report_button: AtomicBool::new(SelectiveReportBits::POWER_ON.button_report),
+            report_touch: AtomicBool::new(SelectiveReportBits::POWER_ON.surface_report),
         }
+    }
+
+    /// The selective-reporting switches the input report honours.
+    pub fn selective_reporting(&self) -> SelectiveReportBits {
+        SelectiveReportBits {
+            surface_report: self.report_touch(),
+            button_report: self.report_button(),
+        }
+    }
+
+    /// Back to [`SelectiveReportBits::POWER_ON`]: the state is not kept across a power reset, so the
+    /// glue calls this in `PrepareHardware`.
+    pub fn reset_selective_reporting(&self) {
+        self.store_selective_reporting(SelectiveReportBits::POWER_ON);
+    }
+
+    fn store_selective_reporting(&self, bits: SelectiveReportBits) {
+        self.report_button
+            .store(bits.button_report, Ordering::Relaxed);
+        self.report_touch
+            .store(bits.surface_report, Ordering::Relaxed);
     }
 
     /// `PtpInputOn`.
@@ -181,17 +205,17 @@ impl PtpSettings {
     ///
     /// - 0x04 (input mode): mode = byte 1. 0 sets `PtpInputOn` FALSE, 3 sets it TRUE, other values change
     ///   nothing. `STATUS_SUCCESS`.
-    /// - 0x06 (function switch): reads **byte 2** like C's 3-byte struct (the descriptor's report is 2
-    ///   bytes; the offset is preserved). `PtpReportButton` = bit 0, `PtpReportTouch` = bit 1.
-    ///   `STATUS_SUCCESS`. With the real 2-byte report, byte 2 lies past `reportBufferLen` and reads as 0
-    ///   (P2 fix of the out-of-bounds read, SPI-B2), so both flags become FALSE.
+    /// - 0x06 (function switch): byte 1, the descriptor's layout ([`SelectiveReportBits::from_byte`]:
+    ///   `PtpReportTouch` = bit 0, Surface Switch; `PtpReportButton` = bit 1, Button Switch).
+    ///   `STATUS_SUCCESS`. A report without byte 1 (`reportBufferLen < 2`) changes nothing (P3 fix of
+    ///   SPI-B2: C read byte 2, past the 2-byte report, so the real report turned both switches off).
     /// - Every other ID: `STATUS_NOT_SUPPORTED`.
     ///
     /// `report` holds up to [`SET_FEATURE_READ_LEN`] bytes, bounded by `reportBufferLen`, from
     /// `reportBuffer`, or `None` when `reportBuffer` is NULL. Byte rule (P2): a byte at or past
     /// `reportBufferLen` reads as 0 (C read past the report); a byte inside it with a NULL buffer returns
     /// `STATUS_INVALID_DEVICE_REQUEST` (C dereferenced NULL). For report 0x04 with `reportBufferLen < 2`
-    /// the mode therefore reads as 0 (mouse), like report 0x06's byte 2.
+    /// the mode therefore reads as 0 (mouse).
     pub fn set_feature(
         &self,
         report_id: u8,
@@ -212,19 +236,18 @@ impl PtpSettings {
                 STATUS_SUCCESS
             }
             REPORTID_FUNCSWITCH => {
+                if u64::from(report_buffer_len) <= SELECTIVE_REPORT_BITS_OFFSET as u64 {
+                    return STATUS_SUCCESS;
+                }
                 let byte = match set_report_byte(
                     report_buffer_len,
                     report,
-                    SELECTIVE_REPORT_DEVICE_MODE_BITS_OFFSET,
+                    SELECTIVE_REPORT_BITS_OFFSET,
                 ) {
                     Ok(b) => b,
                     Err(status) => return status,
                 };
-                let bits = SelectiveReportBits::from_byte(byte);
-                self.report_button
-                    .store(bits.button_report, Ordering::Relaxed);
-                self.report_touch
-                    .store(bits.surface_report, Ordering::Relaxed);
+                self.store_selective_reporting(SelectiveReportBits::from_byte(byte));
                 STATUS_SUCCESS
             }
             _ => STATUS_NOT_SUPPORTED,
@@ -246,10 +269,29 @@ mod tests {
         assert_eq!(get_feature(7, 0, false).status, STATUS_INVALID_BUFFER_SIZE);
         let s = PtpSettings::new();
         assert_eq!(s.set_feature(4, 2, None), STATUS_INVALID_DEVICE_REQUEST);
-        assert_eq!(s.set_feature(6, 3, None), STATUS_INVALID_DEVICE_REQUEST);
-        // Nothing inside reportBufferLen is read: the byte is 0.
-        assert_eq!(s.set_feature(6, 2, None), STATUS_SUCCESS);
+        assert_eq!(s.set_feature(6, 2, None), STATUS_INVALID_DEVICE_REQUEST);
+        // Nothing inside reportBufferLen is read.
+        assert_eq!(s.set_feature(6, 1, None), STATUS_SUCCESS);
+        assert_eq!(s.selective_reporting(), SelectiveReportBits::POWER_ON);
         assert_eq!(s.set_feature(4, 0, None), STATUS_SUCCESS);
+    }
+
+    #[test]
+    fn selective_reporting_reads_byte_one() {
+        let s = PtpSettings::new();
+        assert_eq!(s.selective_reporting(), SelectiveReportBits::POWER_ON);
+        for byte in 0..4_u8 {
+            assert_eq!(s.set_feature(6, 2, Some(&[6, byte])), STATUS_SUCCESS);
+            assert_eq!(
+                s.selective_reporting(),
+                SelectiveReportBits {
+                    surface_report: byte & 1 != 0,
+                    button_report: byte & 2 != 0,
+                }
+            );
+        }
+        s.reset_selective_reporting();
+        assert_eq!(s.selective_reporting(), SelectiveReportBits::POWER_ON);
     }
 
     #[test]

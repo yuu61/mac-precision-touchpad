@@ -225,8 +225,10 @@ pub fn prepare_hardware<H: UsbHardware + ?Sized>(state: &DeviceState, hw: &mut H
 
 /// `AmtPtpEvtDeviceD0Entry`.
 ///
-/// 1. if `PtpReportButton || IsWellspringModeOn` (always true): wellspring mode on; a failure is ignored
-///    (spec B11, preserved: the device then stays in mouse mode);
+/// 1. wellspring mode on; a failure is ignored (spec B11, preserved: the device then stays in mouse mode).
+///    C switched only if `PtpReportButton || IsWellspringModeOn`, which was always true while selective
+///    reporting was ignored; now that `SET_FEATURE` 0x06 can clear `PtpReportButton`, the mode no longer
+///    depends on it (P3);
 /// 2. cache the QPC frequency and restart the reporting clock;
 /// 3. start the interrupt pipe's I/O target (starts the continuous reader) and return its status.
 ///
@@ -234,10 +236,7 @@ pub fn prepare_hardware<H: UsbHardware + ?Sized>(state: &DeviceState, hw: &mut H
 /// `D0Entry` only after a successful `PrepareHardware`, which guarantees one) the C would dereference NULL;
 /// this returns `STATUS_INVALID_DEVICE_STATE` instead.
 pub fn d0_entry<H: UsbHardware + ?Sized>(state: &DeviceState, hw: &mut H) -> NtStatus {
-    let gates = state.input_gates();
-    if gates.report_button || state.wellspring_mode_on() {
-        let _ignored = set_wellspring_mode(state, hw, true);
-    }
+    let _ignored = set_wellspring_mode(state, hw, true);
     state.set_qpc_frequency(hw.query_performance_frequency());
     match state.interrupt_pipe() {
         Some(pipe) => hw.start_pipe(pipe),

@@ -234,10 +234,9 @@ unsafe fn set_feature_packet(request: &Request) -> Option<SetFeaturePacket<'_>> 
         );
     }
     if report_id == REPORTID_FUNCSWITCH
-        && let Some(bits) = feature::selective_report_trace_bits(report_buffer)
+        && let Some(bits) = feature::selective_report_bits(report_buffer)
     {
-        // Selective reporting is traced only, never applied (spec B15). The C reads the bits from
-        // reportBuffer[2]; that byte is outside the 2-byte report, so normally nothing is traced (P2).
+        // The core applies these switches to the input gates.
         tlg::write_event!(
             PROVIDER,
             "SelectiveReporting",

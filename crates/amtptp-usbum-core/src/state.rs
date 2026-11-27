@@ -80,9 +80,10 @@ impl UsbDeviceDescriptor {
 pub struct StateSnapshot {
     /// `IsWellspringModeOn`.
     pub wellspring_mode_on: bool,
-    /// `IsSurfaceReportOn` (set from bit 1 of feature 0x06, UM-B14).
+    /// `IsSurfaceReportOn` (set from bit 0 of feature 0x06, the Surface Switch).
     pub surface_report_on: bool,
-    /// `IsButtonReportOn` (set from bit 0 of feature 0x06, UM-B14; also gates `D0Entry`, UM-B10).
+    /// `IsButtonReportOn` (set from bit 1 of feature 0x06, the Button Switch; also gates `D0Entry`,
+    /// UM-B10).
     pub button_report_on: bool,
     /// `PressureQualLevel` (dead state, UM-B15).
     pub pressure_qual_level: u8,

@@ -8,18 +8,19 @@ mod common;
 use amtptp_usbkm_core::feature::{GetFeaturePacket, SetFeaturePacket, get_feature, set_feature};
 use amtptp_usbkm_core::hid::{InternalIoctl, route_internal_ioctl};
 use amtptp_usbkm_core::lifecycle;
-use amtptp_usbkm_core::state::DeviceState;
+use amtptp_usbkm_core::state::{DeviceState, InputGates};
 use amtptp_usbkm_core::status::{Completion, STATUS_NOT_SUPPORTED};
 use common::fake::{FakeHw, normalize_ops};
 use common::{Record, Tally, hex, kv, load, num, status, status_str, to_hex};
-use ptp_hid::common::REPORTID_PTPHQA;
-use ptp_hid::feature::{HQA_REPORT, HQA_REPORT_LEN};
+use ptp_hid::common::{REPORTID_FUNCSWITCH, REPORTID_PTPHQA};
+use ptp_hid::feature::{HQA_REPORT, HQA_REPORT_LEN, SelectiveReportBits};
 
 /// What one replay produced.
 struct Outcome {
     completion: Completion,
     buf_out: Vec<u8>,
     wsm_out: bool,
+    gates_out: InputGates,
     wire: String,
     ops: Vec<String>,
 }
@@ -109,8 +110,33 @@ fn run(r: &Record, mode_override: Option<u8>) -> Outcome {
         completion,
         buf_out: buf,
         wsm_out: state.wellspring_mode_on(),
+        gates_out: state.input_gates(),
         wire,
         ops,
+    }
+}
+
+/// The gates after the record. C never changed them (spec B15); the port applies a successful
+/// `SET_FEATURE` 0x06 that carries byte 1 (P3): bit 0 Surface Switch, bit 1 Button Switch.
+fn expected_gates(r: &Record, st_out: &std::collections::BTreeMap<String, String>) -> InputGates {
+    let c_gates = InputGates {
+        report_touch: st_out["touch"] == "1",
+        report_button: st_out["button"] == "1",
+    };
+    assert_eq!(c_gates, InputGates::ON, "{}: C never changes the gates", r.id());
+    let rblen = num(r.req("report_buffer_len")) as usize;
+    let applies = r.req("kind") == "set_feature"
+        && num(r.req("report_id")) == u64::from(REPORTID_FUNCSWITCH)
+        && status(r.req("status")) == 0
+        && r.req("userbuffer") != "null"
+        && rblen >= 2;
+    if !applies {
+        return c_gates;
+    }
+    let bits = SelectiveReportBits::from_byte(hex(r.req("buf_in"))[1]);
+    InputGates {
+        report_touch: bits.surface_report,
+        report_button: bits.button_report,
     }
 }
 
@@ -136,11 +162,7 @@ fn check(r: &Record, o: &Outcome) -> usize {
     assert_eq!(to_hex(&o.buf_out), to_hex(&expected), "{id}: report buffer");
     let st_out = kv(r.req("st_out"));
     assert_eq!(o.wsm_out, st_out["wsm"] == "1", "{id}: wsm");
-    assert_eq!(
-        st_out["touch"], "1",
-        "{id}: SET 0x06 never changes the gates"
-    );
-    assert_eq!(st_out["button"], "1", "{id}");
+    assert_eq!(o.gates_out, expected_gates(r, &st_out), "{id}: gates");
     assert_eq!(o.wire, r.req("wire"), "{id}: wire");
     let (expected_ops, null_deletes) = normalize_ops(r.req("ops"));
     assert_eq!(o.ops, expected_ops, "{id}: ops");

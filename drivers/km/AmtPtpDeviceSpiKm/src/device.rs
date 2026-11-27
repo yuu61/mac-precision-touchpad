@@ -314,8 +314,9 @@ const LOWER_ATTRIBUTES_DESCRIPTOR_LEN: ULONG = {
 ///    SPI-B23, preserved). Failure returns that status.
 /// 2. Store VID/PID/version, then look the device up in the config table: no match returns
 ///    `STATUS_NOT_FOUND` (the IDs stay stored, as in C).
-/// 3. Read `DesiredReportType` from the driver's Parameters key (zero-initialized value buffer: SPI-B24).
-/// 4. Return `STATUS_SUCCESS` whatever the registry step did.
+/// 3. Turn both selective-reporting switches on (not in C, which never used them).
+/// 4. Read `DesiredReportType` from the driver's Parameters key (zero-initialized value buffer: SPI-B24).
+/// 5. Return `STATUS_SUCCESS` whatever the registry step did.
 unsafe extern "C" fn evt_device_prepare_hardware(
     device: WDFDEVICE,
     _resource_list: WDFCMRESLIST,
@@ -365,6 +366,9 @@ unsafe extern "C" fn evt_device_prepare_hardware(
         );
         return status;
     }
+
+    // Selective reporting is not kept across a (re)start: report contacts and the button again.
+    context.runtime.ptp_settings().reset_selective_reporting();
 
     // SAFETY: valid device handle, PASSIVE_LEVEL.
     let desired_report_type = unsafe { query_desired_report_type(device) };

@@ -48,6 +48,7 @@
 //! 1. Send [`wire::LOWER_ATTRIBUTES_IOCTL`] synchronously with a zeroed [`wire::LOWER_ATTRIBUTES_LEN`]-byte
 //!    output buffer, then `config = shared.load(); r = config.identify(status, &buf); shared.store(&config)`
 //!    (the IDs are stored even when the lookup fails). On `Err(s)` return `s` (no registry access).
+//!    Otherwise `runtime.ptp_settings().reset_selective_reporting()`.
 //! 2. Open the driver's Parameters key ([`device::PARAMETERS_KEY_ACCESS`]); if that fails use `None`, else
 //!    query [`device::DESIRED_REPORT_TYPE_VALUE_NAME`] into a **zeroed** 4-byte buffer and use
 //!    [`device::desired_report_type_value`] with `query_status` and `buf`, then close the key.

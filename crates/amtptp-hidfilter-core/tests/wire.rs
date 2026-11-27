@@ -6,7 +6,8 @@
 //!   returned TRUE with a failed lower status is a failed mode switch (`send_true_status_fail`);
 //! - the recovery timer works only on a device in D0, does nothing but the backlog for a configured
 //!   device, and no longer issues a lower read after a failed mode switch (`timer-*`; HF-B12);
-//! - HF-B30: `PrepareHardware` keeps the IDs, so a PnP restart behaves like a resume (`pnp-restart-*`).
+//! - HF-B30: `PrepareHardware` keeps the IDs, so a PnP restart behaves like a resume (`pnp-restart-*`),
+//!   except that it also turns both selective-reporting switches back on.
 
 #![cfg(test)]
 
@@ -130,10 +131,12 @@ fn expected<'a>(r: &'a Rec, recs: &'a [Rec]) -> Expected<'a> {
             .find(|x| x.case() == format!("resume-{cfg}"))
             .expect("matching resume record");
         assert_eq!(resume.get("st_in"), r.get("st_in"), "{case}: same start state");
+        // PrepareHardware also turns both selective-reporting switches back on.
+        let st_out = with_state(&with_state(resume.get("st_out"), "touch", "1"), "btn", "1");
         return Expected {
             ret: resume.get("ret").to_owned(),
             events: with_status_reads(&events(resume), 0),
-            st_out: resume.get("st_out").to_owned(),
+            st_out,
             sent: resume.num("sent"),
             new_reads: Some(0),
             bucket: P3_PNP_RESTART,

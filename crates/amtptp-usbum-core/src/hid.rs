@@ -332,8 +332,9 @@ pub fn get_feature<R: HidRequest>(state: &DeviceState, request: &mut R) -> Ioctl
 ///   on → `SetWellspringMode(FALSE)`; mode 3 and device off → `SetWellspringMode(TRUE)` (failure →
 ///   Information 0); other modes: nothing. Information 2. The device's answer decides, not the driver
 ///   flag (UM-B4, P3).
-/// - 0x06 selective reporting: `IsButtonReportOn = bit 0`, `IsSurfaceReportOn = bit 1` of byte 1 (UM-B14,
-///   P3 PRESERVED swap). Information 2.
+/// - 0x06 selective reporting: `IsSurfaceReportOn = bit 0` (Surface Switch, usage 0x57),
+///   `IsButtonReportOn = bit 1` (Button Switch, 0x58) of byte 1 (P3 fix of UM-B14: C applied them
+///   swapped). A report without byte 1 changes nothing. Information 2.
 /// - 0x09: `PressureQualLevel = byte 1`, `SgContactSizeQualLevel = byte 2`, `MuContactSizeQualLevel =
 ///   byte 3`. Information 4.
 /// - other IDs: Information 0.
@@ -347,21 +348,26 @@ pub fn set_feature<R: HidRequest, C: ControlPipe>(
         Ok(length) => length as u8,
         Err(_) => return IoctlOutcome::success(0),
     };
-    let report = match request.input_memory() {
-        Ok(input) => [
-            input.get(1).copied().unwrap_or(0),
-            input.get(2).copied().unwrap_or(0),
-            input.get(3).copied().unwrap_or(0),
-        ],
+    let (report, selective) = match request.input_memory() {
+        Ok(input) => (
+            [
+                input.get(1).copied().unwrap_or(0),
+                input.get(2).copied().unwrap_or(0),
+                input.get(3).copied().unwrap_or(0),
+            ],
+            SelectiveReportBits::from_report(input),
+        ),
         Err(_) => return IoctlOutcome::success(0),
     };
     let [byte1, byte2, byte3] = report;
     match report_id {
         REPORTID_REPORTMODE => set_input_mode(state, control, byte1),
         REPORTID_FUNCSWITCH => {
-            let bits = SelectiveReportBits::from_byte(byte1);
-            state.set_button_report_on(bits.button_report);
-            state.set_surface_report_on(bits.surface_report);
+            // A report without its switch byte changes nothing (C read the missing byte as 0, UM-B8).
+            if let Some(bits) = selective {
+                state.set_button_report_on(bits.button_report);
+                state.set_surface_report_on(bits.surface_report);
+            }
             IoctlOutcome::success(SELECTIVE_REPORT_LEN)
         }
         REPORTID_UMAPP_CONF => {

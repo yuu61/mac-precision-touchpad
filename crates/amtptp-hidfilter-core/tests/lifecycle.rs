@@ -153,10 +153,12 @@ fn replay_add_device(record: &Rec, tally: &mut Tally) {
         }
     }
     if record.get("st_out") != "nodevice" {
-        assert_eq!(
-            DeviceState::new().snapshot(),
-            parse_state(record.get("st_out"))
-        );
+        // P3: both selective-reporting switches start on (C left them FALSE and never read them).
+        let mut expected = parse_state(record.get("st_out"));
+        assert!(!expected.ptp_report_touch && !expected.ptp_report_button);
+        expected.ptp_report_touch = true;
+        expected.ptp_report_button = true;
+        assert_eq!(DeviceState::new().snapshot(), expected);
     }
     if case == "device-add-ok" {
         check_object_config(&fixture_ev);
