@@ -18,8 +18,8 @@ The policy terms come from the [behavior policy](README.md#behavior-policy):
 
 | ID | Decision | What the Rust code does |
 |---|---|---|
-| KM-B1 | PRESERVED (P1/P3) | `input::scan_time_as_c(perf_out, LastReportTime)` = `trunc((a-b)/100)`. The result is clamped above at 0xFF, is not clamped below, and is cast to `u16`. D0Entry stores and the read path passes the value `KeQueryPerformanceCounter` writes to its **out-parameter** (the frequency, via `UsbHardware::query_performance_counter_out`), so ScanTime is always 0. The subtraction wraps (MSVC result instead of signed-overflow UB). |
-| KM-B2 | PRESERVED (P3) | GET_FEATURE 0x08 writes only `[0]=08 [1]=FC` (`ptp_hid::feature::write_hqa_report_as_c`). Bytes 2..256 are untouched. |
+| KM-B1 | FIXED (PR #7) | `ptp_hid::scan_time::ScanClock` reports the time since the first report of the session in 100 µs units: the first report is 0 and the 16-bit value wraps every 6.5536 s. D0Entry caches the QPC frequency (`UsbHardware::query_performance_frequency`) and starts a new session (`lifecycle::d0_entry`). The reader passes the return value of `KeQueryPerformanceCounter(NULL)`, the counter, not the out-parameter (`wdf_support::time::query_performance_counter`). |
+| KM-B2 | FIXED (PR #7) | GET_FEATURE 0x08 writes all 257 bytes, the report ID and the 256-byte certification blob (`ptp_hid::feature::write_hqa_report`). Information stays 0 (KM-B13). |
 | KM-B3 | PRESERVED (P1) wire, FIXED (P2) buffer | Both setup packets keep `wLength = 4` (`wellspring::WELLSPRING_DATA_LEN`). The SET_REPORT data stage is `[buf0, mode, buf2, buf3]`. The buffer is a full 4 bytes, zeroed by `set_wellspring_mode`, so there is no pool overrun on the read and no over-read on the write. Bytes the device does not return are `00`. |
 | KM-B4 | FIXED (P2) | `ControlTransfer::allocate_transfer_buffer` returns `Err(status)` and `set_wellspring_mode` returns that status. There is no `WdfObjectDelete(NULL)`: the buffer type's `Drop` deletes only a real allocation. |
 | KM-B5 | PRESERVED (P3) | The GET_REPORT byte count is not checked. |
@@ -94,7 +94,8 @@ Details:
 - **input_*.txt**:
   - The `kind=defaults` line is consumed as the defaults of the 1000 random records (bucket `defaults_line`).
   - The 22 `unreachable_state` records (gates off, `LastReportTime != frequency`) are **asserted**, not skipped. The
-    core keeps the gates and the ScanTime arithmetic as inputs.
+    gates are core inputs. The C recorded ScanTime as 0; the port's first report of a session is 0 too, and the test
+    compares the ScanTime bytes with 0 (KM-B1).
   - Field exception, bucket `driver/no_request` (2 per file): there is no request, so `out` is not a driver
     result. The test asserts that it is a buffer the driver never touched: either the previous case's `out`
     (`req-none`, a 3-contact report for a 2-finger packet) or the untouched prefill (`req-none-6fingers`). `res`,
@@ -186,8 +187,9 @@ The KMDF 1.23 glue. It makes the WDF calls the C code makes, in the C order, and
   selection, with no extra lookups. The core hook `UsbHardware::interrupt_pipe_selected` stores the handle exactly
   where the C assigns `InterruptPipe` and resets it at every reselection (B20). `WdfUsbTargetPipeGetIoTarget` is a
   `FORCEINLINE` cast in `wdfusb.h`, and is reproduced as one (`usb::pipe_io_target`).
-- **Reader.** `KeQueryPerformanceCounter(&x)` is called before the length gate rather than after the dequeue.
-  Only the out-parameter (the frequency) is used. That has no observable effect, and ScanTime stays 0 (B1).
+- **Reader.** `KeQueryPerformanceCounter(NULL)` is called before the length gate rather than after the dequeue,
+  and its return value (the counter) feeds the ScanTime clock (B1, fixed in PR #7). The frequency is read once
+  per D0Entry.
   `WdfMemoryGetBuffer` is called before the gate. Its size bounds the packet slice, so a `NumBytesTransferred`
   beyond the buffer is dropped as malformed; that is impossible, because N ≤ TransferLength.
 - **Code placement** mirrors `#pragma alloc_text`: `DriverEntry` in `INIT`, and device add, driver cleanup, queue

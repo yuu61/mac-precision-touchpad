@@ -11,8 +11,8 @@
 //! - A buffer that is too short for the bytes the decoder reads gives `None`. What a driver does in that
 //!   case (the C code often reads past the end) is decided by its core crate.
 //!
-//! Encoders that write into a caller's buffer (`write_to`, [`write_hqa_report`]) write exactly the
-//! bytes the C code writes and leave every other byte of the buffer untouched.
+//! Encoders that write into a caller's buffer (`write_to`, [`write_hqa_report`]) write only the bytes of
+//! their report and leave every other byte of the buffer untouched.
 
 use crate::BufferTooSmall;
 use crate::bytes::{concat, write_prefix};

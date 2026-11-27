@@ -47,12 +47,12 @@ The port reads the trackpad as an ordinary HID client instead:
 
 | ID | Decision | What the Rust code does |
 |---|---|---|
-| HF-B1 | PRESERVED (P1) | GET_FEATURE 0x08 writes only `08 FC` (comma-operator bug) via `ptp_hid::feature::write_hqa_report_as_c`; the rest of the caller's buffer is untouched. |
+| HF-B1 | FIXED (PR #7) | GET_FEATURE 0x08 writes all 257 bytes, the report ID and the 256-byte certification blob (`ptp_hid::feature::write_hqa_report`). C wrote only `08 FC` (comma-operator bug). Information stays unset (HF-B21). |
 | HF-B2 | FIXED (Step 2) | The MT2 decoder sign-extends Y before inversion. X bits do not affect Y. |
 | HF-B3 | PRESERVED (P1) | Confidence = `(TouchMinor << 1) < 345` (TouchMinor tested twice), i.e. byte 5 <= 172. |
 | HF-B4 | FIXED (P2 / Step 2) | The 50-byte report is built zero-initialised (`PtpReport::EMPTY`). `ContactTracker` tracks MT2 hardware contact IDs (`0..=15`), deduplicates within a frame, latches `Confidence = 0` palms, and synthesises 1-frame `TipSwitch = 0` liftoff reports. The clean report descriptor is `511` bytes (`GLOBAL_RESET` after all five fingers and `Scan Time`, `Input Mode` logical maximum `3`). |
 | HF-B5 | FIXED (Step 2) | Report coordinates stay within the descriptor limits of 7612 on X and 5065 on Y. |
-| HF-B6 | PRESERVED (P1) | `FilterIo::query_performance_frequency` returns what `KeQueryPerformanceCounter(&x)` writes, which is the frequency. `scan_time(freq, swap(last, freq))` is therefore 0, or 0xFF on the never-stamped first report. |
+| HF-B6 | FIXED (PR #7) | `ptp_hid::scan_time::ScanClock` reports the time since the first report of the session in 100 µs units: the first report is 0 and the 16-bit value wraps every 6.5536 s. Every successful configuration (data source opened, Init/Restart, recovery timer) caches the frequency (`FilterIo::query_performance_frequency`) and starts a new session. The completion samples `FilterIo::query_performance_counter`, the return value of `KeQueryPerformanceCounter(NULL)`. |
 | HF-B7 | FIXED (P3) | The completion status is read (`WdfRequestGetStatus`). A failed read is `LowerReadClass::Failed`: the work item re-issues it at once, as C did, until `config::MAX_IMMEDIATE_READ_RETRIES` (8) reads have failed in a row; after that the 3 s recovery timer, while the device is in D0. Any other completion resets the count. C took a failed read with `Information == 0` as an empty read with no limit, so a lower driver that failed every read (Bluetooth link down) made a zero-delay loop. The first version of this fix sent every failed read to the timer. On hardware, with the detour, HidBth failed a read with `STATUS_DEVICE_DATA_ERROR` now and then during normal use (see "Competing reader on Bluetooth" below). Two such failures in a row left no read in flight and froze input for 3 s. With the data source, no read failed in the hardware measurement. |
 | HF-B8 | FIXED (P3) | Byte 0 must be the transport's multitouch report ID (`multitouch_report_id`: USB 0x02, Bluetooth 0x31, as in Linux hid-magicmouse and every C edge packet). Another report is `LowerReadClass::OtherReport`: it is dropped, and the work item sends the mode switch again (if the device is configured, in D0 and its source is open) and issues the next read. C parsed it as fingers when its length was `hdr + 9n`, and otherwise stalled input for 3 s as malformed. The mode switch is new: when the trackpad's power switch restarts it while the HID device stays (no PnP events), it comes back in mouse mode (hardware: 8-byte reports with ID 0x02), and C never switched it back, so the cursor stayed dead until the device was re-added. Once on hardware, a 4-byte packet starting with 0x8C also triggered the switch; it was probably the tail of a report split by the competing reader below. The extra switch is harmless (SUCCESS, 23 ms). |
 | HF-B9 | FIXED (P2) | Retrieve-output or copy failure: `WdfDeviceSetFailed(AttemptRestart)` is still issued. Then the upper request is **completed** with that failure status. C leaks it. |
@@ -81,7 +81,7 @@ The port reads the trackpad as an ordinary HID client instead:
 ### Other P2 items, without a spec bug ID
 
 * **Data races.** The C context fields are read and written without locks. The port keeps them as relaxed atomics in `DeviceState`.
-* **Signed overflow.** The INT subtractions (`x - X.min`) and the LONGLONG ScanTime subtraction use `wrapping_*`.
+* **Signed overflow.** The INT subtractions (`x - X.min`) use `wrapping_*`. The ScanTime subtraction saturates (`ScanClock`, PR #7).
 * **Unaligned access.** The unaligned `USHORT*` and `UINT*` finger loads became explicit little-endian decoding.
 * **Out-of-bounds reads.** Finger and button bytes outside the buffer read as 0. That never happens with the 1024-byte buffer: every input record was replayed with the tail filled with 0x00 and again with 0xFF, with identical results.
 * **Alignment.** The mode-switch packet buffer is `#[repr(C, align(8))]`. The C `UCHAR[32]` is not guaranteed to be 8-aligned.
@@ -190,7 +190,7 @@ The core decides which call happens, and when. Each WDF callback is one call int
 * GET_STRING: answered from the strings read when the source opened (C: forwarded to the PDO with send-and-forget).
 * Feature IOCTLs read `WdfRequestWdmGetIrp(Request)->UserBuffer` (a NULL IRP is treated as a NULL `UserBuffer`; see Driver-side P2 fixes).
 * Descriptor IOCTLs use `WdfRequestRetrieveOutputMemory` plus `WdfMemoryCopyFromBuffer`. Attributes use `WdfRequestRetrieveOutputBuffer(32, Length = NULL)`. So the framework, not the glue, produces the error statuses there.
-* `KeQueryPerformanceCounter(&x)` is called with a non-NULL pointer and its return value is discarded. `x` is the QPC frequency (HF-B6, preserved).
+* `KeQueryPerformanceCounter(NULL)` gives the counter for ScanTime, and `KeQueryPerformanceCounter(&x)` the frequency when the device is configured (`wdf_support::time`, HF-B6 fixed in PR #7).
 * Code placement: `DriverEntry` is in `INIT`; device-add and driver cleanup are in `PAGE`, with `wdk::paged_code!()`, a debug IRQL assert like `PAGED_CODE()`. Everything else is in `.text`. That includes the PnP callbacks, which C also left non-paged, and everything reachable at DISPATCH_LEVEL (dispatch, completion routine, read issue).
 
 ### Driver-side P2 fixes

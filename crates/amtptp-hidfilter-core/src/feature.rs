@@ -54,8 +54,8 @@ pub fn get_feature_report(report_id: u8, report_buffer: &mut [u8]) -> NtStatus {
     }
 }
 
-/// The device-state change a `SET_FEATURE` asks for. `PtpInputOn` is never read (HF-B20); the input
-/// report honours the two selective-reporting switches.
+/// The device-state change a `SET_FEATURE` asks for. The input report honours `PtpInputOn` and the two
+/// selective-reporting switches (HF-B20).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FeatureChange {
     /// Nothing changes (input mode other than 0 or 3).

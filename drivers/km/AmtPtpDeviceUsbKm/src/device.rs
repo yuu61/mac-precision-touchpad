@@ -212,8 +212,8 @@ unsafe extern "C" fn evt_device_prepare_hardware(
 
 /// `AmtPtpEvtDeviceD0Entry` (Device.c:275-359). `PASSIVE_LEVEL`, non-paged as in C.
 ///
-/// Wellspring mode on (failure ignored, B11), `LastReportTime` = the QPC out-parameter (B1), start the
-/// interrupt pipe target (its failure fails `D0Entry`).
+/// Wellspring mode on (failure ignored, B11), cache the QPC frequency and restart the `ScanTime` clock
+/// (B1), start the interrupt pipe target (its failure fails `D0Entry`).
 unsafe extern "C" fn evt_device_d0_entry(
     device: WDFDEVICE,
     previous_state: WDF_POWER_DEVICE_STATE,

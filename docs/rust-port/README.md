@@ -36,6 +36,12 @@ documents:
   carrying only its first blob byte, VendorID 0x8910 not matching what the settings app looks
   for). These are listed as "preserved known issues" so they can be fixed deliberately later.
 
+Later pull requests fixed several P1 and P3 items on purpose: ScanTime and the full HQA report
+(PR #7), the selective-reporting bit order (PR #8), the UsbUm feature-report statuses, contact IDs
+with liftoff reports, confidence, coordinate clamps and the HID descriptors (PR #13 and #14). The
+per-driver tables mark each such item `FIXED`; the items still marked `PRESERVED`, such as
+VendorID 0x8910, are unchanged.
+
 ## How the port was verified
 
 - The hardware-independent logic lives in the `no_std` crates under `crates/`. Their tests replay
@@ -47,4 +53,5 @@ documents:
   sources function by function, with every request path (completed or forwarded exactly once)
   and every callback (IRQL, code section) accounted for.
 - AmtPtpHidFilter and AmtPtpBthFilter have been run on hardware (Bluetooth Magic Trackpad 2,
-  x64); see their records.
+  x64); see their records. AmtPtpDeviceUsbUm has been run with the same trackpad over USB.
+  AmtPtpDeviceUsbKm and AmtPtpDeviceSpiKm have not been run on hardware.
