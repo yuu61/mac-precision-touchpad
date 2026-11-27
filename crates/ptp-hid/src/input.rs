@@ -11,8 +11,9 @@
 //!
 //! The bit positions follow MSVC, which allocates bitfields from the least significant bit.
 //!
-//! The encoders never normalize a value. `ContactCount` and `IsButtonClicked` are written as raw bytes (`SpiKm`
-//! copies them straight from the Apple packet, so they can be anything up to 255). Padding bits and unused
+//! The encoders never normalize a value. `ContactCount` and `IsButtonClicked` are written as raw bytes; the
+//! drivers bound `ContactCount` to the five slots, but `SpiKm` copies `IsButtonClicked` straight from the
+//! Apple packet, so it can be anything up to 255. Padding bits and unused
 //! contact slots are always zero: the C drivers leave them as uninitialized stack bytes, and the port
 //! zero-initializes them (policy P2).
 
@@ -260,7 +261,7 @@ pub struct SpiPtpReport {
     pub contacts: [SpiPtpContact; PTP_CONTACT_SLOTS],
     /// `ScanTime` (u16 LE).
     pub scan_time: u16,
-    /// `ContactCount`, raw (`SpiKm` does not clamp it to 5).
+    /// `ContactCount`, raw (`SpiKm` passes the tracked count, at most 5).
     pub contact_count: u8,
     /// `IsButtonClicked`, raw (`SpiKm` copies the whole Apple `ClickOccurred` byte).
     pub is_button_clicked: u8,

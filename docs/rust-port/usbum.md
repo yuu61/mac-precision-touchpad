@@ -16,7 +16,7 @@ The policy terms come from the [behavior policy](README.md#behavior-policy):
 | ID | Decision | What the Rust code does |
 |---|---|---|
 | UM-B1 | PRESERVED (P1) wire, FIXED (P2) buffer | `wLength` stays 4 for every family (`usb::MODE_SWITCH_TRANSFER_LEN`, `usb::wellspring_mode_read_setup`/`_write_setup`). The GET and the following SET share one zeroed 4-byte buffer (`usb::set_wellspring_mode`). TYPE4/5 no longer overrun a 2-byte allocation. Where the device answers fewer than 4 bytes, SET payload bytes 2-3 are `00`; in C they were heap garbage (fixture `umask`). `cbTransferred` is still not checked. |
-| UM-B2 | PRESERVED (P3) | GET_FEATURE 0x08 writes only `08 FC` (`ptp_hid::feature::write_hqa_report_as_c`). Bytes 2..256 are untouched and Information is 257 (`hid::get_feature`). |
+| UM-B2 | FIXED (PR #7) bytes, PRESERVED (P1) Information | GET_FEATURE 0x08 writes all 257 bytes, the report ID and the 256-byte certification blob (`ptp_hid::feature::write_hqa_report`). Information stays 257 (`hid::get_feature`). |
 | UM-B3 | FIXED (P2) | `config::lookup_config_row` iterates the 15 rows and returns `None` for an unknown PID. `pnp::prepare_hardware` then sets `DeviceInfo = NULL` and returns `STATUS_INVALID_DEVICE_STATE`. It also reports `TraceEvent::DeviceNotFound` (DeviceIdentificationEvent / DeviceNotFoundInRegistry). |
 | UM-B4 | PRESERVED (P3) | For TYPE3, `get_wellspring_mode` always reports on, and `set_wellspring_mode` only stores the flag. Mode 0 followed by mode 3 therefore leaves WS8 off until the next D0 cycle (fixture sequence `b4-ws8`). |
 | UM-B5 | FIXED (P2) | Nothing is allocated for the mode switch: the core passes a 4-byte buffer to `io::ControlPipe`, so there is no `WdfObjectDelete(NULL)` path. The glue describes that buffer with `WDF_MEMORY_DESCRIPTOR_INIT_BUFFER`. |
@@ -26,7 +26,7 @@ The policy terms come from the [behavior policy](README.md#behavior-policy):
 | UM-B9 | FIXED (P3) | `pnp::d0_exit` runs `SetWellspringMode(FALSE)` best effort and always returns `STATUS_SUCCESS`; the switch status is only traced (`D0ExitOutcome::mode_switch_status`). C returned it, so a surprise removal failed D0Exit. The 18 `wire.txt` D0Exit records whose switch fails compare that status with the C return value. |
 | UM-B10 | FIXED (P3) | `pnp::d0_entry` always switches the mode on. C did so only if `IsButtonReportOn \|\| IsWellspringModeOn`; D0Exit turns the mode off, so with the button switch off a resume left the trackpad in mouse mode. A failure is ignored and reported in `D0EntryOutcome::mode_switch_status`. The `*-d0entry-gate-btn0-wsm0` records are checked against their `wsm1` twin, and the two `b10` sequences of `sequences.txt` are replaced by the test `d0_entry_switches_the_mode_after_selective_reporting_off`. |
 | UM-B11 | PRESERVED (P3) | A packet with a bad length runs `usb::emergency_reset` (Set FALSE, then Set TRUE) synchronously inside the read completion, even in mouse mode and even for TYPE3 (flag only). It is not moved to a work item. |
-| UM-B12 | PRESERVED (P1/P3) | `input::scan_time` is `min((qpc - PerfCounter)/100, 0xFF) as u16`, with truncating division, no lower clamp and 16-bit truncation of negative deltas. `PerfCounter` is set only in D0Entry. The subtraction wraps, giving the MSVC result instead of signed-overflow UB. |
+| UM-B12 | FIXED (PR #7) | `ptp_hid::scan_time::ScanClock` reports the time since the first report of the session in 100 µs units: the first report is 0 and the 16-bit value wraps every 6.5536 s. D0Entry caches the QPC frequency and starts a new session (`pnp::d0_entry`). The read path passes the QPC counter (`QueryPerformanceCounter`, `wdf_support::time`). A counter below the session origin gives 0 instead of a wrapped value. |
 | UM-B13 | FIXED (P2 / Step 2) | The input report is zero-initialized (`input::build_report` starts from `PtpReport::EMPTY`). `ContactTracker` maintains persistent `ContactID`s (nearest-neighbor for Wellspring, hardware IDs `0..=15` for MT2), synthesizes 1-frame `TipSwitch = 0` liftoff reports, and latches `Confidence = 0` palms (`major >= 2500 \|\| minor >= 2500` on Wellspring). |
 | UM-B14 | FIXED (P3) | SET_FEATURE 0x06 sets bit 0 (Surface Switch, usage 0x57) → `IsSurfaceReportOn` and bit 1 (Button Switch, 0x58) → `IsButtonReportOn`. A report without byte 1 changes nothing. |
 | UM-B15 | PRESERVED (P3) | The qualification levels are stored and echoed back (GET/SET 0x09) but never applied. They live in `DeviceState` and are not reset at PrepareHardware or D0. |
@@ -73,6 +73,7 @@ The "fake-decided" column counts records whose final failing status was produced
 
 Notes:
 
+- The C recorded ScanTime as 0 and the HQA report as `08 FC` only. The tests compare the port's ScanTime with 0 (every fixture frame is the first of its session) and its HQA output with the full 257-byte report (UM-B2, UM-B12).
 - Records with `undef` (B13) compare `out` directly. It is the zero-poison run, which is the zero-initialized report.
 - The `deviceadd` record checks the device interface GUID constant, and `readersfailed` checks `pnp::READERS_FAILED_RESULT`.
 - Requests other than the head of the READ_REPORT queue are asserted untouched.
@@ -89,7 +90,7 @@ The README's excluded cases are covered by unit tests in `tests/golden.rs`:
 | 4 empty device string | `get_string_edge_cases` |
 | 5 `WdfMemoryCreate` failure (B5) | not applicable (no allocation) |
 | 6 TYPE4/5 short responses (B1) | fixture `umask` records + `type4_short_response_sends_zero_padding` |
-| 7 `qpc - perf` overflow | `scan_time_matches_c` (wrapping) |
+| 7 `qpc - perf` overflow | no longer applies: `ScanClock` saturates (`input_scan_time_uses_the_cached_qpc_frequency`) |
 | 8 concurrency (B22) | not testable on the host; atomics by construction |
 
 `tests/golden.rs` also checks the spec's golden vectors: the SHA-256 of all six report descriptors, the WS3 byte dump, the 7 MT2 and 5 TYPE2-4 contact vectors, the TYPE4 106-byte frame, the setup packets, the IOCTL routing table and the B16 restart.
