@@ -17,11 +17,11 @@ The policy terms come from the [behavior policy](README.md#behavior-policy):
 |---|---|---|
 | SPI-B1 | PRESERVED (P3) | GET_FEATURE 0x08 writes only `08 FC` (`feature::HQA_REPORT_AS_C`). `reportBuffer[2..]` is left untouched and Information is 0. |
 | SPI-B2 | FIXED (P3) | SET_FEATURE 0x06 reads byte **1**, the descriptor's 2-byte layout (`ptp_hid::feature::SelectiveReportBits`). A report without byte 1 changes nothing. C read byte 2, past the real report. |
-| SPI-B3 | FIXED (P3) for selective reporting | `PtpReportTouch` (Surface Switch, bit 0) and `PtpReportButton` (Button Switch, bit 1) start on, are restored by every PrepareHardware, and gate the contacts and the button of the input report (`input::build_report`). `PtpInputOn` is still write-only. |
+| SPI-B3 | FIXED (Step 2) | `PtpInputOn` (`SET_FEATURE` 0x04), `PtpReportTouch` (Surface Switch, bit 0) and `PtpReportButton` (Button Switch, bit 1) start on, are restored by every PrepareHardware, and gate the contacts and the button of the input report (`PtpSettings::effective_reporting`, `input::build_report`). Clearing `PtpInputOn` or `PtpReportTouch` resets `ContactTracker`. |
 | SPI-B4 | PRESERVED (P1/P3) | GET/SET_FEATURE never set Information, so it stays 0 (`feature::FEATURE_INFORMATION`). SET does not validate `reportBufferLen`. Bytes past it read as 0 (see the P2 extras). |
 | SPI-B5 | FIXED (P2) | The input report is zero-initialized (`SpiPtpReport::EMPTY`). Unused contacts and the padding bits 5-7 are 0 and no longer carry stack bytes. |
 | SPI-B6 | FIXED (P3) | `ContactCount` is `min(NumOfFingers, 5)`. A lower read that does not hold every finger record `NumOfFingers` declares (`46 + 30 * n` bytes) completes the upstream read with `STATUS_DEVICE_DATA_ERROR` (`input::check_declared_fingers`). |
-| SPI-B7 | PRESERVED (P1), descriptor FIXED (P3) | ContactID is the slot index 0..4. The SPI descriptors declare a contact-ID logical maximum of 4 (`ptp_hid::descriptor::SPI_CONTACT_ID_LOGICAL_MAX`); C declared 3. |
+| SPI-B7 | FIXED (Step 2) | `ptp_hid::contact_tracker::ContactTracker` assigns persistent slot IDs `0..=4` by nearest-neighbor matching, synthesizes 1-frame `TipSwitch = 0` liftoff reports, and latches `Confidence = 0` palms. The SPI descriptors declare a contact-ID logical maximum of 4 (`SPI_CONTACT_ID_LOGICAL_MAX`), include `GLOBAL_RESET` after all five finger collections and `Scan Time`, and set `Input Mode` logical maximum to 3 (`519` bytes). |
 | SPI-B8 | PRESERVED (P1) | ScanTime is computed exactly as C does: `delta = (cur - LastReportTime) / 100`, then `delta >= 0xFF ? 0xFF : (u16)delta`. `cur` and every `LastReportTime` write are the QPC **frequency**, which is what `KeQueryPerformanceCounter(&x)` writes to `x`. So ScanTime is always 0 in practice (`input::scan_time`, `runtime::DeviceRuntime`). |
 | SPI-B9a | PRESERVED (P3) | The lower `IoStatus.Status` is ignored. Only `(LONG)Information >= 46` is checked (`input::lower_read_length`). |
 | SPI-B9b | PRESERVED (P3) | When the length is below 46, the request completes with `STATUS_DEVICE_DATA_ERROR`. The "re-enable" that C traces is never performed. |
@@ -34,8 +34,8 @@ The policy terms come from the [behavior policy](README.md#behavior-policy):
 | SPI-B15 | FIXED (P2) | `DeviceStatus`, `LastReportTime` and the PTP flags are atomics (`runtime::DeviceRuntime`, `feature::PtpSettings`). Their single-variable semantics are the same as before. In the completion routine `LastReportTime` is updated with one `swap`. |
 | SPI-B16 | PRESERVED (P1) | Unknown internal IOCTLs complete with `STATUS_NOT_SUPPORTED` and are not forwarded (`ioctl::classify_internal_ioctl`). |
 | SPI-B17 | RESOLVED | The INF no longer binds 0x0280 to this driver (it is a USB KMDF binding). `device::SPI_MODELS` is the only PID list; the `xtask` INF test checks that every SPI binding resolves to it. |
-| SPI-B18 | PRESERVED (P1) | The Family 1 Y logical maximum stays 7855, although the table's span is 6217 (`descriptors::AXES_F1`). |
-| SPI-B19 | PRESERVED (P1) | X and Y have no upper clamp. Values beyond the descriptor's logical maximum are emitted as they are. |
+| SPI-B18 | FIXED (Step 2) | The Family 1 Y logical maximum is 6217, matching the table's `6089 - (-128)` span (`descriptors::AXES_F1`). |
+| SPI-B19 | FIXED (Step 2) | X and Y are clamped to `0..=(max - min)` (`input::build_report`). |
 | SPI-B20 | FIXED, required of the glue (stage 2) | `WdfPdoInitAllowForwardingRequestToParent`, a PDO-only DDI called on an FDO init, is dropped. It had no functional effect. |
 | SPI-B21 | FIXED (P2), required of the glue (stage 2) | The lookaside list is parented to the device instead of the driver, which ends the per-device leak. |
 | SPI-B22 | FIXED, required of the glue (stage 2) | Nothing on the IOCTL, completion or timer paths is pageable. `PAGED_CODE()` is not ported. |
@@ -60,7 +60,7 @@ The policy terms come from the [behavior policy](README.md#behavior-policy):
 - **Identity**:
   - VID 0x8910.
   - The real PID and version, for any PID.
-  - Information is 32 for the attributes, 9 for the HID descriptor and 501 for the report descriptor.
+  - Information is 32 for the attributes, 9 for the HID descriptor and 519 for the report descriptor.
 - **`ReportType`**:
   - It is a raw `u32`. Values other than 0 and 1 give `STATUS_NOT_FOUND` for the report descriptor only.
   - A missing value, missing key or an unknown value keeps the previous `ReportType` across restarts of the same device.
