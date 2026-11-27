@@ -2,8 +2,30 @@ name: Rust CI
 
 on:
   pull_request:
+    paths:
+      - '.cargo/config.toml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'clippy.toml'
+      - 'crates/**'
+      - 'drivers/**'
+      - 'tools/xtask/**'
+      - 'packaging/*.inx'
+      - '.github/workflows/rust-ci.yml'
+      - '.github/scripts/rust-ci*.ps1'
   push:
     branches: [main]
+    paths:
+      - '.cargo/config.toml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'clippy.toml'
+      - 'crates/**'
+      - 'drivers/**'
+      - 'tools/xtask/**'
+      - 'packaging/*.inx'
+      - '.github/workflows/rust-ci.yml'
+      - '.github/scripts/rust-ci*.ps1'
   workflow_dispatch:
 
 permissions:
@@ -13,42 +35,124 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  RUSTUP_TOOLCHAIN: '1.100.0'
+  KIT_PACKAGE_VERSION: '10.0.28000.2526'
+  Version_Number: '10.0.28000.0'
+  LIBCLANG_PATH: 'C:\Program Files\LLVM\bin'
+  CARGO_INCREMENTAL: '0'
+
 jobs:
-  test:
-    name: Tests and Clippy (x64 and ARM64)
+  scope:
+    name: Determine test scope
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run_host: ${{ steps.detect.outputs.run_host }}
+      host_packages: ${{ steps.detect.outputs.host_packages }}
+      run_drivers: ${{ steps.detect.outputs.run_drivers }}
+      driver_matrix: ${{ steps.detect.outputs.driver_matrix }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Detect impacted packages
+        id: detect
+        shell: pwsh
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: ./.github/scripts/rust-ci-scope.ps1 -EventName $env:EVENT_NAME -BaseSha $env:BASE_SHA -HeadSha $env:HEAD_SHA
+
+  host:
+    name: Host tests and Clippy
+    needs: scope
+    if: needs.scope.outputs.run_host == 'true'
     runs-on: windows-2025
-    timeout-minutes: 30
+    timeout-minutes: 15
     defaults:
       run:
         shell: pwsh
     env:
-      RUSTUP_TOOLCHAIN: '1.100.0'
-      KIT_PACKAGE_VERSION: '10.0.28000.2526'
-      Version_Number: '10.0.28000.0'
-      LIBCLANG_PATH: 'C:\Program Files\LLVM\bin'
-      CARGO_INCREMENTAL: '0'
-
+      HOST_PACKAGES: ${{ needs.scope.outputs.host_packages }}
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
       - name: Set up Rust and Clippy
-        run: rustup toolchain install "$env:RUSTUP_TOOLCHAIN" --profile minimal --component clippy --target aarch64-pc-windows-msvc
+        run: ./.github/scripts/rust-ci-toolchain.ps1 -Toolchain $env:RUSTUP_TOOLCHAIN
 
-      - name: Set up the Windows SDK and WDK
-        run: ./.github/scripts/rust-ci.ps1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "v1-host-${{ env.RUSTUP_TOOLCHAIN }}"
+          workspaces: ". -> target"
 
-      - name: Host tests and x64 Clippy
-        run: cargo xtask test
+      - name: Host tests and Clippy (${{ needs.scope.outputs.host_packages }})
+        run: ./.github/scripts/rust-ci-host.ps1 -Packages $env:HOST_PACKAGES
 
-      - name: KMDF Clippy on ARM64
-        working-directory: drivers/km
-        run: cargo clippy --locked --workspace --all-features --target aarch64-pc-windows-msvc -- -D warnings
+      - name: Check host Cargo.lock
+        run: git diff --exit-code -- Cargo.lock
 
-      - name: UMDF Clippy on ARM64
-        working-directory: drivers/um
-        run: cargo clippy --locked --workspace --all-features --target aarch64-pc-windows-msvc -- -D warnings
+  drivers:
+    name: ${{ matrix.label }} Clippy (${{ matrix.arch }})
+    needs: scope
+    if: needs.scope.outputs.run_drivers == 'true'
+    runs-on: windows-2025
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.scope.outputs.driver_matrix) }}
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      DRIVER_WORKSPACE: ${{ matrix.workspace }}
+      DRIVER_ARCH: ${{ matrix.arch }}
+      DRIVER_TARGET: ${{ matrix.target }}
+      DRIVER_PACKAGES: ${{ matrix.packages }}
+      LINT_SUPPORT: ${{ matrix.lint_support }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
-      - name: Check Cargo lockfiles
-        run: git diff --exit-code -- Cargo.lock drivers/km/Cargo.lock drivers/um/Cargo.lock
+      - name: Set up Rust and Clippy
+        run: ./.github/scripts/rust-ci-toolchain.ps1 -Toolchain $env:RUSTUP_TOOLCHAIN -Arch $env:DRIVER_ARCH -Target $env:DRIVER_TARGET
+
+      - name: Set up the Windows SDK and WDK (${{ matrix.arch }})
+        run: ./.github/scripts/rust-ci.ps1 -Arch $env:DRIVER_ARCH
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "v1-${{ matrix.workspace }}-${{ matrix.arch }}-${{ matrix.lint_support }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.KIT_PACKAGE_VERSION }}"
+          workspaces: "drivers/${{ matrix.workspace }} -> target"
+
+      - name: Driver Clippy (${{ matrix.packages }})
+        run: ./.github/scripts/rust-ci-driver.ps1 -Workspace $env:DRIVER_WORKSPACE -Target $env:DRIVER_TARGET -Packages $env:DRIVER_PACKAGES -Toolchain $env:RUSTUP_TOOLCHAIN -LintSupport:($env:LINT_SUPPORT -eq 'true')
+
+      - name: Check driver Cargo.lock
+        run: git diff --exit-code -- "drivers/$env:DRIVER_WORKSPACE/Cargo.lock"
+
+  ci:
+    name: Rust CI
+    needs: [scope, host, drivers]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+
+      - name: Verify job results
+        shell: pwsh
+        env:
+          SCOPE_RESULT: ${{ needs.scope.result }}
+          HOST_RESULT: ${{ needs.host.result }}
+          DRIVERS_RESULT: ${{ needs.drivers.result }}
+        run: ./.github/scripts/rust-ci-verify.ps1 -ScopeResult $env:SCOPE_RESULT -HostResult $env:HOST_RESULT -DriversResult $env:DRIVERS_RESULT
