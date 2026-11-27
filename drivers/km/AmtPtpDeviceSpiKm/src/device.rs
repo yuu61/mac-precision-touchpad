@@ -20,7 +20,7 @@ use wdf_support::declare_context_type;
 use wdf_support::handle::WdfHandle;
 use wdf_support::init::{
     memory_descriptor_init_buffer, object_attributes_init, object_attributes_init_context_type,
-    pnppower_event_callbacks_init, timer_config_init,
+    pnppower_event_callbacks_init, sync_send_options, timer_config_init,
 };
 use wdf_support::ntstatus::{NT_SUCCESS, STATUS_INVALID_DEVICE_STATE, STATUS_SUCCESS};
 use wdf_support::request::Request;
@@ -340,9 +340,12 @@ unsafe extern "C" fn evt_device_prepare_hardware(
         attributes.0.as_mut_ptr().cast(),
         LOWER_ATTRIBUTES_DESCRIPTOR_LEN,
     );
+    // Not in C (no options): bound the wait for a lower driver that never completes (B-3).
+    let mut options = sync_send_options(0);
     // SAFETY: PASSIVE_LEVEL; valid local I/O target; `output` describes the
-    // 32-byte local buffer, which outlives this synchronous call; no request,
-    // input, options or bytes-returned (all NULL, as in C).
+    // 32-byte local buffer, which outlives this synchronous call (also on a
+    // timeout: the framework waits for the cancelled request); no request,
+    // input or bytes-returned (NULL, as in C).
     let status = unsafe {
         call_unsafe_wdf_function_binding!(
             WdfIoTargetSendInternalIoctlSynchronously,
@@ -351,7 +354,7 @@ unsafe extern "C" fn evt_device_prepare_hardware(
             LOWER_ATTRIBUTES_IOCTL,
             null_mut(),
             &raw mut output,
-            null_mut(),
+            &raw mut options,
             null_mut()
         )
     };
@@ -717,10 +720,13 @@ unsafe fn spi_set_state(context: &DeviceContext, desired_state: bool) -> NTSTATU
     packet.fill(desired_state);
     let mut input =
         memory_descriptor_init_buffer(packet.as_mut_ptr().cast(), SET_STATE_PACKET_DESCRIPTOR_LEN);
+    // Not in C (no options): bound the wait for a lower driver that never completes (B-3).
+    let mut options = sync_send_options(0);
     // SAFETY: PASSIVE_LEVEL (caller contract); valid local I/O target; `input`
     // describes `packet`, which is neither moved nor dropped before this
-    // synchronous call returns (its self-pointer stays valid); everything else
-    // NULL, as in C.
+    // synchronous call returns (its self-pointer stays valid; on a timeout the
+    // framework waits for the cancelled request); request, output and
+    // bytes-returned NULL, as in C.
     let status = unsafe {
         call_unsafe_wdf_function_binding!(
             WdfIoTargetSendInternalIoctlSynchronously,
@@ -729,7 +735,7 @@ unsafe fn spi_set_state(context: &DeviceContext, desired_state: bool) -> NTSTATU
             SET_STATE_IOCTL,
             &raw mut input,
             null_mut(),
-            null_mut(),
+            &raw mut options,
             null_mut()
         )
     };

@@ -247,6 +247,27 @@ pub const fn request_send_options_set_timeout(
     options.Timeout = timeout;
 }
 
+/// Timeout of every synchronous request the drivers send (mode switches, attribute queries): 5 s,
+/// relative.
+///
+/// A device or lower driver that never completes the request would otherwise block the calling
+/// PnP/power, timer or dispatch thread forever. 5 s is the USB 2.0 bound for a control request with a
+/// data stage (section 9.2.6.4), the slowest legitimate case among these requests. When it expires the
+/// framework cancels the request and still waits for it to complete before the synchronous call
+/// returns, so stack buffers described by the request stay valid; the request then fails with
+/// `STATUS_IO_TIMEOUT` (or the status the lower driver completed it with).
+pub const SYNC_IO_TIMEOUT: LONGLONG = rel_timeout_in_sec(5);
+
+/// Send options for a synchronous send: `WDF_REQUEST_SEND_OPTIONS_INIT(&options, flags)` plus
+/// `WDF_REQUEST_SEND_OPTIONS_SET_TIMEOUT(&options, SYNC_IO_TIMEOUT)`. `flags` is 0 for the
+/// `Wdf*Synchronously` methods and `WDF_REQUEST_SEND_OPTION_SYNCHRONOUS` for `WdfRequestSend`.
+#[must_use]
+pub fn sync_send_options(flags: ULONG) -> WDF_REQUEST_SEND_OPTIONS {
+    let mut options = request_send_options_init(flags);
+    request_send_options_set_timeout(&mut options, SYNC_IO_TIMEOUT);
+    options
+}
+
 // ---------------------------------------------------------------------------
 // wdfmemory.h
 // ---------------------------------------------------------------------------
@@ -356,6 +377,7 @@ pub const fn rel_timeout_in_us(time: u64) -> LONGLONG {
 }
 
 const _: () = {
+    assert!(SYNC_IO_TIMEOUT == -50_000_000);
     assert!(rel_timeout_in_sec(1) == -10_000_000);
     assert!(rel_timeout_in_sec(3) == -30_000_000);
     assert!(rel_timeout_in_ms(5) == -50_000);

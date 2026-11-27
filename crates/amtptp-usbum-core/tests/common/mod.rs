@@ -341,6 +341,9 @@ pub struct FakeUsb {
     pub pipe_name: String,
     /// Failure statuses this fake framework/device returned.
     pub failures: Vec<NtStatus>,
+    /// How many `serialized` calls are running: every control transfer must run inside exactly one
+    /// (the mode-switch lock is not recursive).
+    pub serialized_depth: usize,
 }
 
 impl Default for FakeUsb {
@@ -364,6 +367,7 @@ impl Default for FakeUsb {
             start_status: 0,
             pipe_name: "pipe0".to_owned(),
             failures: Vec::new(),
+            serialized_depth: 0,
         }
     }
 }
@@ -413,7 +417,16 @@ impl FakeUsb {
 }
 
 impl ControlPipe for FakeUsb {
+    fn serialized<R, F: FnOnce(&mut Self) -> R>(&mut self, f: F) -> R {
+        assert_eq!(self.serialized_depth, 0, "mode-switch lock taken twice");
+        self.serialized_depth += 1;
+        let result = f(self);
+        self.serialized_depth -= 1;
+        result
+    }
+
     fn send_control_transfer(&mut self, setup: &SetupPacket, data: &mut [u8; 4]) -> NtStatus {
+        assert_eq!(self.serialized_depth, 1, "control transfer outside the mode-switch lock");
         let status = self.xs.get(self.transfers).copied().flatten().unwrap_or(0);
         self.transfers += 1;
         if !nt_success(status) {

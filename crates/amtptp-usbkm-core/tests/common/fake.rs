@@ -51,6 +51,9 @@ pub struct FakeHw {
     pub qpc_freq: i64,
     /// `UsbInterface != NULL` (glue-side handle in the real driver).
     pub iface: bool,
+    /// How many `serialized` calls are running: every control transfer must run inside exactly one
+    /// (the mode-switch lock is not recursive).
+    pub serialized_depth: usize,
 }
 
 impl FakeHw {
@@ -69,6 +72,7 @@ impl FakeHw {
             traits: 0x4,
             qpc_freq: 10_000_000,
             iface: false,
+            serialized_depth: 0,
         }
     }
 
@@ -134,11 +138,20 @@ impl ControlTransfer for FakeHw {
         }
     }
 
+    fn serialized<R, F: FnOnce(&mut Self) -> R>(&mut self, f: F) -> R {
+        assert_eq!(self.serialized_depth, 0, "mode-switch lock taken twice");
+        self.serialized_depth += 1;
+        let result = f(self);
+        self.serialized_depth -= 1;
+        result
+    }
+
     fn control_transfer(
         &mut self,
         setup: &UsbSetupPacket,
         data: &mut [u8; WELLSPRING_DATA_LEN],
     ) -> NtStatus {
+        assert_eq!(self.serialized_depth, 1, "control transfer outside the mode-switch lock");
         let setup_hex = to_hex(&setup.to_bytes());
         let mdlen = data.len();
         let dir = if setup.is_device_to_host() {

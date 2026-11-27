@@ -33,7 +33,7 @@ use wdf_support::handle::{ContextPtr, WdfHandle};
 use wdf_support::hid as wdf_hid;
 use wdf_support::init::{
     memory_descriptor_init_buffer, object_attributes_init, object_attributes_init_context_type,
-    request_send_options_init,
+    request_send_options_init, sync_send_options,
 };
 use wdf_support::ntstatus::NT_SUCCESS;
 use wdf_support::request::Request;
@@ -551,9 +551,12 @@ impl FilterIo for Filter<'_> {
             // 32, checked at compile time above.
             size_of::<HID_DEVICE_ATTRIBUTES>() as ULONG,
         );
+        // C sends without options, so without a timeout (HF-B27); the port bounds the wait.
+        let mut options = sync_send_options(0);
         // SAFETY: PASSIVE_LEVEL (EvtDeviceSelfManagedIoInit); `target` is the default local
-        // target; `descriptor` describes `attributes`, which outlives the synchronous call. No
-        // request, no input, no options (no timeout, HF-B27), no BytesReturned (Device.c:212-215).
+        // target; `descriptor` describes `attributes`, which outlives the synchronous call (also on
+        // a timeout: the framework waits for the cancelled request). No request, no input, no
+        // BytesReturned (Device.c:212-215).
         let status = unsafe {
             call_unsafe_wdf_function_binding!(
                 WdfIoTargetSendInternalIoctlSynchronously,
@@ -562,7 +565,7 @@ impl FilterIo for Filter<'_> {
                 IOCTL_HID_GET_DEVICE_ATTRIBUTES,
                 null_mut(),
                 &raw mut descriptor,
-                null_mut(),
+                &raw mut options,
                 null_mut()
             )
         };
@@ -677,12 +680,14 @@ impl FilterIo for Filter<'_> {
         let Some(target) = self.io_target() else {
             return false;
         };
-        let mut options = request_send_options_init(
+        // C sends without a timeout (HF-B27); the port bounds the wait.
+        let mut options = sync_send_options(
             // Small non-negative enum constant (0x2).
             _WDF_REQUEST_SEND_OPTIONS_FLAGS::WDF_REQUEST_SEND_OPTION_SYNCHRONOUS as ULONG,
         );
         // SAFETY: PASSIVE_LEVEL (SelfManagedIoInit/Restart or the passive-level timer); formatted
-        // request for `target`; synchronous with no timeout (HF-B27, as in C).
+        // request for `target`; synchronous, so the mode-switch buffer outlives the request (on a
+        // timeout the framework cancels the request and waits for it to complete).
         let sent = unsafe {
             call_unsafe_wdf_function_binding!(WdfRequestSend, request, target, &raw mut options)
         };

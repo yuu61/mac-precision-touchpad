@@ -236,7 +236,7 @@ pub fn prepare_hardware<H: UsbHardware + ?Sized>(state: &DeviceState, hw: &mut H
 /// `D0Entry` only after a successful `PrepareHardware`, which guarantees one) the C would dereference NULL;
 /// this returns `STATUS_INVALID_DEVICE_STATE` instead.
 pub fn d0_entry<H: UsbHardware + ?Sized>(state: &DeviceState, hw: &mut H) -> NtStatus {
-    let _ignored = set_wellspring_mode(state, hw, true);
+    let _ignored = hw.serialized(|hw| set_wellspring_mode(state, hw, true));
     state.set_qpc_frequency(hw.query_performance_frequency());
     match state.interrupt_pipe() {
         Some(pipe) => hw.start_pipe(pipe),
@@ -267,7 +267,7 @@ pub fn d0_exit<H: UsbHardware + ?Sized>(state: &DeviceState, hw: &mut H) -> D0Ex
     }
     D0ExitOutcome {
         status: STATUS_SUCCESS,
-        mode_switch_status: set_wellspring_mode(state, hw, false),
+        mode_switch_status: hw.serialized(|hw| set_wellspring_mode(state, hw, false)),
     }
 }
 

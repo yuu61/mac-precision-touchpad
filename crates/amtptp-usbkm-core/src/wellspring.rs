@@ -74,6 +74,15 @@ pub trait ControlTransfer {
         setup: &UsbSetupPacket,
         data: &mut [u8; WELLSPRING_DATA_LEN],
     ) -> NtStatus;
+
+    /// Runs `f` while holding the device's mode-switch lock (not in C, which had no lock: spec KM-X1
+    /// left `SET_FEATURE` and `D0Entry`/`D0Exit` free to interleave their `GET_REPORT`/`SET_REPORT`
+    /// pairs). The core wraps every outermost mode-switch sequence in it and never nests it; `f` must
+    /// not wait for anything that takes the lock. The glue holds a `WDFWAITLOCK`; the default (tests)
+    /// just runs `f`.
+    fn serialized<R, F: FnOnce(&mut Self) -> R>(&mut self, f: F) -> R {
+        f(self)
+    }
 }
 
 /// `AmtPtpSetWellspringMode(ctx, on)`: switches the trackpad into (`on`) or out of wellspring mode.
@@ -81,8 +90,9 @@ pub trait ControlTransfer {
 /// Returns the first failing status (allocation, `GET_REPORT` or `SET_REPORT`), leaving
 /// `IsWellspringModeOn` unchanged; on success sets it to `on` and returns `STATUS_SUCCESS`.
 ///
-/// Callers (C): `D0Entry` with `on = true` (result ignored), `D0Exit` with `on = false` (result returned),
-/// `SET_FEATURE` input mode 3 with `on = true` when the mode is off (result returned).
+/// Callers (C): `D0Entry` with `on = true` (result ignored), `D0Exit` with `on = false` (result only
+/// traced, B10), `SET_FEATURE` input mode 3 with `on = true` when the mode is off (result returned). Each
+/// caller runs it inside [`ControlTransfer::serialized`]; this function does not take the lock itself.
 pub fn set_wellspring_mode<T: ControlTransfer + ?Sized>(
     state: &DeviceState,
     io: &mut T,

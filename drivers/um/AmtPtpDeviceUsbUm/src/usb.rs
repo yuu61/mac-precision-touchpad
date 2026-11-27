@@ -28,8 +28,8 @@ use amtptp_usbum_core::state::UsbDeviceDescriptor;
 use amtptp_usbum_core::status::NtStatus;
 use amtptp_usbum_core::usb::{MODE_SWITCH_TRANSFER_LEN, SetupPacket};
 use wdf_support::init::{
-    memory_descriptor_init_buffer, usb_continuous_reader_config_init, usb_device_information_init,
-    usb_pipe_information_init,
+    memory_descriptor_init_buffer, sync_send_options, usb_continuous_reader_config_init,
+    usb_device_information_init, usb_pipe_information_init,
 };
 use wdf_support::ntstatus::{NT_SUCCESS, STATUS_INVALID_DEVICE_STATE};
 use wdf_support::time::query_performance_counter;
@@ -297,8 +297,18 @@ impl<'a> DeviceIo<'a> {
 }
 
 impl ControlPipe for DeviceIo<'_> {
-    /// `WdfUsbTargetDeviceSendControlTransferSynchronously(UsbDevice, WDF_NO_HANDLE, NULL, &setup,
-    /// &memoryDescriptor, &cbTransferred)` with a 4-byte buffer descriptor (UM-B1: wLength 4).
+    fn serialized<R, F: FnOnce(&mut Self) -> R>(&mut self, f: F) -> R {
+        let context = self.context;
+        // SAFETY: the lock was created in `create_device` before any callback could run; UMDF runs
+        // every callback at PASSIVE_LEVEL; the core never nests `serialized`. Nothing a control
+        // transfer waits for takes this lock: D0Exit stops the interrupt pipe (waiting for a reader
+        // completion that may hold the lock in an emergency reset) before it takes the lock.
+        unsafe { context.mode_switch_lock.with(|| f(self)) }
+    }
+
+    /// `WdfUsbTargetDeviceSendControlTransferSynchronously(UsbDevice, WDF_NO_HANDLE, &options, &setup,
+    /// &memoryDescriptor, &cbTransferred)` with a 4-byte buffer descriptor (UM-B1: wLength 4). C passes
+    /// no options, so no timeout; the port bounds the wait with `SYNC_IO_TIMEOUT` (B-3).
     ///
     /// The setup packet is the core's 8 wire bytes (`bmRequestType` class/interface, `bRequest`,
     /// `wValue`, `wIndex`, `wLength` = 4); C builds the same bytes with `WDF_USB_CONTROL_SETUP_PACKET_INIT`
@@ -322,16 +332,17 @@ impl ControlPipe for DeviceIo<'_> {
             MODE_SWITCH_TRANSFER_LEN as ULONG,
         );
         let mut bytes_transferred: ULONG = 0;
-        // SAFETY: valid WDFUSBDEVICE; no request object and no send options (synchronous, no timeout,
-        // as in C); `packet` and `descriptor` are initialized locals; the descriptor's buffer is the
-        // caller's 4-byte array, which outlives this synchronous call; `bytes_transferred` is an out
-        // pointer (its value is not used, as in C).
+        let mut options = sync_send_options(0);
+        // SAFETY: valid WDFUSBDEVICE; no request object (as in C); `options` (SYNC_IO_TIMEOUT),
+        // `packet` and `descriptor` are initialized locals; the descriptor's buffer is the caller's
+        // 4-byte array, which outlives this synchronous call (on a timeout the framework waits for the
+        // cancelled transfer); `bytes_transferred` is an out pointer (its value is not used, as in C).
         let status = unsafe {
             call_unsafe_wdf_function_binding!(
                 WdfUsbTargetDeviceSendControlTransferSynchronously,
                 usb_device,
                 null_mut(),
-                null_mut(),
+                &raw mut options,
                 &raw mut packet,
                 &raw mut descriptor,
                 &raw mut bytes_transferred

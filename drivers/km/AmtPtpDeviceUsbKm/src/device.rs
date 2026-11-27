@@ -125,6 +125,21 @@ unsafe fn create_device(mut device_init: PWDFDEVICE_INIT) -> NTSTATUS {
     // PtpReportButton = PtpReportTouch = TRUE (Device.c:106-107).
     context.state.on_device_create();
 
+    // Not in C: the lock that serializes the mode switches (parent: the device).
+    // SAFETY: PASSIVE_LEVEL; created once, before any callback can use the context; the device
+    // outlives its child lock.
+    let status = unsafe { context.mode_switch_lock.create(device.cast()) };
+    if !NT_SUCCESS(status) {
+        tlg::write_event!(
+            PROVIDER,
+            "WdfWaitLockCreateFailed",
+            level(Error),
+            keyword(KW_DRIVER),
+            win_ntstatus("Status", &status)
+        );
+        return status;
+    }
+
     // SAFETY: live device; the GUID is a 'static; NULL reference string as in C.
     let status = unsafe {
         call_unsafe_wdf_function_binding!(

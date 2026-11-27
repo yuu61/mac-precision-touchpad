@@ -142,8 +142,10 @@ status is traced in `UsbIo::configure_continuous_reader`.
   returning the first failure.
 - `GET_DEVICE_ATTRIBUTES` before PrepareHardware must report VID/PID 0 (fixture `attr-before-prepare`). The glue
   must read `DeviceState::usb_device_ids()` (zero-initialized), not an `Option` that fails.
-- SET_FEATURE input mode 3 and D0Entry/D0Exit can both call `set_wellspring_mode` concurrently, as in C, with no
-  serialization. The flag update is atomic but the two transfer pairs can interleave.
+- SET_FEATURE input mode 3 and D0Entry/D0Exit run `set_wellspring_mode` inside `ControlTransfer::serialized`, which
+  the glue implements with a `WDFWAITLOCK` (`DeviceContext::mode_switch_lock`, not in C). The check of the mode flag
+  and the transfer pair are one step, so two switches never interleave. D0Exit stops the interrupt pipe before it
+  takes the lock.
 
 ## Driver (stage 2): `drivers/km/AmtPtpDeviceUsbKm`
 
@@ -223,8 +225,9 @@ The KMDF 1.23 glue. It makes the WDF calls the C code makes, in the C order, and
   - No IRQL guard is added. A `KeGetCurrentIrql() > PASSIVE_LEVEL` check would also fail APC_LEVEL calls,
     which work in the C (P1), and hidclass never sends SET_FEATURE above PASSIVE_LEVEL.
   - Every allocation on this path is non-paged, and the code is in `.text`.
-- **The mode switch is not serialized.** SET_FEATURE and D0Entry/D0Exit can run the switch concurrently, as in C;
-  the transfer pairs can interleave.
+- **Control transfers have a timeout.** `UsbIo::control_transfer` sends with `wdf_support::init::SYNC_IO_TIMEOUT` (5 s, the USB 2.0 bound for
+  a control request with a data stage; C: no options). A trackpad that never answers fails the switch instead of
+  blocking D0Entry, D0Exit or the SET_FEATURE dispatch forever.
 - **Imports.** `KeQueryPerformanceCounter` is imported from `HAL.dll`. In WDK 10.0.28000 only `hal.lib` exports
   it (`ntoskrnl.lib` does not), so a WDK-built C driver imports it from `HAL.dll` as well.
 

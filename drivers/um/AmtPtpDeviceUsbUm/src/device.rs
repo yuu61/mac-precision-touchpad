@@ -20,6 +20,7 @@ use core::sync::atomic::{AtomicPtr, Ordering};
 
 use amtptp_usbum_core::{DeviceState, pnp};
 use wdf_support::declare_context_type;
+use wdf_support::sync::WaitLock;
 use wdf_support::init::{
     device_pnp_capabilities_init, object_attributes_init_context_type,
     pnppower_event_callbacks_init,
@@ -55,6 +56,9 @@ pub(crate) struct DeviceContext {
     input_queue: AtomicPtr<WDFQUEUE__>,
     /// The pipe the continuous reader was configured on (UM-B16: configure once per pipe).
     reader_pipe: AtomicPtr<WDFUSBPIPE__>,
+    /// Serializes the wellspring mode switches (not in C, UM-B22): created in `create_device`, held by
+    /// `DeviceIo::serialized` around each outermost `GET_REPORT`/`SET_REPORT` sequence.
+    pub(crate) mode_switch_lock: WaitLock,
     /// Everything else of `DEVICE_CONTEXT`.
     pub(crate) state: DeviceState,
 }
@@ -79,6 +83,7 @@ impl DeviceContext {
             usb_interface: AtomicPtr::new(null_mut()),
             input_queue: AtomicPtr::new(null_mut()),
             reader_pipe: AtomicPtr::new(null_mut()),
+            mode_switch_lock: WaitLock::new(),
             state: DeviceState::new(),
         }
     }
@@ -239,6 +244,15 @@ unsafe fn create_device(mut device_init: PWDFDEVICE_INIT) -> NTSTATUS {
     let Some(context) = (unsafe { context_ptr.cast_const().as_ref() }) else {
         return STATUS_INVALID_DEVICE_STATE;
     };
+
+    // Not in C: the lock that serializes the mode switches (parent: the device).
+    // SAFETY: created once, before any callback can use the context; the device outlives its child
+    // lock.
+    let status = unsafe { context.mode_switch_lock.create(device.cast()) };
+    if !NT_SUCCESS(status) {
+        trace::pnp_failure("AmtPtpCreateDevice", "WdfWaitLockCreate", status);
+        return status;
+    }
 
     let mut pnp_caps = device_pnp_capabilities_init();
     pnp_caps.SurpriseRemovalOK = _WDF_TRI_STATE::WdfTrue;

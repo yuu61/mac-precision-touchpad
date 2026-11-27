@@ -19,7 +19,8 @@
 //!   and context pointers a context stores.
 //! - [`request`]: [`request::Request`], an owned `WDFREQUEST` that is completed,
 //!   forwarded or explicitly released exactly once.
-//! - [`sync`] (KMDF only): [`sync::SpinLocked`], a value guarded by a `WDFSPINLOCK`.
+//! - [`sync`]: [`sync::SpinLocked`], a value guarded by a `WDFSPINLOCK`, and [`sync::WaitLock`], a
+//!   `WDFWAITLOCK` for `PASSIVE_LEVEL` sequences.
 //! - [`wdm`] (KMDF only): `WdfRequestWdmGetIrp`, `IoGetCurrentIrpStackLocation`,
 //!   `Irp->UserBuffer`, `Type3InputBuffer`.
 //! - [`ntstatus`]: the NTSTATUS values the C drivers use, re-exported from
@@ -53,7 +54,6 @@ pub mod hid;
 pub mod init;
 pub mod ntstatus;
 pub mod request;
-#[cfg(driver_model__driver_type = "KMDF")]
 pub mod sync;
 pub mod time;
 #[cfg(driver_model__driver_type = "KMDF")]

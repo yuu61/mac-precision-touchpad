@@ -54,7 +54,7 @@ The driver has **no device table** and sends **no USB or SPI bytes**. Its only l
 | HF-B24 | PRESERVED (P3) | A zero-length completion enqueues the work item, which re-reads at once (possible hot loop). |
 | HF-B25 | FIXED (P2, unreachable) | Without an I/O target, GET_STRING completes with `STATUS_INVALID_DEVICE_STATE` and `issue_lower_read` sends nothing. C uses a NULL handle. |
 | HF-B26 | PRESERVED (P1) | The global `MajorFunction[0x0F]` patch is never reverted. The checks, their order and the `strncmp` semantics are in `detour_hid_stack` and `client_id_matches`. |
-| HF-B27 | PRESERVED (P1) | Synchronous attribute query and mode switch without timeout. |
+| HF-B27 | FIXED (P3) | The synchronous attribute query and mode switch are sent with a timeout (`wdf_support::init::SYNC_IO_TIMEOUT`, 5 s). A timed-out mode switch fails like any other and the 2 s recovery timer retries it; on a timeout the framework cancels the request and waits for it to complete, so the stack transfer buffer stays valid. |
 | HF-B28 | PRESERVED (P1) | The device interface `{FF969022-3111-4441-8F88-875440172C2E}` is registered with no handler (`config::DEVICE_INTERFACE_GUID`). |
 | HF-B29 | PRESERVED (P1) | `response_length(info) = info as u32 as i32 as isize as usize`, the `(size_t)(LONG)` sign extension. |
 | HF-B30 | FIXED (P3) | PrepareHardware keeps VID, PID and version (only SelfManagedIoInit queries them), so the restart after a PnP stop sends the mode switch again. Successful configurations issue the lower reads parked upper reads are missing. |
@@ -161,8 +161,8 @@ The core decides which call happens, and when. Each WDF callback is one call int
 * The default queue is parallel, with `PowerManaged = WdfUseDefault` (not power-managed on a filter). It has `EvtIoInternalDeviceControl` and an empty `EvtIoStop`.
 * `HidReadQueue` is manual, with `PowerManaged = WdfFalse` and no attributes.
 * Lower read: `WdfRequestCreate` with `WORKER_REQUEST_CONTEXT` and parent = device, `WdfMemoryCreateFromLookaside`, `WdfIoTargetFormatRequestForInternalIoctl(READ_REPORT, out = memory)`, a completion routine whose context is the request context, and an asynchronous `WdfRequestSend` with NULL options.
-* Mode switch: `WdfRequestCreate(WDF_NO_OBJECT_ATTRIBUTES)`, then `WdfMemoryCreatePreallocated` (parent = request, 32 bytes), then format `SET_FEATURE` with input = memory, then `Irp->UserBuffer = packet`, then `WdfRequestSend(SYNCHRONOUS)` with no timeout, then `WdfObjectDelete`.
-* Attribute query: `WdfIoTargetSendInternalIoctlSynchronously` into a zeroed, aligned `HID_DEVICE_ATTRIBUTES` on the stack, with no options and no BytesReturned.
+* Mode switch: `WdfRequestCreate(WDF_NO_OBJECT_ATTRIBUTES)`, then `WdfMemoryCreatePreallocated` (parent = request, 32 bytes), then format `SET_FEATURE` with input = memory, then `Irp->UserBuffer = packet`, then `WdfRequestSend(SYNCHRONOUS)` with `wdf_support::init::SYNC_IO_TIMEOUT` (C: no timeout), then `WdfObjectDelete`.
+* Attribute query: `WdfIoTargetSendInternalIoctlSynchronously` into a zeroed, aligned `HID_DEVICE_ATTRIBUTES` on the stack, with `wdf_support::init::SYNC_IO_TIMEOUT` (C: no options) and no BytesReturned.
 * Feature IOCTLs read `WdfRequestWdmGetIrp(Request)->UserBuffer` (a NULL IRP is treated as a NULL `UserBuffer`; see Driver-side P2 fixes).
 * Descriptor IOCTLs use `WdfRequestRetrieveOutputMemory` plus `WdfMemoryCopyFromBuffer`. Attributes use `WdfRequestRetrieveOutputBuffer(32, Length = NULL)`. So the framework, not the glue, produces the error statuses there.
 * `KeQueryPerformanceCounter(&x)` is called with a non-NULL pointer and its return value is discarded. `x` is the QPC frequency (HF-B6, preserved).
@@ -193,7 +193,6 @@ Exactly-once completion:
 ### Preserved driver-side issues (P1/P3)
 
 * **HF-B26.** The global HIDCLASS `MajorFunction[0x0F]` patch is a single unsynchronized pointer store (`write_volatile`) and is never reverted.
-* **HF-B27.** The attribute query and the mode switch are synchronous with no timeout. They run only at PASSIVE_LEVEL: from SelfManagedIoInit/Restart, and from the passive-level recovery timer. A hung lower driver therefore blocks start, resume or the timer's work-item thread indefinitely, as in C.
 * **HF-B14.** D0Exit stops neither the timer nor the work item; no `WdfTimerStop` was added.
 * **HF-B28.** The device interface is registered with no handler.
 * **`EvtIoStop`** is registered and empty. It neither acknowledges nor completes.

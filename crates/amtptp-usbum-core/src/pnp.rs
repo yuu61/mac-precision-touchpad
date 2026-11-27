@@ -153,7 +153,7 @@ where
     F: FnOnce() -> i64,
 {
     let mode_switch_status = match state.config() {
-        Some(cfg) => set_wellspring_mode(state, cfg, io, true),
+        Some(cfg) => io.serialized(|io| set_wellspring_mode(state, cfg, io, true)),
         // P2: C would dereference DeviceInfo == NULL; D0Entry never runs without a config row.
         None => STATUS_INVALID_DEVICE_STATE,
     };
@@ -187,7 +187,9 @@ where
 {
     io.stop_cancel_sent_io();
     let mode_switch_status = match state.config() {
-        Some(cfg) => set_wellspring_mode(state, cfg, io, false),
+        // After the stop: a reader completion still running an emergency reset holds the lock, and
+        // the stop waits for it.
+        Some(cfg) => io.serialized(|io| set_wellspring_mode(state, cfg, io, false)),
         // P2: see d0_entry.
         None => STATUS_INVALID_DEVICE_STATE,
     };
