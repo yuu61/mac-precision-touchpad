@@ -311,7 +311,16 @@ changes below that name HidFilter describe that removed template.
   `$(BuildEnvironment)=='AzurePipeline'` and `$(PipelineReleaseID)`, the latter giving the
   `2021.<id>.1.1000` DriverVer.
 - That pipeline cannot build the Rust drivers, and its badge no longer reflects this code. The
-  repository has no in-repo build CI; `.github/workflows/github-issue-sync.yml` only syncs issues.
+  in-repo CI is `.github/workflows/rust-ci.yml` (`.github/workflows/github-issue-sync.yml` only
+  syncs issues):
+  - host tests and Clippy, and Clippy (`cargo check` with `clippy-driver`) of both driver workspaces
+    for x64 and ARM64, scoped to the packages a change affects;
+  - the **Driver package** job, for x64 and ARM64, whenever a driver, the INF template or xtask
+    changes: `cargo xtask package --arch <arch> --release`, unsigned. It links both workspaces,
+    compiles the `Resource.rc` files and runs stampinf, `InfVerif /u` and Inf2Cat, which Clippy
+    alone never exercises. The kit comes from the same NuGet packages as the Clippy jobs;
+    `.github/scripts/rust-ci.ps1 -PackagingTools` also extracts the WDK's `bin` and `tools`
+    directories (stampinf, Inf2Cat, InfVerif) from the x64 WDK package.
 - The replacement is `cargo xtask package`.
   - `ReleaseSigned` becomes `--release --sign ...`.
   - The pipeline DriverVer becomes `--driver-version a.b.c.d`.

@@ -112,6 +112,9 @@ $kmSet = [System.Collections.Generic.HashSet[string]]::new([System.StringCompare
 $umSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
 $kmLintSupport = $false
 $umLintSupport = $false
+# `cargo xtask package` (build, link, stamp, verify and catalog the driver package) runs whenever a
+# driver is affected, and when the INF template or xtask changes.
+$packageInputsChanged = $false
 
 if ($null -ne $ChangedFiles) {
     $resolution = @{
@@ -232,6 +235,7 @@ else {
         # xtask and the INF templates its tests check (SourceDisksFiles, model bindings).
         if ($path -like 'tools/xtask/*' -or $path -like 'packaging/*.inx') {
             [void]$hostSet.Add('xtask')
+            $packageInputsChanged = $true
             continue
         }
 
@@ -352,6 +356,7 @@ if ($umPackages.Count -gt 0) {
 
 $runHost = $hostPackages.Count -gt 0
 $runDrivers = $driverInclude.Count -gt 0
+$runPackage = $runDrivers -or $packageInputsChanged
 $hostPackagesStr = $hostPackages -join ' '
 $driverMatrixObj = [ordered]@{ include = @($driverInclude.ToArray()) }
 $driverMatrixJson = $driverMatrixObj | ConvertTo-Json -Compress -Depth 4
@@ -370,6 +375,8 @@ else {
     'skipped'
 }
 
+$packageSummary = if ($runPackage) { 'x64, arm64 (release, unsigned)' } else { 'skipped' }
+
 $summaryLines = @(
     '### Rust CI Test Scope',
     '',
@@ -377,7 +384,8 @@ $summaryLines = @(
     "- **Changed files**: $($normalizedFiles.Count)",
     "- **Host workspace**: $hostSummary",
     "- **KMDF drivers**: $kmSummary",
-    "- **UMDF drivers**: $umSummary"
+    "- **UMDF drivers**: $umSummary",
+    "- **Driver package**: $packageSummary"
 )
 
 if (-not [string]::IsNullOrWhiteSpace($GitHubOutput)) {
@@ -385,7 +393,8 @@ if (-not [string]::IsNullOrWhiteSpace($GitHubOutput)) {
         "run_host=$($runHost.ToString().ToLowerInvariant())",
         "host_packages=$hostPackagesStr",
         "run_drivers=$($runDrivers.ToString().ToLowerInvariant())",
-        "driver_matrix=$driverMatrixJson"
+        "driver_matrix=$driverMatrixJson",
+        "run_package=$($runPackage.ToString().ToLowerInvariant())"
     ) | Out-File -FilePath $GitHubOutput -Encoding utf8 -Append
 }
 
@@ -406,6 +415,7 @@ if ($PassThru) {
         UmPackages    = $umPackages
         UmLintSupport = $umLintSupport
         DriverMatrix  = $driverMatrixJson
+        RunPackage    = $runPackage
     }
 }
 else {

@@ -52,6 +52,7 @@ jobs:
       host_packages: ${{ steps.detect.outputs.host_packages }}
       run_drivers: ${{ steps.detect.outputs.run_drivers }}
       driver_matrix: ${{ steps.detect.outputs.driver_matrix }}
+      run_package: ${{ steps.detect.outputs.run_package }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -137,9 +138,57 @@ jobs:
       - name: Check driver Cargo.lock
         run: git diff --exit-code -- "drivers/$env:DRIVER_WORKSPACE/Cargo.lock"
 
+  package:
+    # Builds and links both driver workspaces (release) and runs the whole packaging pipeline on the
+    # one INF: stampinf, InfVerif /u and Inf2Cat. Catches link errors, Resource.rc and INF
+    # regressions that Clippy cannot see. Unsigned; nothing is uploaded.
+    name: Driver package (${{ matrix.arch }})
+    needs: scope
+    if: needs.scope.outputs.run_package == 'true'
+    runs-on: windows-2025
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            target: x86_64-pc-windows-msvc
+          - arch: arm64
+            target: aarch64-pc-windows-msvc
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      PACKAGE_ARCH: ${{ matrix.arch }}
+      PACKAGE_TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Rust
+        run: ./.github/scripts/rust-ci-toolchain.ps1 -Toolchain $env:RUSTUP_TOOLCHAIN -Arch $env:PACKAGE_ARCH -Target $env:PACKAGE_TARGET
+
+      - name: Set up the Windows SDK and WDK with the packaging tools (${{ matrix.arch }})
+        run: ./.github/scripts/rust-ci.ps1 -Arch $env:PACKAGE_ARCH -PackagingTools
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "v1-package-${{ matrix.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.KIT_PACKAGE_VERSION }}"
+          workspaces: |
+            . -> target
+            drivers/km -> target
+            drivers/um -> target
+
+      - name: Build and package (release, unsigned)
+        run: cargo xtask package --arch $env:PACKAGE_ARCH --release
+
+      - name: Check Cargo.lock files
+        run: git diff --exit-code -- Cargo.lock drivers/km/Cargo.lock drivers/um/Cargo.lock
+
   ci:
     name: Rust CI
-    needs: [scope, host, drivers]
+    needs: [scope, host, drivers, package]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -155,4 +204,5 @@ jobs:
           SCOPE_RESULT: ${{ needs.scope.result }}
           HOST_RESULT: ${{ needs.host.result }}
           DRIVERS_RESULT: ${{ needs.drivers.result }}
-        run: ./.github/scripts/rust-ci-verify.ps1 -ScopeResult $env:SCOPE_RESULT -HostResult $env:HOST_RESULT -DriversResult $env:DRIVERS_RESULT
+          PACKAGE_RESULT: ${{ needs.package.result }}
+        run: ./.github/scripts/rust-ci-verify.ps1 -ScopeResult $env:SCOPE_RESULT -HostResult $env:HOST_RESULT -DriversResult $env:DRIVERS_RESULT -PackageResult $env:PACKAGE_RESULT
