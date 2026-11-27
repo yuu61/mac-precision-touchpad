@@ -75,9 +75,10 @@ pub enum LowerReadClass {
     /// 32 bits sign-extended, which made some of these values small valid lengths and others huge ones).
     Oversize,
     /// The first byte is not the transport's multitouch report ID ([`multitouch_report_id`]): another
-    /// report of the trackpad, e.g. its battery status (P3 fix of HF-B8: C parsed such a packet as
-    /// finger data when its length happened to fit, and otherwise stalled input for 3 s as a malformed
-    /// packet). The packet is dropped and the recovery work item issues the next read.
+    /// report of the trackpad, e.g. a mouse-mode report after the trackpad restarted, or its battery
+    /// status (P3 fix of HF-B8: C parsed such a packet as finger data when its length happened to fit,
+    /// and otherwise stalled input for 3 s as a malformed packet). The packet is dropped; the recovery
+    /// work item sends the mode switch again and issues the next read.
     OtherReport {
         /// The packet's first byte (0 for an empty buffer).
         report_id: u8,

@@ -764,9 +764,9 @@ impl FilterIo for Filter<'_> {
             // Small non-negative enum constant (0x2).
             _WDF_REQUEST_SEND_OPTIONS_FLAGS::WDF_REQUEST_SEND_OPTION_SYNCHRONOUS as ULONG,
         );
-        // SAFETY: PASSIVE_LEVEL (SelfManagedIoInit/Restart or the passive-level timer); formatted
-        // request for `target`; synchronous, so the mode-switch buffer outlives the request (on a
-        // timeout the framework cancels the request and waits for it to complete).
+        // SAFETY: PASSIVE_LEVEL (SelfManagedIoInit/Restart, the passive-level timer or the work
+        // item); formatted request for `target`; synchronous, so the mode-switch buffer outlives the
+        // request (on a timeout the framework cancels the request and waits for it to complete).
         let sent = unsafe {
             call_unsafe_wdf_function_binding!(WdfRequestSend, request, target, &raw mut options)
         };

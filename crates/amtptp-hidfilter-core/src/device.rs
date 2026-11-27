@@ -312,6 +312,9 @@ pub struct DeviceState {
     ptp_report_button: AtomicBool,
     /// Lower reads of the current epoch that failed in a row (not in C): any other completion resets it.
     read_failures: AtomicU32,
+    /// A report other than the multitouch report arrived: the work item sends the mode switch again (not
+    /// in C).
+    mode_switch_wanted: AtomicBool,
     pub(crate) scan_clock: ScanClock,
 }
 
@@ -373,6 +376,7 @@ impl DeviceState {
             ptp_report_touch: AtomicBool::new(s.ptp_report_touch),
             ptp_report_button: AtomicBool::new(s.ptp_report_button),
             read_failures: AtomicU32::new(0),
+            mode_switch_wanted: AtomicBool::new(false),
             scan_clock: ScanClock::with_frequency(s.qpc_frequency),
         }
     }
@@ -397,6 +401,16 @@ impl DeviceState {
     /// A lower read completed without failing: the run of failures ends.
     pub(crate) fn note_read_completion(&self) {
         self.read_failures.store(0, Ordering::Relaxed);
+    }
+
+    /// Asks the work item to send the mode switch again.
+    pub(crate) fn request_mode_switch(&self) {
+        self.mode_switch_wanted.store(true, Ordering::Relaxed);
+    }
+
+    /// Takes a pending mode-switch request (the work item).
+    pub(crate) fn take_mode_switch_request(&self) -> bool {
+        self.mode_switch_wanted.swap(false, Ordering::Relaxed)
     }
 
     /// Reads every field (each with its own relaxed load).

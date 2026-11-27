@@ -362,6 +362,43 @@ fn another_report_is_dropped_and_the_read_reissued() {
     assert_eq!(m.lower_reads_pending, 1, "the work item issued the read again");
 }
 
+/// Not in C: after its power switch, the trackpad comes back in mouse mode while the HID device stays
+/// (hardware: 8-byte reports with ID 0x02, cursor dead). Another report makes the work item send the
+/// Bluetooth mode switch again, once, before it re-issues the read; the device stays configured.
+#[test]
+fn mouse_mode_reports_make_the_work_item_send_the_mode_switch_again() {
+    let (state, mut m) = bluetooth();
+    start(&state, &mut m);
+    assert_eq!(m.sends.len(), 1, "the start sent the mode switch");
+    let _upper = read_report(&state, &mut m);
+    let mouse_report = [0x02, 0x01, 0, 0, 0, 0, 0, 0];
+    let sent = m.tickets[0];
+    let _outcome = complete(&mut m, &state, sent, STATUS_SUCCESS, &mouse_report);
+    assert!(state.device_configured(), "input keeps flowing meanwhile");
+    work_item_callback(&mut m, &state);
+    assert_eq!(m.sends.len(), 2, "the work item sent the mode switch again");
+    assert_eq!(m.sends[1].payload, [0xF1, 0x02, 0x01]);
+    assert_eq!(m.in_flight(), 1, "and issued the read again");
+    // The request is taken once: the next work item does not switch again.
+    work_item_callback(&mut m, &state);
+    assert_eq!(m.sends.len(), 2);
+}
+
+/// A mode-switch request still pending at `D0Exit` is not acted on: the restart sends the switch.
+#[test]
+fn no_mode_switch_from_the_work_item_after_d0_exit() {
+    let (state, mut m) = bluetooth();
+    start(&state, &mut m);
+    let _upper = read_report(&state, &mut m);
+    let sent = m.tickets[0];
+    let _outcome = complete(&mut m, &state, sent, STATUS_SUCCESS, &[0x02, 0, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(d0_exit(&mut m, &state), 0);
+    m.ev.clear();
+    work_item_callback(&mut m, &state);
+    assert_eq!(m.ev, Vec::<String>::new());
+    assert_eq!(m.sends.len(), 1);
+}
+
 /// HF-B29 (P3): `Information` above the 1024-byte buffer is not a packet length (C took its low 32
 /// bits, so `0x1_0000_000D` was a 13-byte packet): the 3 s timer, no report.
 #[test]
