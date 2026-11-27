@@ -124,8 +124,10 @@ target/package/<x64|arm64>/
   AmtPtpDevice/              AmtPtpDevice.inf  AmtPtpDevice.cat
                              AmtPtpDeviceUsbKm.sys  AmtPtpDeviceUsbUm.dll
                              AmtPtpDeviceSpiKm.sys  AmtPtpHidFilter.sys
+                             AmtPtpBthFilter.sys
   AmtPtpDevice.symbols/      AmtPtpDeviceUsbKm.pdb  AmtPtpDeviceUsbUm.pdb
                              AmtPtpDeviceSpiKm.pdb  AmtPtpHidFilter.pdb
+                             AmtPtpBthFilter.pdb
 ```
 
 - The package directory contains the INF, CAT and binaries. Pass the directory to
@@ -217,6 +219,12 @@ target/package/<x64|arm64>/
 `packaging/AmtPtpDevice.inx` is the only INF template. It installs all four drivers, as the signed C
 release (`AmtPtpDevice.inf`, `DriverVer 06/02/2021,2021.3979.1.1000`) did, and binds AmtPtpHidFilter
 to the Bluetooth Magic Trackpad 2 collections (`Col01` filter, `Col02` null device).
+
+Since 2026-11-27 it also installs a fifth driver that has no C counterpart: `AmtPtpBthFilter`, a lower
+filter on the Bluetooth HID device node (`BTHENUM\{00001124-...}_VID&0001004c_PID&0265`). Its
+`AmtPtpBthFilter_Device` sections pull in the inbox `hidbth.inf`/`input.inf` sections (`Include`/
+`Needs`) and add `LowerFilters`; the vendor collection it creates, `Col03`, is bound to the null
+device. See [bthfilter.md](bthfilter.md#inf).
 
 The port first also kept the standalone `packaging/AmtPtpHidFilter.inx` (the C
 `src/AmtPtpHidFilter/AmtPtpHidFilter.inf`, never part of a release). It was removed on 2026-11-27

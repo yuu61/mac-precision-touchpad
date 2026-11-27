@@ -9,6 +9,7 @@ the port was done and what changed.
 | [usbkm.md](usbkm.md) | AmtPtpDeviceUsbKm (KMDF, T2): same |
 | [spikm.md](spikm.md) | AmtPtpDeviceSpiKm (KMDF, SPI): same |
 | [hidfilter.md](hidfilter.md) | AmtPtpHidFilter (KMDF, Bluetooth Magic Trackpad 2): same |
+| [bthfilter.md](bthfilter.md) | AmtPtpBthFilter (KMDF, new: lower filter below HidBth that declares and pads the Magic Trackpad 2 reports, replacing the HIDCLASS detour) |
 | [packaging.md](packaging.md) | Building, packaging and signing; INF changes; framework versions and OS floor |
 | [specs/](specs/) | Porting analyses of the C drivers (`usbum.md`, `usbkm.md`, `spikm.md`, `hidfilter.md`) and of the code shared between them (`crosscut.md`). Bug IDs such as `UM-B7` or `HF-B15` refer to the `Bn` items in these analyses. File:line references point into the C tree at commit 2edb0f2. |
 
@@ -45,4 +46,5 @@ documents:
 - The WDF glue under `drivers/` is not covered by those fixtures. It was reviewed against the C
   sources function by function, with every request path (completed or forwarded exactly once)
   and every callback (IRQL, code section) accounted for.
-- None of the drivers has been run on hardware yet.
+- AmtPtpHidFilter and AmtPtpBthFilter have been run on hardware (Bluetooth Magic Trackpad 2,
+  x64); see their records.
