@@ -13,6 +13,9 @@
 //!   and the user-mode-app configuration report 0x09.
 //! - [`input`]: input report 0x05 in its two wire shapes: 9-byte contacts (50 bytes) and SPI 5-byte
 //!   contacts (30 bytes).
+//! - [`read_tracker`]: the lower reads a driver has in flight, and the epoch that makes a read issued
+//!   before a suspend stale.
+//! - [`scan_time`]: the per-session Scan Time clock.
 //!
 //! All wire formats are encoded and decoded explicitly as little-endian bytes. There are no packed or
 //! bitfield structs and no `unsafe`.
@@ -64,6 +67,7 @@ pub mod hidport;
 pub mod input;
 pub mod ioctl;
 pub mod item;
+pub mod read_tracker;
 pub mod scan_time;
 pub mod status;
 

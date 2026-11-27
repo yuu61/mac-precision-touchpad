@@ -26,6 +26,9 @@
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use ptp_hid::input::SPI_PTP_REPORT_LEN;
+pub use ptp_hid::read_tracker::{
+    LowerReadOrigin, MAX_IN_FLIGHT_READS, ReadTicket, ReadTracker, SuspendedReads,
+};
 use ptp_hid::scan_time::ScanClock;
 
 use crate::device::SpiTrackpadInfo;
@@ -66,9 +69,6 @@ pub const RECOVERY_TIMER_DUE_TIME: i64 = -50_000_000;
 pub const RECOVERY_TIMER_PERIOD: u32 = 0;
 /// Completion status for every request `D0Exit` drains from `HidQueue` (Information 0).
 pub const D0_EXIT_DRAIN_STATUS: NtStatus = STATUS_CANCELLED;
-/// The most lower reads that can be in flight at once. HIDCLASS keeps a handful of reads pending; a read
-/// beyond this limit is not issued (the upstream request waits for a later completion).
-pub const MAX_IN_FLIGHT_READS: usize = 32;
 
 /// What `SelfManagedIoInit` / `SelfManagedIoRestart` decided.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -80,13 +80,6 @@ pub struct SelfManagedIoOutcome {
     pub start_recovery_timer: Option<i64>,
     /// The device is now configured: the glue issues [`DeviceRuntime::backlog_reads`] lower reads.
     pub configured: bool,
-}
-
-/// The epoch a lower read was claimed in. The driver stores it in the read's request context and passes
-/// it back to [`DeviceRuntime::finish_lower_read`].
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct ReadTicket {
-    epoch: u32,
 }
 
 /// Taken by the recovery timer before its mode switch ([`DeviceRuntime::begin_recovery`]).
@@ -103,69 +96,6 @@ pub enum ClaimRefused {
     NotConfigured,
     /// [`MAX_IN_FLIGHT_READS`] reads are already in flight.
     TooManyInFlight,
-}
-
-/// Whether a completed lower read belongs to the current epoch.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LowerReadOrigin {
-    /// Issued since the last resume: it serves the oldest queued upstream read.
-    Current,
-    /// Issued before the device was suspended: its data is dropped and `HidQueue` is not touched.
-    Stale,
-}
-
-/// The lower reads in flight and the current epoch. The driver keeps one per device behind a spin lock and
-/// passes it to the [`DeviceRuntime`] methods that need it; holding `&mut ReadTracker` stands for holding
-/// that lock.
-///
-/// `H` is the read's handle (`WDFREQUEST` in the driver, a label in the tests).
-#[derive(Debug)]
-pub struct ReadTracker<H, const N: usize = MAX_IN_FLIGHT_READS> {
-    epoch: u32,
-    in_flight: [Option<H>; N],
-}
-
-impl<H: Copy, const N: usize> Default for ReadTracker<H, N> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<H: Copy, const N: usize> ReadTracker<H, N> {
-    /// No reads in flight, epoch 0.
-    #[must_use]
-    pub const fn new() -> Self {
-        Self {
-            epoch: 0,
-            in_flight: [None; N],
-        }
-    }
-
-    /// Number of reads of the current epoch in flight.
-    #[must_use]
-    pub fn in_flight(&self) -> usize {
-        self.in_flight.iter().filter(|slot| slot.is_some()).count()
-    }
-
-    /// The current epoch (incremented by every suspend).
-    #[must_use]
-    pub const fn epoch(&self) -> u32 {
-        self.epoch
-    }
-}
-
-/// The reads that were in flight when the device was suspended. The driver cancels each one
-/// (`WdfRequestCancelSentRequest`); their completions report [`LowerReadOrigin::Stale`].
-#[derive(Debug)]
-pub struct SuspendedReads<H, const N: usize = MAX_IN_FLIGHT_READS> {
-    reads: [Option<H>; N],
-}
-
-impl<H: Copy, const N: usize> SuspendedReads<H, N> {
-    /// The reads to cancel.
-    pub fn iter(&self) -> impl Iterator<Item = H> + '_ {
-        self.reads.iter().filter_map(|slot| *slot)
-    }
 }
 
 /// `DeviceStatus`, the reporting clock and the PTP flags of one device.
@@ -265,7 +195,7 @@ impl DeviceRuntime {
         tracker: &ReadTracker<H, N>,
     ) -> Option<RecoveryTicket> {
         (self.device_status() == DeviceStatus::D0ActiveAndUnconfigured).then_some(RecoveryTicket {
-            epoch: tracker.epoch,
+            epoch: tracker.epoch(),
         })
     }
 
@@ -282,7 +212,7 @@ impl DeviceRuntime {
         set_state_status: NtStatus,
         qpc_frequency: F,
     ) -> bool {
-        let still_waiting = ticket.epoch == tracker.epoch
+        let still_waiting = ticket.epoch == tracker.epoch()
             && self.device_status() == DeviceStatus::D0ActiveAndUnconfigured;
         if nt_success(set_state_status) && still_waiting {
             self.configure(qpc_frequency);
@@ -317,12 +247,7 @@ impl DeviceRuntime {
         tracker: &mut ReadTracker<H, N>,
     ) -> SuspendedReads<H, N> {
         self.set_status(DeviceStatus::D3);
-        tracker.epoch = tracker.epoch.wrapping_add(1);
-        let mut reads = [None; N];
-        for (taken, slot) in reads.iter_mut().zip(tracker.in_flight.iter_mut()) {
-            *taken = slot.take();
-        }
-        SuspendedReads { reads }
+        tracker.suspend()
     }
 
     /// `AmtPtpEvtDeviceD0Exit` (Device.c:353-395): [`Self::suspend`] (normally a no-op, because
@@ -360,15 +285,7 @@ impl DeviceRuntime {
         if self.device_status() != DeviceStatus::D0ActiveAndConfigured {
             return Err(ClaimRefused::NotConfigured);
         }
-        let slot = tracker
-            .in_flight
-            .iter_mut()
-            .find(|slot| slot.is_none())
-            .ok_or(ClaimRefused::TooManyInFlight)?;
-        *slot = Some(read);
-        Ok(ReadTicket {
-            epoch: tracker.epoch,
-        })
+        tracker.claim(read).ok_or(ClaimRefused::TooManyInFlight)
     }
 
     /// Unregisters lower read `read` when it completes (or when its send failed) and tells whether it
@@ -380,18 +297,7 @@ impl DeviceRuntime {
         read: H,
         ticket: ReadTicket,
     ) -> LowerReadOrigin {
-        if let Some(slot) = tracker
-            .in_flight
-            .iter_mut()
-            .find(|slot| slot.is_some_and(|registered| registered == read))
-        {
-            *slot = None;
-        }
-        if ticket.epoch == tracker.epoch {
-            LowerReadOrigin::Current
-        } else {
-            LowerReadOrigin::Stale
-        }
+        tracker.finish(read, ticket)
     }
 
     /// The body of `AmtPtpRequestCompletionRoutine` (Input.c:157-321) for a [`LowerReadOrigin::Current`]
