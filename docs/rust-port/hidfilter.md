@@ -200,9 +200,9 @@ Exactly-once completion:
 
 ### Competing reader on Bluetooth (found on hardware, not fixed)
 
-The Bluetooth HID device itself (`BTHENUM\{00001124-...}`, HidBth under HIDCLASS) has its own HIDCLASS, and that HIDCLASS keeps its own reads pending at HidBth. The filter reads HidBth through the detour at the same time. HidBth gives each input packet to one pending read. A packet that lands in HIDCLASS's read never reaches the filter, and HIDCLASS drops it, because report 0x31 is not in the SDP descriptor. C uses the same detour, so it is probably affected too; this has not been measured.
+The Bluetooth HID device itself (`BTHENUM\{00001124-...}`, HidBth under HIDCLASS) has its own HIDCLASS, and that HIDCLASS keeps its own reads pending at HidBth. The filter reads HidBth through the detour at the same time. HidBth gives each input packet to one pending read. A packet that lands in HIDCLASS's read never reaches the filter, and HIDCLASS drops it, because report 0x31 is not in the SDP descriptor. C uses the same detour and loses packets at the same rate (measured below), so the port inherited this; it is not a regression.
 
-Measured with a Magic Trackpad 2 during multi-finger gestures (2026-11-27):
+Measured with the port and a Magic Trackpad 2 during multi-finger gestures (2026-11-27):
 
 * 74 of 2125 interrupt-channel packets (3.5%) did not reach the filter, although two filter reads were pending each time.
 * The radio delivered every packet complete (BTHPORT HCI trace).
@@ -212,7 +212,13 @@ Measured with a Magic Trackpad 2 during multi-finger gestures (2026-11-27):
 
 The read issued right after a lost multi-finger packet fails at once with `STATUS_DEVICE_DATA_ERROR`; this is the failure HF-B7 re-issues at once. A lost one-finger packet causes no error. Why HidBth fails that read is not known.
 
-The trace used: `logman` with the filter provider, BTHPORT `{8a1f9517-3a8c-4a9e-a018-4f17a200f277}` level 5 (event 402 carries the HCI packet heads), and HIDCLASS `{6465DA78-E7A0-4F39-B084-8F53C7C30DC6}`. Enabling HIDCLASS writes event 3 per HID device, with the read counters above.
+The C driver (release 2021.3979.1.1000) was measured on the same day, on the same trackpad.
+
+* 86 of 2514 interrupt-channel packets (3.4%) did not reach the filter.
+* The `NumReadReports` of the HidBth device's HIDCLASS rose by 174, again about two per lost packet.
+* C writes no trace that the port can decode, so its loss was counted another way. The Col01 device's HIDCLASS gets one report for each packet that reaches the filter. The loss is therefore the packet count minus the rise in that HIDCLASS's `NumReadReports`.
+
+The trace used: `logman` with the filter provider, BTHPORT `{8a1f9517-3a8c-4a9e-a018-4f17a200f277}` level 5 (event 402 carries the HCI packet heads), and HIDCLASS `{6465DA78-E7A0-4F39-B084-8F53C7C30DC6}`. Enabling HIDCLASS writes event 3 per HID device, with the read counters above. To read the counters at the end of a run, enable HIDCLASS in a second session; that writes event 3 again.
 
 A fix needs a design change: HIDCLASS's reads must stop reaching HidBth. Each lost packet is one 11 ms frame. A lost lift frame could leave a contact down until the next report (not observed).
 
