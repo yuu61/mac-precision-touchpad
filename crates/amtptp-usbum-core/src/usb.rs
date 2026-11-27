@@ -102,17 +102,16 @@ pub struct EmergencyResetOutcome {
     pub status: NtStatus,
 }
 
-/// `AmtPtpEmergResetDevice`: `SetWellspringMode(FALSE)` then `SetWellspringMode(TRUE)`; returns the
-/// second status. Runs even when the host selected mouse mode (UM-B11, P3 PRESERVED).
+/// `AmtPtpEmergResetDevice`: `SetWellspringMode(FALSE)` then `SetWellspringMode(TRUE)`, as one
+/// [`ControlPipe::serialized`] step; returns the second status. Runs even when the host selected mouse
+/// mode (UM-B11, P3 PRESERVED).
 pub fn emergency_reset<C: ControlPipe>(
     state: &DeviceState,
     cfg: &WellspringDevice,
     control: &mut C,
 ) -> EmergencyResetOutcome {
-    let disable_status = set_wellspring_mode(state, cfg, control, false);
-    let status = set_wellspring_mode(state, cfg, control, true);
-    EmergencyResetOutcome {
-        disable_status,
-        status,
-    }
+    control.serialized(|control| EmergencyResetOutcome {
+        disable_status: set_wellspring_mode(state, cfg, control, false),
+        status: set_wellspring_mode(state, cfg, control, true),
+    })
 }

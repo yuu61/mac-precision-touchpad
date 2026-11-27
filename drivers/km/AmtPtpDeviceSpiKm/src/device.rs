@@ -17,9 +17,10 @@ use amtptp_spikm_core::wire::{
 };
 use tracelogging as tlg;
 use wdf_support::declare_context_type;
+use wdf_support::handle::WdfHandle;
 use wdf_support::init::{
     memory_descriptor_init_buffer, object_attributes_init, object_attributes_init_context_type,
-    pnppower_event_callbacks_init, timer_config_init,
+    pnppower_event_callbacks_init, sync_send_options, timer_config_init,
 };
 use wdf_support::ntstatus::{NT_SUCCESS, STATUS_INVALID_DEVICE_STATE, STATUS_SUCCESS};
 use wdf_support::request::Request;
@@ -28,11 +29,14 @@ use wdf_support::time::query_performance_frequency;
 use wdk_sys::{
     _POOL_TYPE, _WDF_EXECUTION_LEVEL, GUID, NTSTATUS, PWDFDEVICE_INIT, ULONG,
     UNICODE_STRING, WDF_NO_OBJECT_ATTRIBUTES, WDF_POWER_DEVICE_STATE, WDFCMRESLIST, WDFDEVICE,
-    WDFIOTARGET, WDFKEY, WDFLOOKASIDE, WDFQUEUE, WDFREQUEST, WDFTIMER,
-    call_unsafe_wdf_function_binding,
+    WDFIOTARGET__, WDFKEY, WDFLOOKASIDE, WDFLOOKASIDE__, WDFQUEUE, WDFQUEUE__,
+    WDFREQUEST, WDFREQUEST__, WDFTIMER, WDFTIMER__, call_unsafe_wdf_function_binding,
 };
 
 use crate::{PROVIDER, input, keyword, queue};
+
+/// A lower read request as the read tracker stores it.
+pub(crate) type LowerRead = WdfHandle<WDFREQUEST__>;
 
 /// Port of the C `DEVICE_CONTEXT` (Device.h:56-84). Named `DEVICE_CONTEXT` for `!wdfkd`.
 ///
@@ -40,27 +44,28 @@ use crate::{PROVIDER, input, keyword, queue};
 /// device can receive any request or PnP/power callback; afterwards the context is only accessed through
 /// shared references. All state that changes later is atomic ([`SharedDeviceConfig`], [`DeviceRuntime`])
 /// or behind the read lock (`reads`), so concurrent callbacks at up to `DISPATCH_LEVEL` never race on
-/// plain fields (P2 for SPI-B15).
+/// plain fields (P2 for SPI-B15). The handles are [`WdfHandle`]s, so the context is `Sync`, as
+/// `declare_context_type!` requires.
 ///
 /// Dropped C fields (dead): `SpiDevice`, `InputPollThreadHandle`. `HidVendorID`, `HidProductID`,
 /// `HidVersionNumber`, `TrackpadInfo` and `ReportType` are in `config`; `DeviceStatus`, the reporting clock,
 /// `PtpInputOn`, `PtpReportButton` and `PtpReportTouch` are in `runtime`.
 pub(crate) struct DeviceContext {
     /// `SpiTrackpadIoTarget`: the local (default) I/O target, i.e. the Apple SPI PDO below us.
-    pub(crate) spi_trackpad_io_target: WDFIOTARGET,
+    pub(crate) spi_trackpad_io_target: WdfHandle<WDFIOTARGET__>,
     /// `HidQueue`: the manual queue holding the pending upstream `IOCTL_HID_READ_REPORT` requests.
-    pub(crate) hid_queue: WDFQUEUE,
+    pub(crate) hid_queue: WdfHandle<WDFQUEUE__>,
     /// `PowerOnRecoveryTimer`: the 5 s one-shot passive-level retry timer.
-    pub(crate) power_on_recovery_timer: WDFTIMER,
+    pub(crate) power_on_recovery_timer: WdfHandle<WDFTIMER__>,
     /// `HidReadBufferLookaside`: 1024-byte `NonPagedPoolNx` buffers for the lower reads.
-    pub(crate) hid_read_buffer_lookaside: WDFLOOKASIDE,
+    pub(crate) hid_read_buffer_lookaside: WdfHandle<WDFLOOKASIDE__>,
     /// What `PrepareHardware` found out about the device.
     pub(crate) config: SharedDeviceConfig,
     /// `DeviceStatus`, the reporting clock and the PTP feature flags.
     pub(crate) runtime: DeviceRuntime,
     /// The lower reads in flight and the current epoch (see [`amtptp_spikm_core::runtime`]). Every
     /// change of `DeviceStatus` and every claim of a lower read happens under this lock.
-    reads: SpinLocked<ReadTracker<WDFREQUEST>>,
+    reads: SpinLocked<ReadTracker<LowerRead>>,
 }
 
 impl DeviceContext {
@@ -68,10 +73,10 @@ impl DeviceContext {
     /// `DeviceStatus = D3` (C: zero-filled context, then `DeviceStatus = D3` at Device.c:134).
     const fn new() -> Self {
         Self {
-            spi_trackpad_io_target: null_mut(),
-            hid_queue: null_mut(),
-            power_on_recovery_timer: null_mut(),
-            hid_read_buffer_lookaside: null_mut(),
+            spi_trackpad_io_target: WdfHandle::NULL,
+            hid_queue: WdfHandle::NULL,
+            power_on_recovery_timer: WdfHandle::NULL,
+            hid_read_buffer_lookaside: WdfHandle::NULL,
             config: SharedDeviceConfig::new(),
             runtime: DeviceRuntime::new(),
             reads: SpinLocked::new(ReadTracker::new()),
@@ -85,7 +90,7 @@ impl DeviceContext {
     /// The context was set up by [`create_device`] (so the lock exists); IRQL <= `DISPATCH_LEVEL`.
     pub(crate) unsafe fn with_reads<R, F>(&self, f: F) -> R
     where
-        F: FnOnce(&DeviceRuntime, &mut ReadTracker<WDFREQUEST>) -> R,
+        F: FnOnce(&DeviceRuntime, &mut ReadTracker<LowerRead>) -> R,
     {
         // SAFETY: the lock was created in `initialize_device` (caller contract); `f` only touches the
         // runtime and the tracker.
@@ -215,7 +220,7 @@ unsafe fn initialize_device(device: WDFDEVICE, context: *mut DeviceContext) -> N
             _POOL_TYPE::NonPagedPoolNx,
             WDF_NO_OBJECT_ATTRIBUTES,
             POOL_TAG,
-            &raw mut (*context).hid_read_buffer_lookaside
+            (&raw mut (*context).hid_read_buffer_lookaside).cast::<WDFLOOKASIDE>()
         )
     };
     if !NT_SUCCESS(status) {
@@ -239,7 +244,7 @@ unsafe fn initialize_device(device: WDFDEVICE, context: *mut DeviceContext) -> N
             WdfTimerCreate,
             &raw mut timer_config,
             &raw mut timer_attributes,
-            &raw mut (*context).power_on_recovery_timer
+            (&raw mut (*context).power_on_recovery_timer).cast::<WDFTIMER>()
         )
     };
     if !NT_SUCCESS(status) {
@@ -259,7 +264,7 @@ unsafe fn initialize_device(device: WDFDEVICE, context: *mut DeviceContext) -> N
     // SAFETY: valid device handle.
     let io_target = unsafe { call_unsafe_wdf_function_binding!(WdfDeviceGetIoTarget, device) };
     // SAFETY: writable per the function contract.
-    unsafe { (*context).spi_trackpad_io_target = io_target };
+    unsafe { (*context).spi_trackpad_io_target = WdfHandle::new(io_target) };
     if io_target.is_null() {
         trace_create_device_failure(b"WdfDeviceGetIoTarget", NO_IO_TARGET_STATUS);
         return NO_IO_TARGET_STATUS;
@@ -282,7 +287,9 @@ unsafe fn initialize_device(device: WDFDEVICE, context: *mut DeviceContext) -> N
     }
 
     // SAFETY: valid device; `hid_queue` is writable per the function contract.
-    unsafe { queue::queue_initialize(device, &raw mut (*context).hid_queue) }
+    unsafe {
+        queue::queue_initialize(device, (&raw mut (*context).hid_queue).cast::<WDFQUEUE>())
+    }
 }
 
 /// Error trace for the device-creation steps.
@@ -333,18 +340,21 @@ unsafe extern "C" fn evt_device_prepare_hardware(
         attributes.0.as_mut_ptr().cast(),
         LOWER_ATTRIBUTES_DESCRIPTOR_LEN,
     );
+    // Not in C (no options): bound the wait for a lower driver that never completes (B-3).
+    let mut options = sync_send_options(0);
     // SAFETY: PASSIVE_LEVEL; valid local I/O target; `output` describes the
-    // 32-byte local buffer, which outlives this synchronous call; no request,
-    // input, options or bytes-returned (all NULL, as in C).
+    // 32-byte local buffer, which outlives this synchronous call (also on a
+    // timeout: the framework waits for the cancelled request); no request,
+    // input or bytes-returned (NULL, as in C).
     let status = unsafe {
         call_unsafe_wdf_function_binding!(
             WdfIoTargetSendInternalIoctlSynchronously,
-            context.spi_trackpad_io_target,
+            context.spi_trackpad_io_target.get(),
             null_mut(),
             LOWER_ATTRIBUTES_IOCTL,
             null_mut(),
             &raw mut output,
-            null_mut(),
+            &raw mut options,
             null_mut()
         )
     };
@@ -528,7 +538,7 @@ unsafe extern "C" fn evt_device_self_managed_io_suspend(device: WDFDEVICE) -> NT
     // SAFETY: the timer was created in AddDevice and lives as long as the device; Wait = FALSE is
     // allowed at any IRQL <= DISPATCH_LEVEL.
     let was_queued = unsafe {
-        call_unsafe_wdf_function_binding!(WdfTimerStop, context.power_on_recovery_timer, 0)
+        call_unsafe_wdf_function_binding!(WdfTimerStop, context.power_on_recovery_timer.get(), 0)
     };
     tlg::write_event!(
         PROVIDER,
@@ -554,10 +564,10 @@ unsafe extern "C" fn evt_device_self_managed_io_suspend(device: WDFDEVICE) -> NT
 /// `context` belongs to a live device set up by [`create_device`]; IRQL <= `DISPATCH_LEVEL`.
 unsafe fn cancel_in_flight_reads<F>(context: &DeviceContext, suspend: F) -> u32
 where
-    F: FnOnce(&DeviceRuntime, &mut ReadTracker<WDFREQUEST>) -> SuspendedReads<WDFREQUEST>,
+    F: FnOnce(&DeviceRuntime, &mut ReadTracker<LowerRead>) -> SuspendedReads<LowerRead>,
 {
     let mut held: [WDFREQUEST; MAX_IN_FLIGHT_READS] = [null_mut(); MAX_IN_FLIGHT_READS];
-    let take = |runtime: &DeviceRuntime, reads: &mut ReadTracker<WDFREQUEST>| {
+    let take = |runtime: &DeviceRuntime, reads: &mut ReadTracker<LowerRead>| {
         let suspended = suspend(runtime, reads);
         let mut count = 0_usize;
         for (slot, read) in held.iter_mut().zip(suspended.iter()) {
@@ -565,13 +575,13 @@ where
             unsafe {
                 call_unsafe_wdf_function_binding!(
                     WdfObjectReferenceActual,
-                    read.cast(),
+                    read.get().cast(),
                     null_mut(),
                     0,
                     core::ptr::null()
                 );
             }
-            *slot = read;
+            *slot = read.get();
             count += 1;
         }
         count
@@ -625,7 +635,7 @@ unsafe extern "C" fn evt_device_d0_exit(
         let retrieved = unsafe {
             call_unsafe_wdf_function_binding!(
                 WdfIoQueueRetrieveNextRequest,
-                context.hid_queue,
+                context.hid_queue.get(),
                 &raw mut request
             )
         };
@@ -688,7 +698,7 @@ unsafe extern "C" fn evt_device_self_managed_io_init_or_restart(device: WDFDEVIC
         let _was_pending = unsafe {
             call_unsafe_wdf_function_binding!(
                 WdfTimerStart,
-                context.power_on_recovery_timer,
+                context.power_on_recovery_timer.get(),
                 due_time
             )
         };
@@ -710,19 +720,22 @@ unsafe fn spi_set_state(context: &DeviceContext, desired_state: bool) -> NTSTATU
     packet.fill(desired_state);
     let mut input =
         memory_descriptor_init_buffer(packet.as_mut_ptr().cast(), SET_STATE_PACKET_DESCRIPTOR_LEN);
+    // Not in C (no options): bound the wait for a lower driver that never completes (B-3).
+    let mut options = sync_send_options(0);
     // SAFETY: PASSIVE_LEVEL (caller contract); valid local I/O target; `input`
     // describes `packet`, which is neither moved nor dropped before this
-    // synchronous call returns (its self-pointer stays valid); everything else
-    // NULL, as in C.
+    // synchronous call returns (its self-pointer stays valid; on a timeout the
+    // framework waits for the cancelled request); request, output and
+    // bytes-returned NULL, as in C.
     let status = unsafe {
         call_unsafe_wdf_function_binding!(
             WdfIoTargetSendInternalIoctlSynchronously,
-            context.spi_trackpad_io_target,
+            context.spi_trackpad_io_target.get(),
             null_mut(),
             SET_STATE_IOCTL,
             &raw mut input,
             null_mut(),
-            null_mut(),
+            &raw mut options,
             null_mut()
         )
     };

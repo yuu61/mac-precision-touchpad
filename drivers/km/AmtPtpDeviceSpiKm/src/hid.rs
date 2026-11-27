@@ -138,7 +138,7 @@ pub(crate) fn get_device_attribs(context: &DeviceContext, request: &Request) -> 
 pub(crate) fn get_strings(context: &DeviceContext, request: Request) {
     // SAFETY: `spi_trackpad_io_target` is the device's local I/O target, valid
     // for the device's lifetime.
-    if let Err(rejected) = unsafe { request.send_and_forget(context.spi_trackpad_io_target) } {
+    if let Err(rejected) = unsafe { request.send_and_forget(context.spi_trackpad_io_target.get()) } {
         tlg::write_event!(
             PROVIDER,
             "GetStringForwardFailed",

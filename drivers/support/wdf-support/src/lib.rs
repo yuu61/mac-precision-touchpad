@@ -13,10 +13,14 @@
 //!   `WDF_REL_TIMEOUT_IN_*` (bindgen does not emit inline functions, so wdk-sys
 //!   has none of them). Bodies follow `Include/wdf/kmdf/1.23` and
 //!   `Include/wdf/umdf/2.15` field by field.
-//! - [`context`] + [`declare_context_type!`]: `WDF_DECLARE_CONTEXT_TYPE_WITH_NAME`.
+//! - [`context`] + [`declare_context_type!`]: `WDF_DECLARE_CONTEXT_TYPE_WITH_NAME`, for `Sync`
+//!   context types only.
+//! - [`handle`]: [`handle::WdfHandle`] and [`handle::ContextPtr`], the `Sync` forms of the WDF handles
+//!   and context pointers a context stores.
 //! - [`request`]: [`request::Request`], an owned `WDFREQUEST` that is completed,
 //!   forwarded or explicitly released exactly once.
-//! - [`sync`] (KMDF only): [`sync::SpinLocked`], a value guarded by a `WDFSPINLOCK`.
+//! - [`sync`]: [`sync::SpinLocked`], a value guarded by a `WDFSPINLOCK`, and [`sync::WaitLock`], a
+//!   `WDFWAITLOCK` for `PASSIVE_LEVEL` sequences.
 //! - [`wdm`] (KMDF only): `WdfRequestWdmGetIrp`, `IoGetCurrentIrpStackLocation`,
 //!   `Irp->UserBuffer`, `Type3InputBuffer`.
 //! - [`ntstatus`]: the NTSTATUS values the C drivers use, re-exported from
@@ -44,12 +48,12 @@ compile_error!(
 );
 
 pub mod context;
+pub mod handle;
 #[cfg(driver_model__driver_type = "KMDF")]
 pub mod hid;
 pub mod init;
 pub mod ntstatus;
 pub mod request;
-#[cfg(driver_model__driver_type = "KMDF")]
 pub mod sync;
 pub mod time;
 #[cfg(driver_model__driver_type = "KMDF")]

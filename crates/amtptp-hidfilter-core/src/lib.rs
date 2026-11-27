@@ -9,7 +9,9 @@
 //! P2 safety fixes and the P3 fixes of its PnP/power handling: the IDs survive a PnP restart (HF-B30), a
 //! mode switch whose lower request failed is a failure (HF-B13), the recovery timer and work item only
 //! act on a running device, and a successful configuration issues the lower reads that parked upper
-//! reads are missing. It has no WDK dependency: framework calls go through the [`FilterIo`],
+//! reads are missing. The read pipeline also reads the completion status, the report ID and the real
+//! length of every lower read (HF-B7, HF-B8, HF-B29), and `D0Exit` cancels the reads in flight, whose
+//! late completions are dropped (HF-B14). It has no WDK dependency: framework calls go through the [`FilterIo`],
 //! [`DetourIo`] and [`AddDeviceIo`] traits, which the driver crate implements with one WDF call per
 //! method. The host tests implement the same traits with the C oracle's stub model and replay the
 //! fixtures recorded from the real C code.
@@ -21,8 +23,9 @@
 //!
 //! # How the driver uses this
 //!
-//! Device context: one [`DeviceState`] (atomics; write [`DeviceState::new`] in the create path) plus
-//! the WDF handles (`HidReadQueue`, lookaside list, timer, work item, I/O target, WDM device object).
+//! Device context: one [`DeviceState`] (atomics; write [`DeviceState::new`] in the create path), a
+//! [`ReadTracker`] behind a spin lock, plus the WDF handles (`HidReadQueue`, lookaside list, timer,
+//! work item, I/O target, WDM device object).
 //! Implement [`FilterIo`] + [`DetourIo`] on a small per-call struct (device handle + context
 //! reference), and [`AddDeviceIo`] on a struct holding the `PWDFDEVICE_INIT`. Then every callback is a
 //! one-liner:
@@ -92,10 +95,13 @@ pub use dispatch::{InternalIoctl, dispatch_internal_ioctl};
 pub use feature::{FeatureChange, check_xfer_length, decode_set_feature, get_feature_report};
 pub use input::{
     FINGER_RECORD_LEN, InputLayout, LowerReadClass, REPORT_BUFFER_SIZE, build_report,
-    classify_lower_read, contact_count, parse_finger, response_length,
+    classify_lower_read, contact_count, multitouch_report_id, parse_finger,
 };
 pub use io::{FailedAction, FilterIo, XferPacket, XferPacketMut};
-pub use pipeline::{complete_lower_read, issue_backlog_reads, issue_lower_read, work_item_callback};
+pub use pipeline::{
+    LowerReadOutcome, complete_lower_read, issue_backlog_reads, issue_lower_read, work_item_callback,
+};
+pub use ptp_hid::read_tracker::{LowerReadOrigin, ReadTicket, ReadTracker, SuspendedReads};
 pub use pnp::{
     configure_multitouch, d0_entry, d0_exit, prepare_hardware, recovery_timer_callback,
     self_managed_io_init, self_managed_io_restart,

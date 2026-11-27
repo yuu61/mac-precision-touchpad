@@ -20,6 +20,7 @@ use core::sync::atomic::{AtomicPtr, Ordering};
 
 use amtptp_usbum_core::{DeviceState, pnp};
 use wdf_support::declare_context_type;
+use wdf_support::sync::WaitLock;
 use wdf_support::init::{
     device_pnp_capabilities_init, object_attributes_init_context_type,
     pnppower_event_callbacks_init,
@@ -55,16 +56,12 @@ pub(crate) struct DeviceContext {
     input_queue: AtomicPtr<WDFQUEUE__>,
     /// The pipe the continuous reader was configured on (UM-B16: configure once per pipe).
     reader_pipe: AtomicPtr<WDFUSBPIPE__>,
+    /// Serializes the wellspring mode switches (not in C, UM-B22): created in `create_device`, held by
+    /// `DeviceIo::serialized` around each outermost `GET_REPORT`/`SET_REPORT` sequence.
+    pub(crate) mode_switch_lock: WaitLock,
     /// Everything else of `DEVICE_CONTEXT`.
     pub(crate) state: DeviceState,
 }
-
-// Concurrent callbacks (parallel queue, reader completions, PnP/power) share the context through
-// `&DeviceContext`, so it must be `Sync` (all fields are atomics).
-const _: fn() = || {
-    const fn assert_sync<T: Sync>() {}
-    assert_sync::<DeviceContext>();
-};
 
 // C: WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(DEVICE_CONTEXT, DeviceGetContext). Same ContextName, so
 // `!wdfkd.wdfobject` shows "DEVICE_CONTEXT" as for the C driver.
@@ -86,6 +83,7 @@ impl DeviceContext {
             usb_interface: AtomicPtr::new(null_mut()),
             input_queue: AtomicPtr::new(null_mut()),
             reader_pipe: AtomicPtr::new(null_mut()),
+            mode_switch_lock: WaitLock::new(),
             state: DeviceState::new(),
         }
     }
@@ -247,6 +245,15 @@ unsafe fn create_device(mut device_init: PWDFDEVICE_INIT) -> NTSTATUS {
         return STATUS_INVALID_DEVICE_STATE;
     };
 
+    // Not in C: the lock that serializes the mode switches (parent: the device).
+    // SAFETY: created once, before any callback can use the context; the device outlives its child
+    // lock.
+    let status = unsafe { context.mode_switch_lock.create(device.cast()) };
+    if !NT_SUCCESS(status) {
+        trace::pnp_failure("AmtPtpCreateDevice", "WdfWaitLockCreate", status);
+        return status;
+    }
+
     let mut pnp_caps = device_pnp_capabilities_init();
     pnp_caps.SurpriseRemovalOK = _WDF_TRI_STATE::WdfTrue;
     // SAFETY: valid device; initialized capabilities structure (copied by the framework).
@@ -351,7 +358,8 @@ unsafe extern "C" fn evt_device_d0_entry(
 }
 
 /// `AmtPtpEvtDeviceD0Exit` (Device.c:587-642) → `pnp::d0_exit`: stop the interrupt pipe's I/O target
-/// (cancel sent I/O), disable Wellspring mode and **return that switch's status** (UM-B9, preserved).
+/// (cancel sent I/O) and disable Wellspring mode, best effort: a failed switch is traced and the callback
+/// returns `STATUS_SUCCESS` (P3 fix of UM-B9).
 ///
 /// # Safety
 /// Framework callback for a device created by [`create_device`].
@@ -365,11 +373,11 @@ unsafe extern "C" fn evt_device_d0_exit(
     };
     let before = context.state.snapshot();
     let mut io = DeviceIo::new(context);
-    let status = pnp::d0_exit(&context.state, &mut io);
-    if !NT_SUCCESS(status) {
-        trace::mode_switch_failed("AmtPtpEvtDeviceD0Exit", false, status);
+    let outcome = pnp::d0_exit(&context.state, &mut io);
+    if !NT_SUCCESS(outcome.mode_switch_status) {
+        trace::mode_switch_failed("AmtPtpEvtDeviceD0Exit", false, outcome.mode_switch_status);
     }
     trace::state_changed("AmtPtpEvtDeviceD0Exit", &before, &context.state.snapshot());
-    trace::power_transition("AmtPtpEvtDeviceD0Exit", target_state, status);
-    status
+    trace::power_transition("AmtPtpEvtDeviceD0Exit", target_state, outcome.status);
+    outcome.status
 }

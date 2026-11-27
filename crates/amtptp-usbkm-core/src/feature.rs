@@ -110,7 +110,8 @@ pub const fn selective_report_bits(report: &[u8]) -> Option<SelectiveReportBits>
 /// - 0x04 (input mode), mode = [`input_mode`]:
 ///   - 0 (`PTP_COLLECTION_MOUSE`) → `STATUS_NOT_SUPPORTED`;
 ///   - 3 (`PTP_COLLECTION_WINDOWS`) → if wellspring mode is off, call [`set_wellspring_mode`]
-///     to enable it and return its failure status; otherwise (or on success) `STATUS_SUCCESS`;
+///     to enable it and return its failure status; otherwise (or on success) `STATUS_SUCCESS`. The
+///     check and the switch run inside one [`ControlTransfer::serialized`];
 ///   - any other value → `STATUS_SUCCESS` with no action (spec B14, preserved).
 /// - 0x06 (selective reporting) → `STATUS_SUCCESS`; `PtpReportTouch` = Surface Switch (bit 0) and
 ///   `PtpReportButton` = Button Switch (bit 1) of [`selective_report_bits`], which the reader completion
@@ -133,7 +134,9 @@ pub fn set_feature<'a, T: ControlTransfer + ?Sized, F: FnOnce() -> Option<SetFea
         return Completion::status(STATUS_INVALID_DEVICE_REQUEST);
     };
     match packet.report_id {
-        REPORTID_REPORTMODE => {
+        // The check of the mode flag and the switch are one serialized step, so a concurrent
+        // D0Entry/D0Exit cannot run between them.
+        REPORTID_REPORTMODE => io.serialized(|io| {
             let was_on = state.wellspring_mode_on();
             match input_mode(packet.report_buffer) {
                 PTP_COLLECTION_MOUSE => Completion::status(STATUS_NOT_SUPPORTED),
@@ -147,7 +150,7 @@ pub fn set_feature<'a, T: ControlTransfer + ?Sized, F: FnOnce() -> Option<SetFea
                 }
                 _ => Completion::status(STATUS_SUCCESS),
             }
-        }
+        }),
         REPORTID_FUNCSWITCH => {
             if let Some(bits) = selective_report_bits(packet.report_buffer) {
                 state.set_selective_reporting(bits);

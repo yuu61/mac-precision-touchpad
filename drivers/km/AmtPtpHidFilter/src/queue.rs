@@ -31,7 +31,7 @@ pub(crate) unsafe extern "C" fn evt_io_internal_device_control(
     io_control_code: ULONG,
 ) {
     // SAFETY: `queue` is our default queue; its QUEUE_CONTEXT was written right after creation.
-    let device = unsafe { (*queue_get_context(queue)).device };
+    let device = unsafe { (*queue_get_context(queue)).device.get() };
     // SAFETY: the queue's device is alive while the queue dispatches requests.
     let ctx = unsafe { device_context(device) };
     if InternalIoctl::from_code(io_control_code) == InternalIoctl::NotSupported {

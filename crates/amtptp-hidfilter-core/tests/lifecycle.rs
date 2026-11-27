@@ -7,9 +7,10 @@
 mod common;
 
 use amtptp_hidfilter_core::{
-    DeviceSnapshot, DeviceState, REPORT_BUFFER_SIZE, add_device, complete_lower_read, config,
-    d0_entry, d0_exit, detour_hid_stack, dispatch_internal_ioctl, issue_lower_read,
-    prepare_hardware, recovery_timer_callback, self_managed_io_init, work_item_callback,
+    DeviceSnapshot, DeviceState, REPORT_BUFFER_SIZE, ReadTicket, STATUS_SUCCESS, add_device,
+    complete_lower_read, config, d0_entry, d0_exit, detour_hid_stack, dispatch_internal_ioctl,
+    issue_lower_read, prepare_hardware, recovery_timer_callback, self_managed_io_init,
+    work_item_callback,
 };
 use common::*;
 use ptp_hid::ioctl::{IOCTL_HID_GET_STRING, IOCTL_HID_READ_REPORT};
@@ -390,7 +391,15 @@ fn replay_pipeline(r: &Rec, m: &mut Mock, state: &DeviceState) {
     );
     let packet = r.bytes("lower_in");
     m.lower_buf[..packet.len()].copy_from_slice(&packet);
-    complete_lower_read(m, state, (), (), packet.len());
+    complete_lower_read(
+        m,
+        state,
+        0,
+        (),
+        ReadTicket::default(),
+        STATUS_SUCCESS,
+        packet.len(),
+    );
     m.lower_reads_pending -= 1;
     assert_eq!(
         format!(

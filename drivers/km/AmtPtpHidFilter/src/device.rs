@@ -24,6 +24,7 @@ use amtptp_hidfilter_core::{
     self_managed_io_restart, work_item_callback,
 };
 use tracelogging as tlg;
+use wdf_support::handle::WdfHandle;
 use wdf_support::hid as wdf_hid;
 use wdf_support::init::{
     object_attributes_init, object_attributes_init_context_type, pnppower_event_callbacks_init,
@@ -166,6 +167,15 @@ impl AddDeviceIo for AddDevice {
         };
         self.device = device;
         self.context = context;
+        // The read tracker's lock (not in C), parented to the device. Its failure fails the device
+        // creation step, like the C failures of this step.
+        // SAFETY: PASSIVE_LEVEL; the context was just initialized and no callback can reach it yet;
+        // the device outlives its child lock.
+        let lock_status = unsafe { (*context).reads.create(device.cast()) };
+        if !NT_SUCCESS(lock_status) {
+            Self::trace_failure("WdfSpinLockCreate", lock_status);
+            return lock_status;
+        }
         status
     }
 
@@ -321,7 +331,7 @@ impl AddDeviceIo for AddDevice {
         // not referenced yet (the device is not started, so no request can be dispatched).
         unsafe {
             queue_get_context(queue).write(QueueContext {
-                device: self.device,
+                device: WdfHandle::new(self.device),
             });
         };
         status
@@ -391,8 +401,9 @@ unsafe extern "C" fn evt_device_d0_entry(
 }
 
 /// `PtpFilterDeviceD0Exit` (Device.c:149-182): clears `DeviceConfigured`, leaves D0 (a recovery timer
-/// or work item that runs afterwards does nothing) and completes every parked upper read with
-/// `STATUS_CANCELLED`. In-flight lower reads are left alone (HF-B14, preserved).
+/// or work item that runs afterwards does nothing), stops the recovery timer, cancels the lower reads
+/// in flight (their late completions are stale and dropped: P3 fix of HF-B14) and completes every
+/// parked upper read with `STATUS_CANCELLED`.
 unsafe extern "C" fn evt_device_d0_exit(
     device: WDFDEVICE,
     target_state: WDF_POWER_DEVICE_STATE,

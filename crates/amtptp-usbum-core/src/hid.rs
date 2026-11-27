@@ -385,13 +385,21 @@ fn set_input_mode<C: ControlPipe>(state: &DeviceState, control: &mut C, mode: u8
     let Some(cfg) = state.config() else {
         return IoctlOutcome::success(0);
     };
-    let Ok(device_mode_on) = get_wellspring_mode(cfg, control) else {
+    // The read of the mode register and the switch are one serialized read-modify-write.
+    let switch_status: Result<NtStatus, NtStatus> = control.serialized(|control| {
+        let device_mode_on = get_wellspring_mode(cfg, control)?;
+        Ok(match mode {
+            PTP_COLLECTION_MOUSE if device_mode_on => {
+                set_wellspring_mode(state, cfg, control, false)
+            }
+            PTP_COLLECTION_WINDOWS if !device_mode_on => {
+                set_wellspring_mode(state, cfg, control, true)
+            }
+            _ => STATUS_SUCCESS,
+        })
+    });
+    let Ok(switch_status) = switch_status else {
         return IoctlOutcome::success(0);
-    };
-    let switch_status = match mode {
-        PTP_COLLECTION_MOUSE if device_mode_on => set_wellspring_mode(state, cfg, control, false),
-        PTP_COLLECTION_WINDOWS if !device_mode_on => set_wellspring_mode(state, cfg, control, true),
-        _ => STATUS_SUCCESS,
     };
     if nt_success(switch_status) {
         IoctlOutcome::success(INPUT_MODE_REPORT_LEN)

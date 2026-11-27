@@ -39,7 +39,7 @@ The policy terms come from the [behavior policy](README.md#behavior-policy):
 | SPI-B20 | FIXED, required of the glue (stage 2) | `WdfPdoInitAllowForwardingRequestToParent`, a PDO-only DDI called on an FDO init, is dropped. It had no functional effect. |
 | SPI-B21 | FIXED (P2), required of the glue (stage 2) | The lookaside list is parented to the device instead of the driver, which ends the per-device leak. |
 | SPI-B22 | FIXED, required of the glue (stage 2) | Nothing on the IOCTL, completion or timer paths is pageable. `PAGED_CODE()` is not ported. |
-| SPI-B23 | PRESERVED, open | The synchronous lower IOCTLs still have no timeout (P1). Adding one would invent a value. This is an open question for the glue author. |
+| SPI-B23 | FIXED (P3) | Both synchronous lower IOCTLs are sent with a timeout (`wdf_support::init::SYNC_IO_TIMEOUT`, 5 s, the USB 2.0 bound for a control request with a data stage). A mode switch that times out fails like any other, and the 5 s recovery timer retries it; on a timeout the framework cancels the request and still waits for it to complete. |
 | SPI-B24 | FIXED (P2) | The `DesiredReportType` value buffer is zero-initialized before the query (`device::desired_report_type_value`). A value of 1-3 bytes is therefore read with zero upper bytes. |
 | SPI-B25 | FIXED (N/A) | The wrong `_IRQL_requires_(PASSIVE_LEVEL)` annotations have no counterpart in Rust. The handlers are DISPATCH-safe and non-pageable. |
 
@@ -184,11 +184,11 @@ Lower reads that the driver creates itself are never wrapped in `Request`. They 
 
 ### Preserved known issues (driver side)
 
-- **SPI-B23**: the two synchronous lower IOCTLs still have no timeout and no send options:
+- **SPI-B23** (fixed): the two synchronous lower IOCTLs are sent with `wdf_support::init::SYNC_IO_TIMEOUT` (5 s):
   - `GET_DEVICE_ATTRIBUTES` in PrepareHardware;
   - the mode-switch `SET_FEATURE` in SelfManagedIoInit/Restart and in the recovery timer.
 
-  If the lower driver never completes them, device start or resume hangs (on the PnP/power thread), or the timer's work item does. The hang originates in the lower driver. Any timeout value would be invented, and a timeout could turn today's slow but successful S3 wake into a failure (that slow wake is why commit e92581b added the 5 s retry). Both sends run at PASSIVE_LEVEL, as in C. There is no synchronous send at raised IRQL.
+  Without it a lower driver that never completes them hung device start or resume (on the PnP/power thread), or the timer's work item. A slow S3 wake that exceeds the timeout fails that attempt only: the 5 s recovery timer (commit e92581b) retries the mode switch. If the lower driver ignores the cancellation, the framework keeps waiting for its completion and returns its real status. Both sends run at PASSIVE_LEVEL, as in C.
 - **SPI-B12/B13/B14 in the glue**:
   - `SelfManagedIoSuspend` suspends the read tracker under its `WDFSPINLOCK`, references the reads it hands out, stops the timer with `Wait = FALSE`, then cancels and dereferences each read. Nothing waits for the cancelled reads; their completions are stale and are dropped. D0Exit does not send `SetState(FALSE)`.
   - The timer callback takes a recovery ticket first and does nothing (not even the mode switch) unless the device is in D0 and unconfigured.

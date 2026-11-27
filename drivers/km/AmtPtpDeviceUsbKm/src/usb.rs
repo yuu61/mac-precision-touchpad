@@ -31,8 +31,9 @@ use amtptp_usbkm_core::wellspring::{
 };
 use tracelogging as tlg;
 use wdf_support::init::{
-    memory_descriptor_init_buffer, usb_continuous_reader_config_init, usb_device_information_init,
-    usb_device_select_config_params_init_single_interface, usb_pipe_information_init,
+    memory_descriptor_init_buffer, sync_send_options, usb_continuous_reader_config_init,
+    usb_device_information_init, usb_device_select_config_params_init_single_interface,
+    usb_pipe_information_init,
 };
 use wdf_support::ntstatus::{
     NT_SUCCESS, STATUS_INSUFFICIENT_RESOURCES, STATUS_INVALID_DEVICE_STATE,
@@ -116,6 +117,14 @@ impl Drop for TransferBuffer {
 impl ControlTransfer for UsbIo<'_> {
     type Buffer = TransferBuffer;
 
+    fn serialized<R, F: FnOnce(&mut Self) -> R>(&mut self, f: F) -> R {
+        let context = self.context;
+        // SAFETY: the lock was created in `create_device` before any callback could run; every caller
+        // of the core's mode-switch sequences runs at PASSIVE_LEVEL (UsbIo::new contract); the core
+        // never nests `serialized`, and nothing a control transfer waits for takes this lock.
+        unsafe { context.mode_switch_lock.with(|| f(self)) }
+    }
+
     fn allocate_transfer_buffer(&mut self) -> Result<TransferBuffer, NtStatus> {
         let mut memory: WDFMEMORY = ptr::null_mut();
         let mut buffer: PVOID = ptr::null_mut();
@@ -192,17 +201,21 @@ impl ControlTransfer for UsbIo<'_> {
         let mut descriptor =
             memory_descriptor_init_buffer(data.as_mut_ptr().cast(), TRANSFER_LENGTH);
         let mut transferred: ULONG = 0;
-        // SAFETY: `usb_device` is the live WDFUSBDEVICE of this device; WDF_NO_HANDLE request and NULL
-        // options (no timeout) as in C; `packet`, `descriptor` and `transferred` are valid for the
-        // synchronous call, and `data` (the WDFMEMORY buffer) outlives it. PASSIVE_LEVEL (UsbIo::new
-        // contract; KMDF checks the IRQL only with its verifier on, otherwise a caller at DISPATCH_LEVEL
-        // blocks in the framework's synchronous wait, which is expected to bugcheck, as for the C).
+        // Not in C (no options, no timeout): a device that never answers would block the PnP/power
+        // or dispatch thread forever (B-3).
+        let mut options = sync_send_options(0);
+        // SAFETY: `usb_device` is the live WDFUSBDEVICE of this device; WDF_NO_HANDLE request as in C;
+        // `options` (SYNC_IO_TIMEOUT), `packet`, `descriptor` and `transferred` are valid for the
+        // synchronous call, and `data` (the WDFMEMORY buffer) outlives it (on a timeout the framework
+        // waits for the cancelled transfer). PASSIVE_LEVEL (UsbIo::new contract; KMDF checks the IRQL
+        // only with its verifier on, otherwise a caller at DISPATCH_LEVEL blocks in the framework's
+        // synchronous wait, which is expected to bugcheck, as for the C).
         let status = unsafe {
             call_unsafe_wdf_function_binding!(
                 WdfUsbTargetDeviceSendControlTransferSynchronously,
                 usb_device,
                 WDF_NO_HANDLE.cast::<WDFREQUEST__>(),
-                ptr::null_mut(),
+                &raw mut options,
                 &raw mut packet,
                 &raw mut descriptor,
                 &raw mut transferred

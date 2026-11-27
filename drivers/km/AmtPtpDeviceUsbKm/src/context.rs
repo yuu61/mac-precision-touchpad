@@ -21,6 +21,7 @@ use core::sync::atomic::{AtomicPtr, Ordering};
 
 use amtptp_usbkm_core::state::DeviceState;
 use wdf_support::declare_context_type;
+use wdf_support::sync::WaitLock;
 use wdk_sys::{
     WDFQUEUE, WDFQUEUE__, WDFUSBDEVICE, WDFUSBDEVICE__, WDFUSBINTERFACE, WDFUSBINTERFACE__,
     WDFUSBPIPE, WDFUSBPIPE__,
@@ -38,6 +39,9 @@ pub(crate) struct DeviceContext {
     usb_interface: AtomicPtr<WDFUSBINTERFACE__>,
     /// `InputQueue`: the manual queue of pended `READ_REPORTs`.
     input_queue: AtomicPtr<WDFQUEUE__>,
+    /// Serializes the wellspring mode switches (not in C): created in `create_device`, held by
+    /// `UsbIo::serialized` around each outermost `GET_REPORT`/`SET_REPORT` sequence.
+    pub(crate) mode_switch_lock: WaitLock,
     /// Everything else (core).
     pub(crate) state: DeviceState,
 }
@@ -53,6 +57,7 @@ impl DeviceContext {
             interrupt_pipe: AtomicPtr::new(ptr::null_mut()),
             usb_interface: AtomicPtr::new(ptr::null_mut()),
             input_queue: AtomicPtr::new(ptr::null_mut()),
+            mode_switch_lock: WaitLock::new(),
             state: DeviceState::new(),
         }
     }

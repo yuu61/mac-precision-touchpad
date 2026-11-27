@@ -27,7 +27,7 @@ The policy terms come from the [behavior policy](README.md#behavior-policy):
 | KM-B7 | FIXED (P2) | When the output buffer is shorter than 50 bytes, the request is completed with `STATUS_BUFFER_TOO_SMALL` (the `WdfMemoryCopyFromBuffer` status) and nothing is written. In C it leaked. DATA_ERROR takes precedence, as in the C order. |
 | KM-B8 | PRESERVED (P1) | More than 5 finger blocks give `ReadReportResult::DataError`, which completes with `STATUS_DATA_ERROR` and Information 0. The check sits inside the `PtpReportTouch` gate. |
 | KM-B9 | FIXED (P3) | `lifecycle::configure_continuous_reader` returns the `WdfUsbTargetPipeConfigContinuousReader` status, and PrepareHardware fails with it. |
-| KM-B10 | PRESERVED (P1) | `lifecycle::d0_exit` returns the wellspring-OFF status. |
+| KM-B10 | FIXED (P3) | `lifecycle::d0_exit` switches wellspring mode off best effort and always returns `STATUS_SUCCESS`; the OFF status is only traced (`D0ExitOutcome::mode_switch_status`). C returned it, so a surprise removal (where the transfer always fails) or a failed transfer at sleep failed the power-down. |
 | KM-B11 | PRESERVED (P1) status, FIXED (P3) condition | `lifecycle::d0_entry` ignores the wellspring-ON status. The switch runs before the reader starts, now unconditionally: C's condition `PtpReportButton \|\| IsWellspringModeOn` was always true while SET_FEATURE 0x06 was ignored, and would otherwise leave the device in mouse mode after a resume with the button switch off. |
 | KM-B12 | FIXED (P2) *glue* | `WdfPdoInitAllowForwardingRequestToParent` (a PDO-only API, rejected by KMDF on a filter `DeviceInit`, with a verifier break) is not called. It has no other effect. The wire test asserts the DeviceAdd call list without it. |
 | KM-B13 | PRESERVED (P1) | GET/SET_FEATURE complete with Information 0 (`feature::get_feature` / `set_feature` return `Completion::status`). |
@@ -104,7 +104,8 @@ Details:
     asserted via `res`.
 - **wire.txt**:
   - PrepareHardware (37 + 1 B20 + 2 P3: `pipes-int-out-first` takes the interrupt IN pipe 1, and
-    `fail-cont-reader-masked` returns the reader failure), D0Entry (45 + 1 B4) and D0Exit (26 + 1 B4) run through
+    `fail-cont-reader-masked` returns the reader failure), D0Entry (45 + 1 B4) and D0Exit (24 + 1 B4 + 2 B10: the OFF transfer failed, the port returns `STATUS_SUCCESS` and
+    reports the C return value as `mode_switch_status`) run through
     `lifecycle::*`. Each
     asserts the status, `ctx_out`, the wire bytes and the normalized WDF call list (`fake::normalize_ops`). That
     list includes `mem_create`, `ctl_xfer` setup/dir/mdlen and `obj_delete`.
@@ -141,8 +142,10 @@ status is traced in `UsbIo::configure_continuous_reader`.
   returning the first failure.
 - `GET_DEVICE_ATTRIBUTES` before PrepareHardware must report VID/PID 0 (fixture `attr-before-prepare`). The glue
   must read `DeviceState::usb_device_ids()` (zero-initialized), not an `Option` that fails.
-- SET_FEATURE input mode 3 and D0Entry/D0Exit can both call `set_wellspring_mode` concurrently, as in C, with no
-  serialization. The flag update is atomic but the two transfer pairs can interleave.
+- SET_FEATURE input mode 3 and D0Entry/D0Exit run `set_wellspring_mode` inside `ControlTransfer::serialized`, which
+  the glue implements with a `WDFWAITLOCK` (`DeviceContext::mode_switch_lock`, not in C). The check of the mode flag
+  and the transfer pair are one step, so two switches never interleave. D0Exit stops the interrupt pipe before it
+  takes the lock.
 
 ## Driver (stage 2): `drivers/km/AmtPtpDeviceUsbKm`
 
@@ -222,10 +225,9 @@ The KMDF 1.23 glue. It makes the WDF calls the C code makes, in the C order, and
   - No IRQL guard is added. A `KeGetCurrentIrql() > PASSIVE_LEVEL` check would also fail APC_LEVEL calls,
     which work in the C (P1), and hidclass never sends SET_FEATURE above PASSIVE_LEVEL.
   - Every allocation on this path is non-paged, and the code is in `.text`.
-- **The mode switch is not serialized.** SET_FEATURE and D0Entry/D0Exit can run the switch concurrently, as in C;
-  the transfer pairs can interleave.
-- **D0Exit fails when the OFF transfer fails (B10).** This applies to D3Final, surprise removal, sleep and
-  hibernate, as in C.
+- **Control transfers have a timeout.** `UsbIo::control_transfer` sends with `wdf_support::init::SYNC_IO_TIMEOUT` (5 s, the USB 2.0 bound for
+  a control request with a data stage; C: no options). A trackpad that never answers fails the switch instead of
+  blocking D0Entry, D0Exit or the SET_FEATURE dispatch forever.
 - **Imports.** `KeQueryPerformanceCounter` is imported from `HAL.dll`. In WDK 10.0.28000 only `hal.lib` exports
   it (`ntoskrnl.lib` does not), so a WDK-built C driver imports it from `HAL.dll` as well.
 

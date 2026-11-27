@@ -3,26 +3,33 @@
 //!
 //! Triggers of a lower read (spec 6.5): an upper `READ_REPORT` while `DeviceConfigured`, and
 //! [`issue_backlog_reads`] after the device became configured, from the recovery timer, and from the
-//! recovery work item after a zero-length completion. A successful completion does not issue another
-//! read; the pipeline is 1:1 with upper reads. The lower reads in flight are counted, so the backlog is
-//! the parked upper reads that no read serves yet.
+//! recovery work item after an empty read or another report. A successful completion does not issue
+//! another read; the pipeline is 1:1 with upper reads.
+//!
+//! Every lower read is registered in the device's read tracker ([`FilterIo::with_reads`]) before it is
+//! sent, and unregistered when it completes (not in C). The registration is refused once the device is
+//! not configured, `D0Exit` cancels the reads in flight and starts a new epoch, and a read sent before
+//! that is dropped when it completes ([`LowerReadOrigin::Stale`]), so it never serves an upper read
+//! parked after the resume (P3 fix of HF-B14). The reads in flight of the current epoch are what the
+//! backlog subtracts from the parked upper reads.
 
 use ptp_hid::input::PTP_REPORT_LEN;
+use ptp_hid::read_tracker::{LowerReadOrigin, ReadTicket};
 
 use crate::config::TRANSPORT_RETRY_DUE_TIME;
 use crate::device::DeviceState;
 use crate::input::{InputLayout, LowerReadClass, build_report, classify_lower_read};
 use crate::io::{FailedAction, FilterIo};
-use crate::status::nt_success;
+use crate::status::{NtStatus, nt_success};
 
 /// `PtpFilterInputIssueTransportRequest` (Input.c:39-117): creates, formats and sends one lower read.
 ///
 /// - `WdfRequestCreate` fails: `DeviceConfigured = FALSE`, recovery timer 3 s.
 /// - lookaside memory fails: delete the request, `WdfDeviceSetFailed(AttemptRestart)`.
 /// - formatting fails: delete memory and request, `WdfDeviceSetFailed(AttemptRestart)`.
+/// - the read tracker refuses the read (not in C): the device is no longer configured (it left D0), or
+///   every slot is taken. Delete memory and request; the upper read stays parked.
 /// - `WdfRequestSend` returns FALSE: `DeviceConfigured = FALSE`, timer 3 s, delete memory and request.
-///
-/// A sent read counts as in flight until its completion.
 ///
 /// P2 (HF-B25): without an I/O target (detour not applied) C would format against a NULL handle and
 /// bugcheck; the port issues nothing. That state is unreachable in practice.
@@ -47,10 +54,23 @@ pub fn issue_lower_read<P: FilterIo>(io: &mut P, state: &DeviceState) {
         return;
     }
     io.set_lower_read_completion(read);
-    // Counted before the send: the completion can run before `send_lower_read` returns.
-    state.read_sent();
-    if !io.send_lower_read(read) {
-        state.read_done();
+    // Registered before the send (the completion can run before `send_lower_read` returns). The
+    // configured check is made under the tracker's lock, so a read racing with `D0Exit` is either
+    // handed to its cancellation or refused here.
+    let ticket = io.with_reads(|reads| {
+        if state.device_configured() {
+            reads.claim(read)
+        } else {
+            None
+        }
+    });
+    let Some(ticket) = ticket else {
+        io.delete_lower_memory(memory);
+        io.delete_lower_read(read);
+        return;
+    };
+    if !io.send_lower_read(read, ticket) {
+        let _origin = io.with_reads(|reads| reads.finish(read, ticket));
         state.set_device_configured(false);
         io.start_recovery_timer(TRANSPORT_RETRY_DUE_TIME);
         io.delete_lower_memory(memory);
@@ -59,14 +79,15 @@ pub fn issue_lower_read<P: FilterIo>(io: &mut P, state: &DeviceState) {
 }
 
 /// While the device is configured, issues one lower read for every parked upper read that no read in
-/// flight serves (`WdfIoQueueGetState` minus the in-flight count). Stops early if an issue fails (that
-/// clears `DeviceConfigured` and arms the recovery timer). Does nothing for a device that is not
-/// configured, e.g. one that left D0.
+/// flight serves (`WdfIoQueueGetState` minus the reads of the current epoch in flight). Stops early if
+/// an issue fails or is refused (the device is no longer configured). Does nothing for a device that
+/// is not configured, e.g. one that left D0.
 pub fn issue_backlog_reads<P: FilterIo>(io: &mut P, state: &DeviceState) {
     if !state.device_configured() {
         return;
     }
-    let backlog = io.parked_read_count().saturating_sub(state.in_flight_reads());
+    let in_flight = io.with_reads(|reads| reads.in_flight());
+    let backlog = io.parked_read_count().saturating_sub(in_flight);
     for _ in 0..backlog {
         issue_lower_read(io, state);
         if !state.device_configured() {
@@ -75,48 +96,83 @@ pub fn issue_backlog_reads<P: FilterIo>(io: &mut P, state: &DeviceState) {
     }
 }
 
-/// `PtpFilterWorkItemCallback` (Input.c:30-37), enqueued after a zero-length completion:
+/// `PtpFilterWorkItemCallback` (Input.c:30-37), enqueued after an empty read or another report:
 /// [`issue_backlog_reads`]. C issued one lower read without checking `DeviceConfigured`, so the work
 /// item also sent reads to a stopped or unconfigured device (P3 fix).
 pub fn work_item_callback<P: FilterIo>(io: &mut P, state: &DeviceState) {
     issue_backlog_reads(io, state);
 }
 
-/// `PtpFilterInputRequestCompletionCallback` (Input.c:119-253) for lower read `read` whose
-/// `IoStatus.Information` is `information` (`WdfRequestGetInformation`, a `ULONG_PTR`). The completion
-/// status is ignored (HF-B7).
+/// What [`complete_lower_read`] did with a lower read (for the glue's trace).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LowerReadOutcome {
+    /// The read was sent before the last `D0Exit` (usually cancelled by it): its data was dropped and
+    /// nothing else happened.
+    Stale,
+    /// The read belongs to the current epoch and was handled according to its class.
+    Handled(LowerReadClass),
+}
+
+/// `PtpFilterInputRequestCompletionCallback` (Input.c:119-253) for lower read `read`, completed with
+/// `status` (`WdfRequestGetStatus`) and `information` (`WdfRequestGetInformation`, a `ULONG_PTR`).
 ///
-/// `memory` is the request context's `RequestMemory`; the glue reads it **before** calling this (the
-/// C code reads it after deleting the request, HF-B10). This function ends by deleting the request and
-/// then the memory on every path, so the glue must not touch either afterwards.
+/// `memory` and `ticket` are the request context's `RequestMemory` and ticket; the glue reads them
+/// **before** calling this (the C code reads `RequestMemory` after deleting the request, HF-B10). This
+/// function ends by deleting the request and then the memory on every path, so the glue must not touch
+/// either afterwards.
 ///
-/// The read is no longer in flight. Paths, in C order:
+/// The read is unregistered from the tracker first. A [`LowerReadOrigin::Stale`] read (sent before the
+/// last `D0Exit`) is only deleted. Otherwise, by [`classify_lower_read`] (C order for a successful
+/// multitouch packet):
 /// 1. vendor not Apple: `WdfDeviceSetFailed(NoRestart)`;
-/// 2. length 0: enqueue the recovery work item;
-/// 3. malformed length: recovery timer 3 s;
-/// 4. no parked upper read: drop the packet;
-/// 5. otherwise stamp `LastReportTime` (the QPC frequency), build the report (honouring the
-///    selective-reporting switches), retrieve the upper output
-///    memory, copy 50 bytes, `Information = 50`, complete with the copy status (SUCCESS). If retrieving
-///    or copying fails: `WdfDeviceSetFailed(AttemptRestart)` and, unlike C, which leaks the request
-///    (HF-B9), complete it with that failure status (port policy P2).
+/// 2. failed read: recovery timer 3 s while the device is in D0 (P3 fix of HF-B7, no work item);
+/// 3. empty read, or another report than multitouch (P3 fix of HF-B8): enqueue the recovery work item;
+/// 4. `Information` above the buffer (P3 fix of HF-B29) or malformed length: recovery timer 3 s;
+/// 5. no parked upper read: drop the packet;
+/// 6. otherwise stamp the reporting clock, build the report (honouring the selective-reporting
+///    switches), retrieve the upper output memory, copy 50 bytes, `Information = 50`, complete with the
+///    copy status (SUCCESS). If retrieving or copying fails: `WdfDeviceSetFailed(AttemptRestart)` and,
+///    unlike C, which leaks the request (HF-B9), complete it with that failure status (port policy P2).
 pub fn complete_lower_read<P: FilterIo>(
     io: &mut P,
     state: &DeviceState,
     read: P::LowerRead,
     memory: P::LowerMemory,
+    ticket: ReadTicket,
+    status: NtStatus,
     information: usize,
-) {
-    state.read_done();
-    let layout = state.input_layout();
-    match classify_lower_read(state.vendor_id(), &layout, information) {
-        LowerReadClass::UnsupportedVendor => io.set_failed(FailedAction::NoRestart),
-        LowerReadClass::Empty => io.enqueue_recovery_work_item(),
-        LowerReadClass::Malformed => io.start_recovery_timer(TRANSPORT_RETRY_DUE_TIME),
-        LowerReadClass::Report { length } => deliver_report(io, state, &layout, memory, length),
-    }
+) -> LowerReadOutcome {
+    let origin = io.with_reads(|reads| reads.finish(read, ticket));
+    let outcome = match origin {
+        LowerReadOrigin::Stale => LowerReadOutcome::Stale,
+        LowerReadOrigin::Current => {
+            let layout = state.input_layout();
+            let first_byte = io.lower_read_buffer(memory).first().copied();
+            let class =
+                classify_lower_read(state.vendor_id(), &layout, status, information, first_byte);
+            match class {
+                LowerReadClass::UnsupportedVendor => io.set_failed(FailedAction::NoRestart),
+                LowerReadClass::Failed { .. } => {
+                    if state.in_d0() {
+                        io.start_recovery_timer(TRANSPORT_RETRY_DUE_TIME);
+                    }
+                }
+                LowerReadClass::Empty | LowerReadClass::OtherReport { .. } => {
+                    io.enqueue_recovery_work_item();
+                }
+                LowerReadClass::Oversize | LowerReadClass::Malformed => {
+                    io.start_recovery_timer(TRANSPORT_RETRY_DUE_TIME);
+                }
+                LowerReadClass::Report { length } => {
+                    deliver_report(io, state, &layout, memory, length);
+                }
+            }
+            LowerReadOutcome::Handled(class)
+        }
+    };
     io.delete_lower_read(read);
     io.delete_lower_memory(memory);
+    outcome
 }
 
 fn deliver_report<P: FilterIo>(

@@ -153,7 +153,7 @@ where
     F: FnOnce() -> i64,
 {
     let mode_switch_status = match state.config() {
-        Some(cfg) => set_wellspring_mode(state, cfg, io, true),
+        Some(cfg) => io.serialized(|io| set_wellspring_mode(state, cfg, io, true)),
         // P2: C would dereference DeviceInfo == NULL; D0Entry never runs without a config row.
         None => STATUS_INVALID_DEVICE_STATE,
     };
@@ -165,17 +165,36 @@ where
     }
 }
 
+/// Outcome of [`d0_exit`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct D0ExitOutcome {
+    /// The callback's return value: always `STATUS_SUCCESS`.
+    pub status: NtStatus,
+    /// Status of `SetWellspringMode(FALSE)` (C returned it from the callback), for the trace.
+    pub mode_switch_status: NtStatus,
+}
+
 /// `AmtPtpEvtDeviceD0Exit`: `WdfIoTargetStop(.., WdfIoTargetCancelSentIo)`, then
-/// `SetWellspringMode(FALSE)`, whose status is **returned** (UM-B9, P3 PRESERVED: a failed transfer, e.g.
-/// on surprise removal, fails `D0Exit`).
-pub fn d0_exit<T>(state: &DeviceState, io: &mut T) -> NtStatus
+/// `SetWellspringMode(FALSE)`, best effort.
+///
+/// P3 fix of UM-B9: C returned the switch's status, so a failed transfer failed the power-down. On a
+/// surprise removal (`D3Final`) the trackpad is already gone and the transfer always fails. The switch is
+/// still attempted on every target state; its status is only reported in
+/// [`D0ExitOutcome::mode_switch_status`].
+pub fn d0_exit<T>(state: &DeviceState, io: &mut T) -> D0ExitOutcome
 where
     T: ControlPipe + InterruptPipeTarget,
 {
     io.stop_cancel_sent_io();
-    match state.config() {
-        Some(cfg) => set_wellspring_mode(state, cfg, io, false),
+    let mode_switch_status = match state.config() {
+        // After the stop: a reader completion still running an emergency reset holds the lock, and
+        // the stop waits for it.
+        Some(cfg) => io.serialized(|io| set_wellspring_mode(state, cfg, io, false)),
         // P2: see d0_entry.
         None => STATUS_INVALID_DEVICE_STATE,
+    };
+    D0ExitOutcome {
+        status: STATUS_SUCCESS,
+        mode_switch_status,
     }
 }

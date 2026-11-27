@@ -19,7 +19,8 @@ use amtptp_usbkm_core::status::{
     Completion, STATUS_DATA_ERROR, STATUS_INVALID_BUFFER_SIZE, STATUS_NOT_SUPPORTED,
 };
 use amtptp_usbkm_core::wellspring::{
-    POOL_TAG_PTP_CONTROL, set_wellspring_mode, wellspring_read_setup, wellspring_write_setup,
+    ControlTransfer as _, POOL_TAG_PTP_CONTROL, set_wellspring_mode, wellspring_read_setup,
+    wellspring_write_setup,
 };
 use common::fake::FakeHw;
 use common::hex;
@@ -232,7 +233,7 @@ fn d0_entry_switches_the_mode_after_selective_reporting_off() {
             report_button: false,
         }
     );
-    assert_eq!(lifecycle::d0_exit(&state, &mut hw), 0);
+    assert_eq!(lifecycle::d0_exit(&state, &mut hw).status, 0);
     assert!(!state.wellspring_mode_on());
     let _before = hw.take_logs();
     assert_eq!(lifecycle::d0_entry(&state, &mut hw), 0);
@@ -266,7 +267,7 @@ fn input_scan_time_restarts_on_d0_entry() {
     assert_eq!(process_packet(&state, &[], 0), PacketAction::Discard);
     assert_eq!(scan_time(200_000), 0);
     assert_eq!(scan_time(204_800), 2);
-    assert_eq!(lifecycle::d0_exit(&state, &mut hw), 0);
+    assert_eq!(lifecycle::d0_exit(&state, &mut hw).status, 0);
     assert_eq!(lifecycle::d0_entry(&state, &mut hw), 0);
     assert_eq!(scan_time(900_000), 0);
     assert_eq!(scan_time(902_400), 1);
@@ -289,13 +290,13 @@ fn wellspring_wire_bytes_6_3() {
     let mut hw = FakeHw::new(0x027a);
     assert_eq!(lifecycle::prepare_hardware(&state, &mut hw), 0);
     hw.take_logs();
-    assert_eq!(set_wellspring_mode(&state, &mut hw, true), 0);
+    assert_eq!(hw.serialized(|hw| set_wellspring_mode(&state, hw, true)), 0);
     assert_eq!(
         hw.take_logs().1,
         "in:a101020302000400:0200:00000000;out:2109020302000400:02010000:00000000"
     );
     assert!(state.wellspring_mode_on());
-    assert_eq!(set_wellspring_mode(&state, &mut hw, false), 0);
+    assert_eq!(hw.serialized(|hw| set_wellspring_mode(&state, hw, false)), 0);
     assert_eq!(
         hw.take_logs().1,
         "in:a101020302000400:0200:00000000;out:2109020302000400:02000000:00000000"

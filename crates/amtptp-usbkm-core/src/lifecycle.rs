@@ -236,7 +236,7 @@ pub fn prepare_hardware<H: UsbHardware + ?Sized>(state: &DeviceState, hw: &mut H
 /// `D0Entry` only after a successful `PrepareHardware`, which guarantees one) the C would dereference NULL;
 /// this returns `STATUS_INVALID_DEVICE_STATE` instead.
 pub fn d0_entry<H: UsbHardware + ?Sized>(state: &DeviceState, hw: &mut H) -> NtStatus {
-    let _ignored = set_wellspring_mode(state, hw, true);
+    let _ignored = hw.serialized(|hw| set_wellspring_mode(state, hw, true));
     state.set_qpc_frequency(hw.query_performance_frequency());
     match state.interrupt_pipe() {
         Some(pipe) => hw.start_pipe(pipe),
@@ -244,14 +244,31 @@ pub fn d0_entry<H: UsbHardware + ?Sized>(state: &DeviceState, hw: &mut H) -> NtS
     }
 }
 
+/// What `AmtPtpEvtDeviceD0Exit` did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct D0ExitOutcome {
+    /// The callback's return value: always `STATUS_SUCCESS`.
+    pub status: NtStatus,
+    /// Status of the wellspring-OFF transfer (C returned it from the callback), for the trace.
+    pub mode_switch_status: NtStatus,
+}
+
 /// `AmtPtpEvtDeviceD0Exit`: stop the interrupt pipe (cancelling the reader's reads), then wellspring
-/// mode off, and **return the mode-switch status** (spec B10, preserved: a failed OFF transfer fails the
-/// power-down).
-pub fn d0_exit<H: UsbHardware + ?Sized>(state: &DeviceState, hw: &mut H) -> NtStatus {
+/// mode off, best effort.
+///
+/// P3 fix of B10: C returned the mode-switch status, so a failed OFF transfer failed the power-down. On
+/// a surprise removal (`D3Final`) the trackpad is already gone and the transfer always fails, and a failed
+/// `D0Exit` makes the framework treat the power-down as a device failure. The switch is still attempted
+/// on every target state (an orderly removal or sleep leaves the trackpad in mouse mode); its status is
+/// only reported in [`D0ExitOutcome::mode_switch_status`].
+pub fn d0_exit<H: UsbHardware + ?Sized>(state: &DeviceState, hw: &mut H) -> D0ExitOutcome {
     if let Some(pipe) = state.interrupt_pipe() {
         hw.stop_pipe(pipe);
     }
-    set_wellspring_mode(state, hw, false)
+    D0ExitOutcome {
+        status: STATUS_SUCCESS,
+        mode_switch_status: hw.serialized(|hw| set_wellspring_mode(state, hw, false)),
+    }
 }
 
 /// `AmtPtpEvtUsbInterruptReadersFailed`: always `TRUE` ("reset the pipe and restart the readers"),

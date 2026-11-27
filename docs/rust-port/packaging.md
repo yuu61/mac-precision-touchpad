@@ -43,7 +43,7 @@ Run these from the repository root. `.cargo/config.toml` defines the `cargo xtas
 
 ```text
 cargo xtask build   [--arch x64|arm64|all] [--release]
-cargo xtask package [--arch x64|arm64|all] [--release] [--inf universal|hidfilter|all]
+cargo xtask package [--arch x64|arm64|all] [--release]
                     [--driver-version a.b.c.d] [--sign <signtool sign args...>]
 cargo xtask test
 cargo xtask help
@@ -59,20 +59,21 @@ cargo xtask help
     `+crt-static` rustflags. So xtask removes `CARGO_TARGET_DIR`, `CARGO_BUILD_TARGET_DIR`,
     `CARGO_BUILD_TARGET`, `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS` and `CARGO_BUILD_RUSTFLAGS`
     from the driver builds' environment.
-- `package`: builds first. It only builds the workspaces the selected INFs need, so
-  `--inf hidfilter` builds only `drivers/km`. Then, for each arch and INF:
-  1. It empties `target/package/<arch>/<inf-name>/` and `target/package/<arch>/<inf-name>.symbols/`,
-     so no stale `.cat`, `.inf` or `.pdb` is left. It also removes the shared
-     `target/package/<arch>/symbols/` directory of older xtask versions when it exists.
+- `package`: builds both workspaces first. There is one package, `packaging/AmtPtpDevice.inx`
+  with all four drivers (see [One INF](#one-inf)). Then, for each arch:
+  1. It empties `target/package/<arch>/AmtPtpDevice/` and `target/package/<arch>/AmtPtpDevice.symbols/`,
+     so no stale `.cat`, `.inf` or `.pdb` is left. It also removes, when they exist, the shared
+     `target/package/<arch>/symbols/` directory and the standalone `AmtPtpHidFilter/` and
+     `AmtPtpHidFilter.symbols/` package directories of older xtask versions.
   2. It copies the binaries. KMDF `<Name>.dll` becomes `<Name>.sys`, because the INF's
      `[SourceDisksFiles]` fixes these names; the UMDF `.dll` keeps its name. The PDBs go to the
-     sibling `target/package/<arch>/<inf-name>.symbols/`, outside the package directory, so
+     sibling `target/package/<arch>/AmtPtpDevice.symbols/`, outside the package directory, so
      Inf2Cat does not catalog them. In the packaged `AmtPtpDeviceUsbUm.dll` it clears
      `IMAGE_DLLCHARACTERISTICS_FORCE_INTEGRITY` (0x80); see
      [FORCE_INTEGRITY](#force_integrity-on-the-umdf-dll).
-  3. It writes `packaging/<inf-name>.inx` as `<inf-name>.inf` with CRLF line endings. The `.inx`
-     files are LF in git.
-  4. It runs `stampinf -f <inf> -d * -a amd64|arm64 -c <inf-name>.cat -v <version|*> -k 1.23
+  3. It writes `packaging/AmtPtpDevice.inx` as `AmtPtpDevice.inf` with CRLF line endings. The
+     `.inx` is LF in git.
+  4. It runs `stampinf -f <inf> -d * -a amd64|arm64 -c AmtPtpDevice.cat -v <version|*> -k 1.23
      -u 2.15.0`. The KMDF and UMDF versions are read from `[workspace.metadata.wdk.driver-model]`
      in `drivers/km/Cargo.toml` and `drivers/um/Cargo.toml`, so the INF always matches the
      framework the binaries were built against.
@@ -101,8 +102,6 @@ cargo xtask help
 - `--driver-version a.b.c.d`: the DriverVer version, with each part from 0 to 65535. The default
   is stampinf's `*`, which is the current time `h.m.s.ms`. The DriverVer date is always the
   current date.
-- `--inf`: `universal` is `packaging/AmtPtpDevice.inx` with all four drivers. `hidfilter` is
-  `packaging/AmtPtpHidFilter.inx` with AmtPtpHidFilter only. The default `all` packages both.
 - `test`: runs these steps, all of them, then reports every failure:
   - `cargo test --workspace` in the host workspace (core crates and xtask);
   - Clippy on all host targets, including integration tests.
@@ -127,19 +126,14 @@ target/package/<x64|arm64>/
                              AmtPtpDeviceSpiKm.sys  AmtPtpHidFilter.sys
   AmtPtpDevice.symbols/      AmtPtpDeviceUsbKm.pdb  AmtPtpDeviceUsbUm.pdb
                              AmtPtpDeviceSpiKm.pdb  AmtPtpHidFilter.pdb
-  AmtPtpHidFilter/           AmtPtpHidFilter.inf  AmtPtpHidFilter.cat  AmtPtpHidFilter.sys
-  AmtPtpHidFilter.symbols/   AmtPtpHidFilter.pdb
 ```
 
-- Each package directory contains the INF, CAT and binaries. Pass the directory to
+- The package directory contains the INF, CAT and binaries. Pass the directory to
   `New-CabinetFile -ContentDirectory` after dot-sourcing [the CAB script](../../packaging/New-CabinetFile.ps1).
 - The directory does not record the profile. A dev-profile `package` overwrites a release one.
   Use `--release` for anything you distribute.
-- Each package has its own `.symbols` directory, emptied together with the package, so its PDBs
-  always match that package's binaries. Both hold an `AmtPtpHidFilter.pdb` on purpose: both
-  packages ship `AmtPtpHidFilter.sys`, and `--inf universal` / `--inf hidfilter` can rebuild one
-  package without the other. Every link stamps a new PDB GUID, so a single shared PDB would stop
-  matching the package that was not rebuilt.
+- The `.symbols` directory is emptied together with the package, so its PDBs always match the
+  package's binaries (every link stamps a new PDB GUID).
 - The PDBs keep their cargo names. The debugger matches on the PDB GUID, not on the image name,
   so `AmtPtpDeviceUsbKm.pdb` serves `AmtPtpDeviceUsbKm.sys`.
 
@@ -218,10 +212,30 @@ target/package/<x64|arm64>/
   - Windows 11 is covered: it is 10.0.22000+ and matches the same decorations.
 - 32-bit x86 is not built. It was removed from the C build in 8e0cc7c.
 
+## One INF
+
+`packaging/AmtPtpDevice.inx` is the only INF template. It installs all four drivers, as the signed C
+release (`AmtPtpDevice.inf`, `DriverVer 06/02/2021,2021.3979.1.1000`) did, and binds AmtPtpHidFilter
+to the Bluetooth Magic Trackpad 2 collections (`Col01` filter, `Col02` null device).
+
+The port first also kept the standalone `packaging/AmtPtpHidFilter.inx` (the C
+`src/AmtPtpHidFilter/AmtPtpHidFilter.inf`, never part of a release). It was removed on 2026-11-27
+(step 1 of the structural improvement audit of the Rust port):
+
+- it claimed the USB Magic Trackpad 2 (`USB\Vid_05ac&Pid_0265&MI_01`, and the filter on its HID
+  collections) against the universal INF's UsbUm binding (crosscut C2);
+- its USB hardware IDs hard-coded `REV_0855`, so they missed other firmware revisions such as
+  `REV_0871`;
+- the universal INF already contains every HidFilter install section (`.Services` with
+  `mshidkmdf`, the `LowerFilters` AddReg, the `.Wdf` section) for the Bluetooth trackpad.
+
+`cargo xtask package` therefore builds one package and has no `--inf` option any more. The INF
+changes below that name HidFilter describe that removed template.
+
 ## INF changes
 
-- `packaging/AmtPtpDevice.inx` is `src/AmtPtpDeviceUniversalPkg/AmtPtpDevice.inf` and
-  `packaging/AmtPtpHidFilter.inx` is `src/AmtPtpHidFilter/AmtPtpHidFilter.inf`, with only the
+- `packaging/AmtPtpDevice.inx` is `src/AmtPtpDeviceUniversalPkg/AmtPtpDevice.inf` (and the removed
+  `packaging/AmtPtpHidFilter.inx` was `src/AmtPtpHidFilter/AmtPtpHidFilter.inf`), with only the
   changes below. Line endings are LF, per `.gitattributes`.
 - **Unchanged (P1):**
   - every hardware ID, including the duplicate USB `0273/0274/0290/0291&MI_02` bindings to both
@@ -230,7 +244,7 @@ target/package/<x64|arm64>/
   - every service name and flag;
   - every string;
   - the two-INF split, in which the universal and HidFilter INFs claim the MT2 USB device in
-    conflicting ways (crosscut C2).
+    conflicting ways (crosscut C2), until the HidFilter INF was removed (see [One INF](#one-inf)).
 - `src/AmtPtpDeviceUniversalPkg/AmtPtpDevice.inf` and the models body of the `...17134` section
   were diffed mechanically. They are byte-identical apart from line endings.
 
@@ -270,9 +284,9 @@ target/package/<x64|arm64>/
 - The C projects all had `DriverTargetPlatform Universal`, which is what the MSBuild InfVerif
   step used.
 - `/w` (Windows Driver, DCH) and `/h` (WHQL) would require an install-semantics change. Under
-  those modes, InfVerif reports six `2084` errors: five in universal (`mshidkmdf` from the
-  HidFilter, UsbKm and SpiKm `.Services` sections, plus `WUDFRd` and `mshidumdf` from UsbUm's)
-  and one in HidFilter (`mshidkmdf`):
+  those modes, InfVerif reports five `2084` errors (`mshidkmdf` from the HidFilter, UsbKm and
+  SpiKm `.Services` sections, plus `WUDFRd` and `mshidumdf` from UsbUm's; the removed HidFilter INF
+  added a sixth, its own `mshidkmdf`):
 
   ```text
   ERROR(2084) ... line N: Service binary 'C:\WINDOWS\System32\Drivers\mshidkmdf.sys' should reference a CopyFiles destination file.
@@ -285,7 +299,7 @@ target/package/<x64|arm64>/
   the inbox INFs, or dropping them, which changes how the function driver and the reflector are
   installed. P1 forbids that.
 - Under `/u` the same findings are `WARNING(2084)`. They are accepted, as they were for the C
-  package. With changes 1 to 4, `/u` reports no errors for either INF.
+  package. With changes 1 to 3, `/u` reports no errors.
 - Moving to `/w` (DCH) would be a separate, deliberate change.
 
 ## The old MSBuild / Azure DevOps pipeline no longer applies
@@ -297,7 +311,16 @@ target/package/<x64|arm64>/
   `$(BuildEnvironment)=='AzurePipeline'` and `$(PipelineReleaseID)`, the latter giving the
   `2021.<id>.1.1000` DriverVer.
 - That pipeline cannot build the Rust drivers, and its badge no longer reflects this code. The
-  repository has no in-repo build CI; `.github/workflows/github-issue-sync.yml` only syncs issues.
+  in-repo CI is `.github/workflows/rust-ci.yml` (`.github/workflows/github-issue-sync.yml` only
+  syncs issues):
+  - host tests and Clippy, and Clippy (`cargo check` with `clippy-driver`) of both driver workspaces
+    for x64 and ARM64, scoped to the packages a change affects;
+  - the **Driver package** job, for x64 and ARM64, whenever a driver, the INF template or xtask
+    changes: `cargo xtask package --arch <arch> --release`, unsigned. It links both workspaces,
+    compiles the `Resource.rc` files and runs stampinf, `InfVerif /u` and Inf2Cat, which Clippy
+    alone never exercises. The kit comes from the same NuGet packages as the Clippy jobs;
+    `.github/scripts/rust-ci.ps1 -PackagingTools` also extracts the WDK's `bin` and `tools`
+    directories (stampinf, Inf2Cat, InfVerif) from the x64 WDK package.
 - The replacement is `cargo xtask package`.
   - `ReleaseSigned` becomes `--release --sign ...`.
   - The pipeline DriverVer becomes `--driver-version a.b.c.d`.

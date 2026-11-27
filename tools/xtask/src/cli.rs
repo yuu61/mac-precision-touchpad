@@ -1,14 +1,13 @@
 //! Command-line parsing (hand-written: std only).
 
-use crate::package::InfKind;
-
 pub const USAGE: &str = "\
 Usage: cargo xtask <command> [options]
 
 Commands:
   build      Build the driver workspaces drivers/km (KMDF) and drivers/um (UMDF).
   package    Build, then assemble, stamp, catalog, verify (and optionally sign)
-             the driver package(s) under target/package/<arch>/<inf-name>/.
+             the driver package (packaging/AmtPtpDevice.inx, all four drivers)
+             under target/package/<arch>/AmtPtpDevice/.
   test       Run host tests and strict Clippy checks across all three
              workspaces, including the shared driver support crates.
   help       Show this text.
@@ -18,10 +17,6 @@ Options (build, package):
   --release                   Use the release profile (default: dev/debug).
 
 Options (package only):
-  --inf universal|hidfilter|all
-                              Which INF to package. universal = packaging/AmtPtpDevice.inx
-                              (all four drivers), hidfilter = packaging/AmtPtpHidFilter.inx
-                              (AmtPtpHidFilter only). Default: all.
   --driver-version a.b.c.d    DriverVer version (each part 0-65535). Default: stampinf's
                               '*' (current time h.m.s.ms).
   --sign <args...>            Sign with signtool. EVERYTHING after --sign is passed to
@@ -121,7 +116,6 @@ pub struct BuildOpts {
 pub struct PackageOpts {
     pub arches: Vec<Arch>,
     pub release: bool,
-    pub infs: Vec<InfKind>,
     /// `None` = stampinf `-v *`.
     pub driver_version: Option<String>,
     /// `Some(args)` = sign with `signtool sign <args>`.
@@ -154,7 +148,6 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             Ok(Command::Package(PackageOpts {
                 arches: o.arches,
                 release: o.release,
-                infs: o.infs,
                 driver_version: o.driver_version,
                 sign: o.sign,
             }))
@@ -174,7 +167,6 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
 struct Options {
     arches: Vec<Arch>,
     release: bool,
-    infs: Vec<InfKind>,
     driver_version: Option<String>,
     sign: Option<Vec<String>>,
 }
@@ -183,7 +175,6 @@ fn parse_options(args: &[String], package: bool) -> Result<Options, String> {
     let mut o = Options {
         arches: vec![Arch::host()],
         release: false,
-        infs: InfKind::ALL.to_vec(),
         driver_version: None,
         sign: None,
     };
@@ -213,21 +204,6 @@ fn parse_options(args: &[String], package: bool) -> Result<Options, String> {
                     "arm64" | "aarch64" => vec![Arch::Arm64],
                     "all" => Arch::ALL.to_vec(),
                     v => return Err(format!("unknown --arch `{v}` (expected x64, arm64 or all)")),
-                }
-            }
-            "--inf" if package => {
-                o.infs = match value("universal, hidfilter or all")?
-                    .to_ascii_lowercase()
-                    .as_str()
-                {
-                    "universal" | "amtptpdevice" => vec![InfKind::Universal],
-                    "hidfilter" | "amtptphidfilter" => vec![InfKind::HidFilter],
-                    "all" => InfKind::ALL.to_vec(),
-                    v => {
-                        return Err(format!(
-                            "unknown --inf `{v}` (expected universal, hidfilter or all)"
-                        ));
-                    }
                 }
             }
             "--driver-version" if package => {
@@ -310,8 +286,6 @@ mod tests {
             "package",
             "--arch=all",
             "--release",
-            "--inf",
-            "hidfilter",
             "--driver-version",
             "1.2.3.65535",
             "--sign",
@@ -325,7 +299,6 @@ mod tests {
             Command::Package(PackageOpts {
                 arches: vec![Arch::X64, Arch::Arm64],
                 release: true,
-                infs: vec![InfKind::HidFilter],
                 driver_version: Some("1.2.3.65535".into()),
                 sign: Some(s(&["/f", "a.pfx", "--release"])),
             })
@@ -335,6 +308,8 @@ mod tests {
     #[test]
     fn rejects_bad_input() {
         parse(&s(&["build", "--inf", "universal"])).unwrap_err();
+        // There is one INF; the old selector is gone.
+        parse(&s(&["package", "--inf", "universal"])).unwrap_err();
         parse(&s(&["build", "--arch", "x86"])).unwrap_err();
         parse(&s(&["build", "--arch"])).unwrap_err();
         parse(&s(&["package", "--sign"])).unwrap_err();

@@ -81,6 +81,15 @@ pub trait ControlPipe {
     /// device-to-host transfer the device's bytes land at the start of `data`; bytes it does not return
     /// stay as they were. The number of bytes transferred is not needed (the C driver never checks it).
     fn send_control_transfer(&mut self, setup: &SetupPacket, data: &mut [u8; 4]) -> NtStatus;
+
+    /// Runs `f` while holding the device's mode-switch lock (not in C, which had no lock: UM-B22 let
+    /// `SET_FEATURE`, the emergency reset and `D0Entry`/`D0Exit` interleave their `GET_REPORT`/
+    /// `SET_REPORT` pairs on the device). The core runs every control transfer inside exactly one
+    /// outermost call and never nests it; `f` must not wait for anything that takes the lock. The glue
+    /// holds a `WDFWAITLOCK`; the default (tests) just runs `f`.
+    fn serialized<R, F: FnOnce(&mut Self) -> R>(&mut self, f: F) -> R {
+        f(self)
+    }
 }
 
 /// `WdfUsbTargetDeviceAllocAndQueryString` (`GET_STRING`).

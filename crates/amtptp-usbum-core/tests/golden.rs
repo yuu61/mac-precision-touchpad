@@ -464,7 +464,7 @@ fn type4_short_response_sends_zero_padding() {
     );
     assert_eq!(state.qpc_frequency(), 5);
     assert_eq!(usb.calls, ["IoTargetStart(pipe0)=0x00000000"]);
-    assert_eq!(d0_exit(&state, &mut usb), STATUS_SUCCESS);
+    assert_eq!(d0_exit(&state, &mut usb).status, STATUS_SUCCESS);
     assert!(!state.is_wellspring_mode_on());
 }
 
@@ -638,7 +638,7 @@ fn d0_entry_switches_the_mode_after_selective_reporting_off() {
     assert_eq!(set_feature(&state, &mut req, &mut usb), IoctlOutcome::success(2));
     assert!(!state.is_button_report_on() && !state.is_surface_report_on());
 
-    assert_eq!(d0_exit(&state, &mut usb), STATUS_SUCCESS);
+    assert_eq!(d0_exit(&state, &mut usb).status, STATUS_SUCCESS);
     assert!(!state.is_wellspring_mode_on());
     usb.wire.clear();
     let outcome = d0_entry(&state, &mut usb, || 10_000_000);

@@ -1,16 +1,18 @@
 //! Raw Apple multitouch packet -> 50-byte PTP input report (Input.c:150-223), with the exact C integer
 //! semantics.
 //!
-//! The lower read completes with a 1024-byte lookaside buffer and an `Information` value. The C code
-//! never examines the completion status (HF-B7) and never checks the report ID (HF-B8): it classifies
-//! the packet by length alone ([`classify_lower_read`]) and then parses up to five 9-byte finger
-//! records ([`build_report`]).
+//! The lower read completes with a 1024-byte lookaside buffer, a status and an `Information` value. The
+//! C code examined neither the status (HF-B7) nor the report ID (HF-B8) and classified the packet by its
+//! sign-extended length alone (HF-B29). [`classify_lower_read`] checks all three, in an order that keeps
+//! the C outcome of every successful multitouch packet, and [`build_report`] then parses up to five
+//! 9-byte finger records.
 
 use ptp_hid::common::{PTP_CONTACT_SLOTS, PTP_MAX_CONTACT_POINTS};
 use ptp_hid::feature::SelectiveReportBits;
 use ptp_hid::input::{PTP_REPORT_LEN, PtpReport};
 
-use crate::device::is_apple_vendor;
+use crate::device::{HID_VID_APPLE_USB, is_apple_vendor};
+use crate::status::{NtStatus, nt_success};
 
 /// `REPORT_BUFFER_SIZE` (Driver.h:33): size of each lower `IOCTL_HID_READ_REPORT` output buffer
 /// (lookaside list entries, `NonPagedPoolNx`, tag [`crate::config::READ_BUFFER_POOL_TAG`]).
@@ -36,48 +38,88 @@ pub struct InputLayout {
     pub y_min: i32,
 }
 
-/// `(size_t)(LONG)WdfRequestGetInformation(Request)` (Input.c:150, HF-B29): the low 32 bits of the
-/// `ULONG_PTR`, sign-extended. Values with bit 31 set become huge lengths.
+/// The report ID of the Magic Trackpad 2's multitouch input report on the transport that `vendor_id`
+/// identifies: 0x02 over USB (`TRACKPAD2_USB_REPORT_ID` in Linux hid-magicmouse) and 0x31 over
+/// Bluetooth (`TRACKPAD2_BT_REPORT_ID`). Every edge packet of the C oracle starts with these bytes.
 #[must_use]
-pub const fn response_length(information: usize) -> usize {
-    // ULONG_PTR -> LONG truncates to 32 bits; LONG -> size_t sign-extends.
-    information as u32 as i32 as isize as usize
+pub const fn multitouch_report_id(vendor_id: u16) -> u8 {
+    if vendor_id == HID_VID_APPLE_USB {
+        0x02
+    } else {
+        0x31
+    }
 }
 
 /// What the completion routine does with a finished lower read, decided before any upper request is
-/// touched (Input.c:156-173, in that order).
+/// touched.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LowerReadClass {
-    /// `VendorID` is not Apple: `WdfDeviceSetFailed(WdfDeviceFailedNoRestart)`. Checked first, so it
-    /// also wins over a zero length (fixture `vid-1234-len0`).
+    /// `VendorID` is not Apple: `WdfDeviceSetFailed(WdfDeviceFailedNoRestart)`. Checked first, as in C,
+    /// so it also wins over a zero length (fixture `vid-1234-len0`).
     UnsupportedVendor,
-    /// The response length is 0 (including any failed read): enqueue the recovery work item, which
-    /// issues a new read at `PASSIVE_LEVEL`.
+    /// The read failed (P3 fix of HF-B7). C ignored the status, so a failed read with `Information == 0`
+    /// took the [`Self::Empty`] path, whose work item issued the next read at once: a lower driver that
+    /// fails every read (a Bluetooth link going down, a cancelled read) made a zero-delay loop between
+    /// the work item and the completion. The port starts the 3 s recovery timer instead, and only while
+    /// the device is in D0.
+    Failed {
+        /// The completion status.
+        status: NtStatus,
+    },
+    /// A successful read of 0 bytes: enqueue the recovery work item, which issues a new read at
+    /// `PASSIVE_LEVEL` (as in C).
     Empty,
+    /// `Information` is larger than the read's buffer ([`REPORT_BUFFER_SIZE`]), so it is not a packet
+    /// length: start the 3 s recovery timer, as for [`Self::Malformed`] (P3 fix of HF-B29: C took the low
+    /// 32 bits sign-extended, which made some of these values small valid lengths and others huge ones).
+    Oversize,
+    /// The first byte is not the transport's multitouch report ID ([`multitouch_report_id`]): another
+    /// report of the trackpad, e.g. its battery status (P3 fix of HF-B8: C parsed such a packet as
+    /// finger data when its length happened to fit, and otherwise stalled input for 3 s as a malformed
+    /// packet). The packet is dropped and the recovery work item issues the next read.
+    OtherReport {
+        /// The packet's first byte (0 for an empty buffer).
+        report_id: u8,
+    },
     /// `len < InputHeaderSize` or `(len - InputHeaderSize) % InputFingerSize != 0`: start the 3 s
     /// recovery timer. With `InputFingerSize == 0` C divides by zero; this port classifies it as
     /// malformed instead (HF-B18, port policy P2).
     Malformed,
-    /// A parseable packet of `length` bytes (`hdr + 9n`, n >= 0, possibly a huge B29 length).
+    /// A parseable multitouch packet of `length` bytes (`hdr + 9n`, n >= 0, at most
+    /// [`REPORT_BUFFER_SIZE`]).
     Report {
-        /// The response length as C computes it ([`response_length`]).
+        /// `Information`: the packet length.
         length: usize,
     },
 }
 
-/// Classifies a completed lower read (Input.c:156-173).
+/// Classifies a completed lower read. The checks, in order: vendor, completion status, length 0,
+/// length above the buffer, report ID (`first_byte` is the packet's byte 0, `None` for an empty
+/// buffer), packet shape. A successful multitouch packet gets the C classification (Input.c:156-173).
 #[must_use]
 pub fn classify_lower_read(
     vendor_id: u16,
     layout: &InputLayout,
+    status: NtStatus,
     information: usize,
+    first_byte: Option<u8>,
 ) -> LowerReadClass {
     if !is_apple_vendor(vendor_id) {
         return LowerReadClass::UnsupportedVendor;
     }
-    let length = response_length(information);
+    if !nt_success(status) {
+        return LowerReadClass::Failed { status };
+    }
+    let length = information;
     if length == 0 {
         return LowerReadClass::Empty;
+    }
+    if length > REPORT_BUFFER_SIZE {
+        return LowerReadClass::Oversize;
+    }
+    let report_id = first_byte.unwrap_or(0);
+    if first_byte != Some(multitouch_report_id(vendor_id)) {
+        return LowerReadClass::OtherReport { report_id };
     }
     // `len < hdr || (len - hdr) % fsz != 0`; `checked_rem` is None for fsz == 0 (HF-B18 guard).
     match length.checked_sub(layout.header_size) {
@@ -171,34 +213,56 @@ mod tests {
         y_min: -2479,
     };
 
-    #[test]
-    fn length_conversion_sign_extends() {
-        assert_eq!(response_length(0x8000_0008), 0xFFFF_FFFF_8000_0008);
-        assert_eq!(response_length(0x1_0000_000D), 13);
-        assert_eq!(response_length(0xFFFF_FFFF_0000_000D), 13);
+    const OK: NtStatus = 0;
+    const CANCELLED: NtStatus = 0xC000_0120_u32 as NtStatus;
+    const BT_ID: Option<u8> = Some(0x31);
+
+    fn class(vid: u16, layout: &InputLayout, status: NtStatus, info: usize, first: Option<u8>) -> LowerReadClass {
+        classify_lower_read(vid, layout, status, info, first)
     }
 
     #[test]
     fn classification_order() {
         assert_eq!(
-            classify_lower_read(0x1234, &BT, 0),
+            class(0x1234, &BT, CANCELLED, 0, None),
             LowerReadClass::UnsupportedVendor
         );
-        assert_eq!(classify_lower_read(0x4C, &BT, 0), LowerReadClass::Empty);
-        assert_eq!(classify_lower_read(0x4C, &BT, 3), LowerReadClass::Malformed);
         assert_eq!(
-            classify_lower_read(0x4C, &BT, 4),
+            class(0x4C, &BT, CANCELLED, 0, None),
+            LowerReadClass::Failed { status: CANCELLED }
+        );
+        assert_eq!(class(0x4C, &BT, OK, 0, None), LowerReadClass::Empty);
+        assert_eq!(class(0x4C, &BT, OK, 1025, BT_ID), LowerReadClass::Oversize);
+        // C took the low 32 bits, sign-extended: a 13-byte packet and a huge length.
+        assert_eq!(class(0x4C, &BT, OK, 0x1_0000_000D, BT_ID), LowerReadClass::Oversize);
+        assert_eq!(class(0x4C, &BT, OK, 0x8000_0008, BT_ID), LowerReadClass::Oversize);
+        assert_eq!(
+            class(0x4C, &BT, OK, 3, Some(0x90)),
+            LowerReadClass::OtherReport { report_id: 0x90 }
+        );
+        // The Bluetooth ID on the USB transport.
+        assert_eq!(
+            class(0x5AC, &BT, OK, 4, BT_ID),
+            LowerReadClass::OtherReport { report_id: 0x31 }
+        );
+        assert_eq!(
+            class(0x4C, &BT, OK, 4, None),
+            LowerReadClass::OtherReport { report_id: 0 }
+        );
+        assert_eq!(class(0x4C, &BT, OK, 3, BT_ID), LowerReadClass::Malformed);
+        assert_eq!(
+            class(0x4C, &BT, OK, 4, BT_ID),
             LowerReadClass::Report { length: 4 }
         );
-        assert_eq!(
-            classify_lower_read(0x4C, &BT, 12),
-            LowerReadClass::Malformed
-        );
+        assert_eq!(class(0x4C, &BT, OK, 12, BT_ID), LowerReadClass::Malformed);
         let zero = InputLayout::default();
-        assert_eq!(
-            classify_lower_read(0x4C, &zero, 5),
-            LowerReadClass::Malformed
-        );
+        assert_eq!(class(0x4C, &zero, OK, 5, BT_ID), LowerReadClass::Malformed);
+    }
+
+    #[test]
+    fn report_ids_per_transport() {
+        assert_eq!(multitouch_report_id(0x05AC), 0x02);
+        assert_eq!(multitouch_report_id(0x004C), 0x31);
     }
 
     #[test]

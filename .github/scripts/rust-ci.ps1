@@ -3,7 +3,11 @@
 [CmdletBinding()]
 param(
     [ValidateSet('x64', 'arm64', 'all')]
-    [string]$Arch = 'all'
+    [string]$Arch = 'all',
+
+    # Also extract the WDK packaging tools (stampinf and Inf2Cat in bin\, InfVerif in tools\) for
+    # `cargo xtask package`. They are host (x64) tools, taken from the x64 WDK package.
+    [switch]$PackagingTools
 )
 
 $PSNativeCommandUseErrorActionPreference = $true
@@ -29,8 +33,16 @@ function Expand-KitPackage($PackageId, $Destination, [string[]]$Members) {
 # wdk-build expects the SDK and WDK files under the same kit root.
 Expand-KitPackage -PackageId 'microsoft.windows.sdk.cpp' -Destination $kit -Members @('c/Include', 'c/bin')
 $arches = if ($Arch -eq 'all') { @('x64', 'arm64') } else { @($Arch) }
+$toolMembers = @('c/bin', 'c/tools')
 foreach ($a in $arches) {
     Expand-KitPackage -PackageId "microsoft.windows.sdk.cpp.$a" -Destination $sdkLib -Members @('c/um', 'c/ucrt')
-    Expand-KitPackage -PackageId "microsoft.windows.wdk.$a" -Destination $kit -Members @('c/Include', 'c/Lib')
+    $wdkMembers = @('c/Include', 'c/Lib')
+    if ($PackagingTools -and $a -eq 'x64') {
+        $wdkMembers += $toolMembers
+    }
+    Expand-KitPackage -PackageId "microsoft.windows.wdk.$a" -Destination $kit -Members $wdkMembers
+}
+if ($PackagingTools -and 'x64' -notin $arches) {
+    Expand-KitPackage -PackageId 'microsoft.windows.wdk.x64' -Destination $kit -Members $toolMembers
 }
 "WDKContentRoot=$kit" >> $env:GITHUB_ENV

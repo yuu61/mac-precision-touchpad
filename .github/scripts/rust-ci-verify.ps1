@@ -9,7 +9,10 @@ param(
     [string]$HostResult,
 
     [Parameter(Mandatory)]
-    [string]$DriversResult
+    [string]$DriversResult,
+
+    [Parameter(Mandatory)]
+    [string]$PackageResult
 )
 
 Set-StrictMode -Version Latest
@@ -19,6 +22,7 @@ $results = [ordered]@{
     scope   = $ScopeResult
     host    = $HostResult
     drivers = $DriversResult
+    package = $PackageResult
 }
 
 $failed = @()

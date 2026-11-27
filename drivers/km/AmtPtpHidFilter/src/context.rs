@@ -7,13 +7,18 @@
 use core::ptr::null_mut;
 use core::sync::atomic::{AtomicPtr, Ordering};
 
-use amtptp_hidfilter_core::DeviceState;
+use amtptp_hidfilter_core::{DeviceState, ReadTicket, ReadTracker};
 use wdf_support::declare_context_type;
+use wdf_support::handle::{ContextPtr, WdfHandle};
+use wdf_support::sync::SpinLocked;
 use wdk_sys::{
     _DEVICE_OBJECT, PDEVICE_OBJECT, WDFDEVICE, WDFDEVICE__, WDFIOTARGET, WDFIOTARGET__,
-    WDFLOOKASIDE, WDFLOOKASIDE__, WDFMEMORY, WDFQUEUE, WDFQUEUE__, WDFTIMER, WDFTIMER__,
-    WDFWORKITEM, WDFWORKITEM__,
+    WDFLOOKASIDE, WDFLOOKASIDE__, WDFMEMORY__, WDFQUEUE, WDFQUEUE__, WDFTIMER, WDFTIMER__,
+    WDFREQUEST__, WDFWORKITEM, WDFWORKITEM__,
 };
+
+/// A lower `IOCTL_HID_READ_REPORT` request as the read tracker stores it.
+pub(crate) type LowerRead = WdfHandle<WDFREQUEST__>;
 
 /// `DEVICE_CONTEXT` (Device.h:26-60).
 ///
@@ -41,6 +46,9 @@ pub(crate) struct DeviceContext {
     hid_transport_recovery_timer: AtomicPtr<WDFTIMER__>,
     /// `HidTransportRecoveryWorkItem`: re-issues a lower read at `PASSIVE_LEVEL`.
     hid_transport_recovery_work_item: AtomicPtr<WDFWORKITEM__>,
+    /// The lower reads in flight and their epoch (not in C, see `amtptp_hidfilter_core::FilterIo::
+    /// with_reads`). The spin lock is created in `create_device`, before any callback can run.
+    pub(crate) reads: SpinLocked<ReadTracker<LowerRead>>,
     /// Every other `DEVICE_CONTEXT` member.
     pub(crate) state: DeviceState,
 }
@@ -59,6 +67,7 @@ impl DeviceContext {
             hid_io_target: AtomicPtr::new(null_mut()),
             hid_transport_recovery_timer: AtomicPtr::new(null_mut()),
             hid_transport_recovery_work_item: AtomicPtr::new(null_mut()),
+            reads: SpinLocked::new(ReadTracker::new()),
             state: DeviceState::new(),
         }
     }
@@ -139,7 +148,7 @@ pub(crate) unsafe fn device_context<'a>(device: WDFDEVICE) -> &'a DeviceContext 
 /// `HidIoTarget` into it while it is still NULL and never reads it (HF-B19).
 pub(crate) struct QueueContext {
     /// `Device`: the queue's WDFDEVICE.
-    pub(crate) device: WDFDEVICE,
+    pub(crate) device: WdfHandle<WDFDEVICE__>,
 }
 
 declare_context_type!(pub(crate) QueueContext, QUEUE_CONTEXT_TYPE_INFO, queue_get_context, name = "QUEUE_CONTEXT");
@@ -148,9 +157,11 @@ declare_context_type!(pub(crate) QueueContext, QUEUE_CONTEXT_TYPE_INFO, queue_ge
 /// request; its address is also the completion routine's context (Input.c:100).
 pub(crate) struct WorkerRequestContext {
     /// `DeviceContext`: back pointer to the device context (the request is a child of the device).
-    pub(crate) device_context: *const DeviceContext,
+    pub(crate) device_context: ContextPtr<DeviceContext>,
     /// `RequestMemory`: the lookaside buffer formatted as the request's output buffer.
-    pub(crate) request_memory: WDFMEMORY,
+    pub(crate) request_memory: WdfHandle<WDFMEMORY__>,
+    /// The epoch the read was registered in (not in C); written right before the send.
+    pub(crate) ticket: ReadTicket,
 }
 
 declare_context_type!(
