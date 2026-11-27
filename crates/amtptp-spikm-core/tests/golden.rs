@@ -261,7 +261,7 @@ fn attributes_spec_4_2() {
         buf[..10],
         [0x20, 0, 0, 0, 0x10, 0x89, 0x78, 0x02, 0x34, 0x12]
     );
-    assert!(buf[10..].iter().all(|&b| b == 0xEE), "Reserved untouched");
+    assert!(buf[10..].iter().all(|&b| b == 0), "Reserved zeroed");
 }
 
 #[test]

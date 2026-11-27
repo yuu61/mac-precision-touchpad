@@ -54,7 +54,7 @@ pub fn report_descriptor_for(product_id: u16) -> Option<&'static [u8]> {
 
 /// `IOCTL_HID_GET_DEVICE_ATTRIBUTES` (Hid.c:78-83): the fake vendor ID 0x8910, the **real** product
 /// ID and version 0x0100, for any product ID. Write it with [`HidDeviceAttributes::write_to`], which
-/// leaves `Reserved` untouched like the C code (HF-B22).
+/// zeroes the reserved fields.
 #[must_use]
 pub const fn device_attributes(product_id: u16) -> HidDeviceAttributes {
     HidDeviceAttributes {

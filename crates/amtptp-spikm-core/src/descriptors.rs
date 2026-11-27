@@ -162,8 +162,7 @@ pub const DEVICE_ATTRIBUTES_INFORMATION: usize = HID_DEVICE_ATTRIBUTES_LEN;
 /// `ProductID` = `HidProductID`, `VersionNumber` = `HidVersionNumber`.
 ///
 /// The glue gets the buffer with `WdfRequestRetrieveOutputBuffer(Request, 32, ...)` (failure: complete
-/// with that status), writes it with [`HidDeviceAttributes::write_to`] (only bytes 0..10; `Reserved` is
-/// left untouched exactly like C, preserved) and sets Information to [`DEVICE_ATTRIBUTES_INFORMATION`].
+/// with that status), writes it with [`HidDeviceAttributes::write_to`] (including zeroed reserved fields) and sets Information to [`DEVICE_ATTRIBUTES_INFORMATION`].
 /// Any PID is reported, even one outside the table.
 #[must_use]
 pub const fn device_attributes(config: &DeviceConfig) -> HidDeviceAttributes {

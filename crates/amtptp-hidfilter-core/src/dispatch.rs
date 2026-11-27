@@ -115,7 +115,7 @@ fn copy_descriptor<P: FilterIo>(
 }
 
 /// `PtpFilterGetDeviceAttribs` (Hid.c:58-89): `Size`, VID 0x8910, the real PID and version 0x0100;
-/// `Reserved` untouched (HF-B22); `Information = 32`.
+/// `Reserved` zeroed; `Information = 32`.
 fn get_device_attributes<P: FilterIo>(
     io: &mut P,
     state: &DeviceState,

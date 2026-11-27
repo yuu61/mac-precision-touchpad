@@ -19,7 +19,7 @@ use amtptp_usbum_core::hid::{
 use amtptp_usbum_core::input::{ReadCompleteOutcome, build_report, mt2_contact, on_read_complete, wellspring_contact};
 use amtptp_usbum_core::pnp::{d0_entry, d0_exit, prepare_hardware};
 use amtptp_usbum_core::state::{DeviceState, UsbDeviceDescriptor};
-use amtptp_usbum_core::status::{STATUS_INVALID_DEVICE_STATE, STATUS_SUCCESS};
+use amtptp_usbum_core::status::{STATUS_BUFFER_TOO_SMALL, STATUS_INVALID_DEVICE_STATE, STATUS_SUCCESS};
 use amtptp_usbum_core::usb::{wellspring_mode_read_setup, wellspring_mode_write_setup};
 use amtptp_usbum_core::io::{PipeInfo, PipeType};
 use common::{FakeQueue, FakeReq, FakeUsb, hex, to_hex};
@@ -478,13 +478,13 @@ fn mt2_golden_vectors() {
     // finger bytes, X, Y, ID, Tip, Conf
     for (bytes, x, y, id, tip, conf) in [
         ("000000001020000013", 3678, 2479, 3, true, true),
-        ("01000000 10ac000002", 3679, 2478, 2, true, true),
-        ("34125600 00ad00005f", 146, 1790, 15, false, false),
-        ("ffffff03 304000 0001", 3677, 2479, 1, true, true),
-        ("62f19a02 2030000004", 0, 5335, 4, true, true),
+        ("01000000 10ac000002", 3679, 2479, 2, true, true),
+        ("34125600 00ad00005f", 146, 1791, 15, false, false),
+        ("ffffff03 304000 0001", 3677, 2480, 1, true, true),
+        ("62f19a02 2030000004", 0, 5065, 4, true, true),
         ("00e0ff01 0101000000", 3678, 0, 0, true, true),
-        // INT_MIN negation: the literal C expression gives y = -4096 -> Y = 0 (closed form: 6575).
-        ("00000002 0101000000", 3678, 0, 0, true, true),
+        // Y13 = -4096 maps to the upper edge.
+        ("00000002 0101000000", 3678, 5065, 0, true, true),
     ] {
         let raw = hex(&bytes.replace(' ', ""));
         let finger: [u8; 9] = raw.try_into().expect("9 bytes");
@@ -681,44 +681,23 @@ fn started(pid: u16) -> DeviceState {
 }
 
 #[test]
-fn short_set_feature_reads_missing_bytes_as_zero() {
-    // ID 6 with a 1-byte report: no switch byte, so both selective-report flags stay as they are (C read
-    // the missing byte as 0 and turned both off).
+fn short_set_feature_reports_leave_the_device_unchanged() {
     let state = started(0x0236);
+    state.set_wellspring_mode_on(true);
     state.set_button_report_on(true);
     state.set_surface_report_on(true);
+    state.set_qual_levels(1, 2, 3);
+    let before = state.snapshot();
     let mut usb = FakeUsb::default();
-    let mut req = FakeReq::new(vec![0x06], 6, 0xa5);
-    let outcome = set_feature(&state, &mut req, &mut usb);
-    assert_eq!(outcome, IoctlOutcome::success(2));
-    assert!(state.is_button_report_on() && state.is_surface_report_on());
-
-    // ID 9 with 2 bytes: (byte1, 0, 0).
-    let mut req = FakeReq::new(vec![0x09, 7], 9, 0xa5);
-    assert_eq!(
-        set_feature(&state, &mut req, &mut usb),
-        IoctlOutcome::success(4)
-    );
-    assert_eq!(state.qual_levels(), [7, 0, 0]);
-    // ID 9 with 3 bytes: (byte1, byte2, 0).
-    let mut req = FakeReq::new(vec![0x09, 7, 8], 9, 0xa5);
-    assert_eq!(
-        set_feature(&state, &mut req, &mut usb),
-        IoctlOutcome::success(4)
-    );
-    assert_eq!(state.qual_levels(), [7, 8, 0]);
-
-    // ID 4 with a 1-byte report: mode 0 (mouse) -> Wellspring mode is switched off.
-    usb.reg = [0x01, 1, 2, 3, 4, 5, 6, 7];
-    state.set_wellspring_mode_on(true);
-    let mut req = FakeReq::new(vec![0x04], 4, 0xa5);
-    assert_eq!(
-        set_feature(&state, &mut req, &mut usb),
-        IoctlOutcome::success(2)
-    );
-    assert!(!state.is_wellspring_mode_on());
-    assert_eq!(usb.reg[0], 0x08);
-    assert!(!req.out_accessed);
+    for (id, bytes) in [(4, vec![4]), (6, vec![6]), (9, vec![9, 7]), (9, vec![9, 7, 8])] {
+        let mut req = FakeReq::new(bytes, id, 0xa5);
+        assert_eq!(
+            set_feature(&state, &mut req, &mut usb),
+            IoctlOutcome::status(amtptp_usbum_core::status::STATUS_INVALID_BUFFER_SIZE)
+        );
+        assert_eq!(state.snapshot(), before);
+        assert_eq!(usb.wire_string(), "-");
+    }
 }
 
 #[test]
@@ -750,17 +729,24 @@ fn get_string_edge_cases() {
         }
     }
     let state = started(0x0265);
-    // Empty device string (excluded fixture case 4): nothing is written, no crash.
-    let mut req = FakeReq::new(vec![0x0e, 0, 0x09, 0x04], 16, 0xa5);
-    let outcome = get_string(&state, &mut req, &mut Strings(Vec::new()));
-    assert_eq!(outcome, IoctlOutcome::success(16));
-    assert!(req.out.iter().all(|&b| b == 0xa5));
-    // A string as long as the buffer and longer than 8 bytes (excluded fixture case 3): copied whole.
-    let text = common::FakeStrings::utf16("Apple Inc.");
-    let mut req = FakeReq::new(vec![0x0f, 0, 0x09, 0x04], text.len(), 0xa5);
-    let outcome = get_string(&state, &mut req, &mut Strings(text.clone()));
-    assert_eq!(outcome, IoctlOutcome::success(text.len()));
-    assert_eq!(req.out, text);
+    for (source, expected) in [
+        (Vec::new(), vec![0, 0]),
+        (vec![0x42, 0, 0, 0], vec![0x42, 0, 0, 0]),
+        (common::FakeStrings::utf16("Apple Inc."), common::FakeStrings::utf16("Apple Inc.\0")),
+    ] {
+        for len in [expected.len() - 1, expected.len(), expected.len() + 7] {
+            let mut req = FakeReq::new(vec![0x0e, 0, 0x09, 0x04], len, 0xa5);
+            let outcome = get_string(&state, &mut req, &mut Strings(source.clone()));
+            if len < expected.len() {
+                assert_eq!(outcome, IoctlOutcome::status(STATUS_BUFFER_TOO_SMALL));
+                assert_eq!(req.out, vec![0xa5; len]);
+            } else {
+                assert_eq!(outcome, IoctlOutcome::success(expected.len()));
+                assert_eq!(req.out[..expected.len()], expected);
+                assert!(req.out[expected.len()..].iter().all(|&byte| byte == 0xa5));
+            }
+        }
+    }
 }
 
 #[test]

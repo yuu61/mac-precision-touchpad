@@ -9,6 +9,8 @@
 #![cfg(test)]
 
 mod common;
+#[path = "../../bcm5974/tests/support/mt2.rs"]
+mod mt2;
 
 use amtptp_hidfilter_core::{
     Bcm5974Param, DeviceSnapshot, DeviceState, HID_VID_APPLE_USB, REPORT_BUFFER_SIZE, ReadTicket,
@@ -183,6 +185,9 @@ fn replay(file: &str, fam: &str, total: usize, acts: &[(&str, usize)]) {
                 let mut expected = r.bytes("out");
                 expected[PTP_REPORT_SCAN_TIME_OFFSET..PTP_REPORT_SCAN_TIME_OFFSET + 2]
                     .copy_from_slice(&0_u16.to_le_bytes());
+                let packet = r.bytes("in");
+                let records = &packet[snap.input_header_size + snap.input_finger_delta..];
+                mt2::correct_coordinates(&mut expected, records);
                 assert_eq!(a.buf[..PTP_REPORT_LEN], expected, "{}", r.case());
                 assert!(a.buf[50..].iter().all(|&x| x == 0xEE), "{}", r.case());
                 if r.get("undef").bytes().any(|c| c != b'0') {

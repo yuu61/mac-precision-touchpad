@@ -123,6 +123,9 @@ fn descriptors_and_attributes() {
         );
         assert_eq!(r.get("completed"), "1", "{ctx}");
         let mut expected = common::hex(r.get("out"));
+        if classify_internal_ioctl(code) == InternalIoctl::GetDeviceAttributes && info == 32 {
+            expected[10..32].fill(0);
+        }
         if status == STATUS_SUCCESS
             && classify_internal_ioctl(code) == InternalIoctl::GetReportDescriptor
         {

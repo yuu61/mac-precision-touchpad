@@ -203,7 +203,7 @@ pub fn get_report_descriptor<R: HidRequest>(state: &DeviceState, request: &mut R
 
 /// `AmtPtpGetDeviceAttribs` (Hid.c:188-243): `WdfRequestRetrieveOutputBuffer(32)` (failure: that
 /// status), then write `Size` 32, `VendorID` 0x8910, `ProductID` = `idProduct`, `VersionNumber` 1 into bytes
-/// 0..10. `Reserved` (bytes 10..32) is left untouched. Information 32.
+/// 0..10 and zero `Reserved` (bytes 10..32). Information 32.
 pub fn get_device_attributes<R: HidRequest>(state: &DeviceState, request: &mut R) -> IoctlOutcome {
     let buffer = match request.output_buffer(HID_DEVICE_ATTRIBUTES_LEN) {
         Ok(buffer) => buffer,
@@ -216,18 +216,8 @@ pub fn get_device_attributes<R: HidRequest>(state: &DeviceState, request: &mut R
     }
 }
 
-/// `AmtPtpGetStrings` (Hid.c:399-541), with UM-B7 fixed (P2).
-///
-/// 1. Retrieve the input memory (failure: that status); fewer than 4 bytes → `STATUS_INVALID_BUFFER_SIZE`.
-/// 2. `v = u32 LE`; string ID = `v & 0xFFFF`, language = `v >> 16`.
-/// 3. ID 14/15/16 → `iManufacturer`/`iProduct`/`iSerialNumber`; any other ID → `STATUS_SUCCESS` with
-///    Information 0 (P3 PRESERVED).
-/// 4. Query the string from the device (failure: that status).
-/// 5. `WdfRequestRetrieveOutputBuffer(wcharCount * 2)` (failure: that status).
-/// 6. **P2 FIX (UM-B7):** the C code copies into the address of its local pointer variable (stack
-///    corruption, nothing reaches the caller). Here the `wcharCount * 2` string bytes are copied to the
-///    start of the caller's output buffer; the rest of the buffer is left untouched.
-/// 7. Information = the full output buffer length (`actualSize`, P1 PRESERVED); status SUCCESS.
+/// Returns the requested USB string as NUL-terminated UTF-16LE. Information includes the
+/// terminator. A short output buffer receives no part of the string.
 pub fn get_string<R: HidRequest, S: UsbStringSource>(
     state: &DeviceState,
     request: &mut R,
@@ -249,26 +239,34 @@ pub fn get_string<R: HidRequest, S: UsbStringSource>(
         id if id == u32::from(HID_STRING_ID_IMANUFACTURER) => descriptor.i_manufacturer,
         id if id == u32::from(HID_STRING_ID_IPRODUCT) => descriptor.i_product,
         id if id == u32::from(HID_STRING_ID_ISERIALNUMBER) => descriptor.i_serial_number,
-        _ => return IoctlOutcome::success(0),
+        _ => return IoctlOutcome::NOT_SUPPORTED,
     };
     let string = match usb.alloc_and_query_string(string_index, language_id) {
         Ok(string) => string,
         Err(status) => return IoctlOutcome::status(status),
     };
     let bytes = string.as_ref();
-    // C: `USHORT wcharCount` from WDF; the required size is `wcharCount * sizeof(WCHAR)`.
-    let wchar_count = u16::try_from(bytes.len() / 2).unwrap_or(u16::MAX);
-    let required = usize::from(wchar_count) * 2;
+    let (characters, remainder) = bytes.as_chunks::<2>();
+    if !remainder.is_empty() {
+        return IoctlOutcome::status(STATUS_INVALID_BUFFER_SIZE);
+    }
+    let string_bytes = characters
+        .split(|ch| *ch == [0, 0])
+        .next()
+        .unwrap_or_default()
+        .as_flattened();
+    let required = string_bytes.len() + 2;
     let output = match request.output_buffer(required) {
-        Ok(output) => output,
+        Ok(buffer) => buffer,
         Err(status) => return IoctlOutcome::status(status),
     };
-    let actual_size = output.len();
-    let count = required.min(bytes.len()).min(output.len());
-    if let (Some(dst), Some(src)) = (output.get_mut(..count), bytes.get(..count)) {
-        dst.copy_from_slice(src);
-    }
-    IoctlOutcome::success(actual_size)
+    let Some(destination) = output.get_mut(..required) else {
+        return IoctlOutcome::status(STATUS_BUFFER_TOO_SMALL);
+    };
+    let (text, terminator) = destination.split_at_mut(string_bytes.len());
+    text.copy_from_slice(string_bytes);
+    terminator.fill(0);
+    IoctlOutcome::success(required)
 }
 
 /// `AmtPtpReportFeatures` (Hid.c:711-895): `IOCTL_UMDF_HID_GET_FEATURE`.
@@ -320,24 +318,8 @@ pub fn get_feature<R: HidRequest>(state: &DeviceState, request: &mut R) -> Ioctl
     }
 }
 
-/// `AmtPtpSetFeatures` (Hid.c:897-1130): `IOCTL_UMDF_HID_SET_FEATURE`. **Always completes with
-/// `STATUS_SUCCESS`** (UM-B8, P3 PRESERVED); only Information varies.
-///
-/// Packet retrieval (`RequestGetHidXferPacketToWriteToDevice`): report ID = `(u8)` output buffer length
-/// (output retrieval failure → Information 0); the report is the input buffer (retrieval failure →
-/// Information 0). The C code reads report bytes 1..=3 without a length check; a byte past the end of a
-/// short input is read as 0 here (UM-B8, P2 FIXED, port policy rule "treat as 0").
-///
-/// - 0x04 input mode (`mode = byte 1`): `GetWellspringMode` (failure → Information 0); mode 0 and device
-///   on → `SetWellspringMode(FALSE)`; mode 3 and device off → `SetWellspringMode(TRUE)` (failure →
-///   Information 0); other modes: nothing. Information 2. The device's answer decides, not the driver
-///   flag (UM-B4, P3).
-/// - 0x06 selective reporting: `IsSurfaceReportOn = bit 0` (Surface Switch, usage 0x57),
-///   `IsButtonReportOn = bit 1` (Button Switch, 0x58) of byte 1 (P3 fix of UM-B14: C applied them
-///   swapped). A report without byte 1 changes nothing. Information 2.
-/// - 0x09: `PressureQualLevel = byte 1`, `SgContactSizeQualLevel = byte 2`, `MuContactSizeQualLevel =
-///   byte 3`. Information 4.
-/// - other IDs: Information 0.
+/// Applies a UMDF feature report. The HID mapper passes the report ID in the output
+/// length and the payload in the input buffer. Only successful reports set Information.
 pub fn set_feature<R: HidRequest, C: ControlPipe>(
     state: &DeviceState,
     request: &mut R,
@@ -346,36 +328,34 @@ pub fn set_feature<R: HidRequest, C: ControlPipe>(
     let report_id = match request.output_memory_len() {
         // C: `Packet->reportId = (UCHAR) outputBufferLength;` (truncation)
         Ok(length) => length as u8,
-        Err(_) => return IoctlOutcome::success(0),
+        Err(status) => return IoctlOutcome::status(status),
     };
-    let (report, selective) = match request.input_memory() {
-        Ok(input) => (
-            [
-                input.get(1).copied().unwrap_or(0),
-                input.get(2).copied().unwrap_or(0),
-                input.get(3).copied().unwrap_or(0),
-            ],
-            SelectiveReportBits::from_report(input),
-        ),
-        Err(_) => return IoctlOutcome::success(0),
+    let input = match request.input_memory() {
+        Ok(input) => input,
+        Err(status) => return IoctlOutcome::status(status),
     };
-    let [byte1, byte2, byte3] = report;
     match report_id {
-        REPORTID_REPORTMODE => set_input_mode(state, control, byte1),
+        REPORTID_REPORTMODE => match input.get(1) {
+            Some(&mode) => set_input_mode(state, control, mode),
+            None => IoctlOutcome::status(STATUS_INVALID_BUFFER_SIZE),
+        },
         REPORTID_FUNCSWITCH => {
-            // A report without its switch byte changes nothing (C read the missing byte as 0, UM-B8).
-            if let Some(bits) = selective {
-                state.set_button_report_on(bits.button_report);
-                state.set_surface_report_on(bits.surface_report);
-            }
+            let Some(bits) = SelectiveReportBits::from_report(input) else {
+                return IoctlOutcome::status(STATUS_INVALID_BUFFER_SIZE);
+            };
+            state.set_button_report_on(bits.button_report);
+            state.set_surface_report_on(bits.surface_report);
             IoctlOutcome::success(SELECTIVE_REPORT_LEN)
         }
         REPORTID_UMAPP_CONF => {
-            state.set_qual_levels(byte1, byte2, byte3);
+            let Some(&[_, pressure, single, multiple]) = input.first_chunk::<UMAPP_CONF_REPORT_LEN>()
+            else {
+                return IoctlOutcome::status(STATUS_INVALID_BUFFER_SIZE);
+            };
+            state.set_qual_levels(pressure, single, multiple);
             IoctlOutcome::success(UMAPP_CONF_REPORT_LEN)
         }
-        // The C status STATUS_NOT_SUPPORTED is discarded by `return STATUS_SUCCESS`.
-        _ => IoctlOutcome::success(0),
+        _ => IoctlOutcome::NOT_SUPPORTED,
     }
 }
 
@@ -383,12 +363,15 @@ pub fn set_feature<R: HidRequest, C: ControlPipe>(
 fn set_input_mode<C: ControlPipe>(state: &DeviceState, control: &mut C, mode: u8) -> IoctlOutcome {
     // P2: the C code dereferences DeviceInfo, which is never NULL once the device has started.
     let Some(cfg) = state.config() else {
-        return IoctlOutcome::success(0);
+        return IoctlOutcome::status(STATUS_INVALID_DEVICE_STATE);
     };
     // The read of the mode register and the switch are one serialized read-modify-write.
-    let switch_status: Result<NtStatus, NtStatus> = control.serialized(|control| {
-        let device_mode_on = get_wellspring_mode(cfg, control)?;
-        Ok(match mode {
+    let switch_status = control.serialized(|control| {
+        let device_mode_on = match get_wellspring_mode(cfg, control) {
+            Ok(enabled) => enabled,
+            Err(status) => return status,
+        };
+        match mode {
             PTP_COLLECTION_MOUSE if device_mode_on => {
                 set_wellspring_mode(state, cfg, control, false)
             }
@@ -396,14 +379,11 @@ fn set_input_mode<C: ControlPipe>(state: &DeviceState, control: &mut C, mode: u8
                 set_wellspring_mode(state, cfg, control, true)
             }
             _ => STATUS_SUCCESS,
-        })
+        }
     });
-    let Ok(switch_status) = switch_status else {
-        return IoctlOutcome::success(0);
-    };
     if nt_success(switch_status) {
         IoctlOutcome::success(INPUT_MODE_REPORT_LEN)
     } else {
-        IoctlOutcome::success(0)
+        IoctlOutcome::status(switch_status)
     }
 }

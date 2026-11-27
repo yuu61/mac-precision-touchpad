@@ -34,7 +34,7 @@ The policy terms come from the [behavior policy](README.md#behavior-policy):
 | KM-B14 | PRESERVED (P3) values, FIXED (P2) read | Mode values other than 0 and 3 succeed with no action. `feature::input_mode` reads byte 1 only when it lies inside `reportBufferLen`; otherwise it uses 0, giving `STATUS_NOT_SUPPORTED` and no transfer. C read past the report (fixture tag `ub_oob_read`). |
 | KM-B15 | FIXED (P3) | SET_FEATURE 0x06 sets `PtpReportTouch` from bit 0 (Surface Switch) and `PtpReportButton` from bit 1 (Button Switch) of byte 1 (`feature::selective_report_bits`); the reader completion honours them. A report without byte 1 changes nothing. |
 | KM-B16 | FIXED (P2) *glue* | A NULL `reportBuffer` is passed to the core as an empty slice. GET 0x07/0x08 then returns `STATUS_INVALID_BUFFER_SIZE`, which is the C result whenever C does not crash. SET 0x04 treats it as mode 0. |
-| KM-B17 | PRESERVED (P1) | `hid::get_device_attributes` writes only bytes 0..10 (`HidDeviceAttributes::write_to`). `Reserved` keeps the caller's bytes. The fixtures show the caller's prefill there, so this is observable. |
+| KM-B17 | FIXED (Step 2) | `get_device_attributes` writes the complete 32-byte structure with zeroed reserved fields. |
 | KM-B18 | PRESERVED (P1) | ContactID = slot index (`u32::from(i as u8)`). |
 | KM-B19 | PRESERVED (P1) | X/Y are clamped below at 0 only; Y is inverted (`y.max - abs_y`). |
 | KM-B20 | FIXED (P2) stale handle, FIXED (P3) selection | `lifecycle::select_interrupt_interface` resets `InterruptPipe` before the selection and takes the first interrupt **IN** pipe. A restart that finds none fails with `STATUS_INVALID_DEVICE_STATE`; C kept the deleted pipe handle, a use-after-free, and took the first interrupt pipe whatever its direction. |

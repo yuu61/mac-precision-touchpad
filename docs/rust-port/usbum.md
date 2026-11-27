@@ -21,8 +21,8 @@ The policy terms come from the [behavior policy](README.md#behavior-policy):
 | UM-B4 | PRESERVED (P3) | For TYPE3, `get_wellspring_mode` always reports on, and `set_wellspring_mode` only stores the flag. Mode 0 followed by mode 3 therefore leaves WS8 off until the next D0 cycle (fixture sequence `b4-ws8`). |
 | UM-B5 | FIXED (P2) | Nothing is allocated for the mode switch: the core passes a 4-byte buffer to `io::ControlPipe`, so there is no `WdfObjectDelete(NULL)` path. The glue describes that buffer with `WDF_MEMORY_DESCRIPTOR_INIT_BUFFER`. |
 | UM-B6 | FIXED (P2) | When `RetrieveOutputMemory` or the 50-byte copy fails after a READ_REPORT was retrieved, that request is completed with the failing status and Information 0 (`input::ReadCompleteOutcome::CompletedWithError`). C leaked it, which hung removal. There are 90 fixture records (`done=l`). |
-| UM-B7 | FIXED (P2) | GET_STRING copies the `wcharCount*2` UTF-16LE bytes to the start of the caller's output buffer (`hid::get_string`); C copied them into its own stack variable. The rest of the buffer is untouched. Information stays the full output buffer length and the status stays SUCCESS (P1). An unknown string ID still returns SUCCESS with Information 0. The glue must delete the string memory (`io::UsbStringSource::String` drop), which ends the leak. |
-| UM-B8 | PRESERVED (P3) status, FIXED (P2) reads | SET_FEATURE always completes with `STATUS_SUCCESS`, including on retrieval failures, unsupported IDs and failed transfers (`hid::set_feature`). Report bytes 1..3 that lie past the input length read as 0 (the port policy rule "treat as 0"). So a 1-byte 0x04 report means mode 0, a 1-byte 0x06 report clears both flags, and a short 0x09 report zero-fills the missing levels. |
+| UM-B7 | FIXED (Step 2) | GET_STRING returns NUL-terminated UTF-16LE and reports the bytes written, including the terminator. Unknown string IDs return `STATUS_NOT_SUPPORTED`. |
+| UM-B8 | FIXED (Step 2) | SET_FEATURE propagates retrieval and transfer errors, reports unsupported IDs and rejects incomplete payloads before changing device state. |
 | UM-B9 | FIXED (P3) | `pnp::d0_exit` runs `SetWellspringMode(FALSE)` best effort and always returns `STATUS_SUCCESS`; the switch status is only traced (`D0ExitOutcome::mode_switch_status`). C returned it, so a surprise removal failed D0Exit. The 18 `wire.txt` D0Exit records whose switch fails compare that status with the C return value. |
 | UM-B10 | FIXED (P3) | `pnp::d0_entry` always switches the mode on. C did so only if `IsButtonReportOn \|\| IsWellspringModeOn`; D0Exit turns the mode off, so with the button switch off a resume left the trackpad in mouse mode. A failure is ignored and reported in `D0EntryOutcome::mode_switch_status`. The `*-d0entry-gate-btn0-wsm0` records are checked against their `wsm1` twin, and the two `b10` sequences of `sequences.txt` are replaced by the test `d0_entry_switches_the_mode_after_selective_reporting_off`. |
 | UM-B11 | PRESERVED (P3) | A packet with a bad length runs `usb::emergency_reset` (Set FALSE, then Set TRUE) synchronously inside the read completion, even in mouse mode and even for TYPE3 (flag only). It is not moved to a work item. |
@@ -46,7 +46,7 @@ The policy terms come from the [behavior policy](README.md#behavior-policy):
 |---|---|
 | UM-X1 | `DeviceInfo == NULL` is guarded everywhere it is dereferenced. This is unreachable after a successful PrepareHardware. SET 0x04 returns SUCCESS with Information 0, the read completion drops the packet (`DroppedNoConfig`), and the D0 mode switch returns `STATUS_INVALID_DEVICE_STATE`. |
 | UM-X2 | A TYPE4 finger reads only its fields (+2..+20) from `h + delta + i*f`. A full 30-byte stride would run 2 bytes past the packet on the last finger. |
-| UM-X3 | The C UB in the MT2 decode and in the Tip/Confidence math is resolved the MSVC way. `-(INT)(tmp_y << 6)` uses `wrapping_neg`, so the INT_MIN case gives y = -4096 and Y = 0. `x << 1` on a negative int is computed as `* 2`. |
+| UM-X3 | MT2 sign-extends Y before inversion and clamps coordinates to the logical maxima. Wellspring doubles signed touch sizes in 32-bit arithmetic. |
 | UM-X4 | Packed, unaligned and type-punned loads (`*(USHORT*)`, `*(UINT*)` at odd offsets, `TRACKPAD_FINGER*` casts) are replaced by explicit little-endian byte decoding. |
 
 ## Fixture coverage (`crates/amtptp-usbum-core/tests/fixtures_replay.rs`)
@@ -58,9 +58,9 @@ The "fake-decided" column counts records whose final failing status was produced
 | File | Records | Processed | Asserting P2-fixed behavior | Fake-decided | Skipped |
 |---|---|---|---|---|---|
 | devices.txt | 44 | 44 | - | 0 | - |
-| descriptors.txt | 898 | 898 | 35 B7 (string copied to the caller); the 24 `inj=1` records run unchanged | 372 | - |
+| descriptors.txt | 898 | 898 | 35 B7 (terminated string or short-buffer error); 24 `inj=1` records exercise unknown product IDs | 385 | - |
 | ioctl.txt | 24 | 24 | - | 3 | - |
-| feature.txt | 1050 | 1050 | 8 B1 (`umask` payload bytes are `00`); 258 SET 0x06 replayed with bits 0 and 1 of the switch byte exchanged (UM-B14, P3: the C state is reached from the exchanged byte) | 20 | - |
+| feature.txt | 1050 | 1050 | 8 B1 (`umask` payload bytes are `00`); 258 SET 0x06 replayed with bits 0 and 1 of the switch byte exchanged (UM-B14, P3: the C state is reached from the exchanged byte) | 72 | - |
 | sequences.txt (7 sequences) | 48 | 36 | - | 0 | 12: the two `b10` sequences, which recorded the UM-B10 gate (P3); a test replaces them |
 | wire.txt | 259 | 254 | 16 B16 (restart succeeds), 16 B1 (`umask`), 1 B21 (`prep-intout-then-intin` takes the IN pipe, P3), 5 B10 (`*-d0entry-gate-btn0-wsm0` switch the mode, P3), 18 B9 (D0Exit returns SUCCESS after a failed switch, P3) | 20 | 5 glue-only: `driverentry-fail`, `driverentry-ok`, `driver-cleanup`, `deviceadd-devif-fail`, `iostop` |
 | input_ws1/ws2 | 340/70 | all | - | 0 | - |
@@ -84,7 +84,7 @@ The README's excluded cases are covered by unit tests in `tests/golden.rs`:
 | README exclusion | Test |
 |---|---|
 | 1 unknown PID (B3) | `unknown_pid_fails_prepare_hardware`, `config_lookup_is_bounded` |
-| 2 short SET_FEATURE input (B8) | `short_set_feature_reads_missing_bytes_as_zero` |
+| 2 short SET_FEATURE input (B8) | `short_set_feature_reports_leave_the_device_unchanged` |
 | 3 GET_STRING with output = wcharCount*2 > 8 (B7) | `get_string_edge_cases` |
 | 4 empty device string | `get_string_edge_cases` |
 | 5 `WdfMemoryCreate` failure (B5) | not applicable (no allocation) |
@@ -105,7 +105,7 @@ The README's excluded cases are covered by unit tests in `tests/golden.rs`:
 ## Open questions
 
 1. **UM-B22 locking.** *Resolved in stage 2 with no lock; revised later: a wait lock serializes the mode switches (see the WDF glue section below).* C never serializes `SetWellspringMode`, which runs from SET_FEATURE (parallel queue), the emergency reset (reader completion) and D0. The core is memory-safe without a lock. A WDF wait lock around the core's mode-switching entry points would avoid interleaved read-modify-write transfers, but it changes timing. The glue author decides and records the choice.
-2. **UM-B7 Information.** It is kept as the full output length, as in C. The alternative is `wcharCount*2`. HidClass does not depend on it today. The HID minidriver contract describes a NUL-terminated wide string, but the fix writes `wcharCount*2` bytes with no terminator; the rest of the buffer keeps whatever it held. If hardware shows garbage after strings, terminating the string is the fix.
+2. **UM-B7 Information.** Resolved in Step 2. Information includes the UTF-16 terminator.
 3. **Read ordering.** `NumPendingReads = 0` (framework default, more than one) lets reader completions overlap and arrive out of order, as in C. `input::on_read_complete` is reentrant: each call has its own report buffer and only touches the atomics.
 
 ## WDF glue (stage 2: `drivers/um/AmtPtpDeviceUsbUm`)
@@ -164,5 +164,5 @@ The glue implements the core's `io` traits with the WDF DDIs the C driver calls,
 ### To verify on hardware
 
 1. **UM-B16 pipe identity.** The glue assumes a PnP stop/start returns the same `WDFUSBPIPE`. If it does not, the reader is configured on the new pipe. `DevicePnpEvent` from PrepareHardware traces the pipe handle, the endpoint address and whether the reader was configured.
-2. **UM-B7 GET_STRING Information.** Information is still the full output length and no NUL terminator is written (open question 2).
+2. **UM-B7 GET_STRING.** Check the product and serial strings from the real device, including their terminators and returned lengths.
 3. **Statuses decided by the framework.** These come from the real framework now. On a live UMDF host, check them against the fixtures' modelled `0xc0000206` / `0xc0000023` (see the fixture README).

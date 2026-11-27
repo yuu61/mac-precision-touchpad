@@ -1,9 +1,7 @@
 //! Interrupt-packet parsing and the continuous-reader completion (InputInterrupt.c:82-597).
 //!
-//! The pure building blocks ([`wellspring_contact`], [`mt2_contact`], [`build_report`],
-//! [`classify_packet`]) reproduce the C integer semantics exactly (sign extension, truncation, the MSVC /
-//! `-fwrapv` two's-complement results of the C UB). [`on_read_complete`] strings them together in the C
-//! order, driving the `READ_REPORT` queue and the control pipe through the [`crate::io`] traits.
+//! The decoders are shared with the KMDF drivers. [`on_read_complete`] handles the read queue
+//! and control pipe through the [`crate::io`] traits.
 
 use bcm5974::input::{build_usb_report, usb_contact_count};
 use ptp_hid::input::{PTP_REPORT_LEN, PtpContact, PtpReport};

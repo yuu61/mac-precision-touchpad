@@ -154,8 +154,7 @@ pub const HID_DESCRIPTOR_SPI_UMAPP: [u8; HID_DESCRIPTOR_LEN] =
 /// `sizeof(HID_DEVICE_ATTRIBUTES)`: 32 bytes (`ULONG Size; USHORT VendorID, ProductID, VersionNumber;
 /// USHORT Reserved[11]`). This is also the value of the `Size` field.
 pub const HID_DEVICE_ATTRIBUTES_LEN: usize = 32;
-/// Number of leading bytes the C drivers write (`Size`, `VendorID`, `ProductID`, `VersionNumber`). They
-/// never write `Reserved` (bytes 10..32).
+/// Length of the header written by the original C drivers, up to `Reserved`.
 pub const HID_DEVICE_ATTRIBUTES_WRITTEN_LEN: usize = 10;
 
 /// `HID_DEVICE_ATTRIBUTES` without `Size` (always 32 when encoded) and `Reserved`.
@@ -192,20 +191,12 @@ impl HidDeviceAttributes {
         out
     }
 
-    /// Writes the structure into the caller's buffer the way the C drivers do.
-    ///
-    /// Like `WdfRequestRetrieveOutputBuffer(Request, sizeof(HID_DEVICE_ATTRIBUTES), ...)`, it requires
-    /// `buf` to be at least 32 bytes; otherwise it writes nothing and returns [`BufferTooSmall`]. It then
-    /// writes only bytes 0..10 and leaves `Reserved` (bytes 10..32) untouched, as the C code does. A core
-    /// crate that wants zeroed `Reserved` bytes copies [`Self::to_bytes`] instead.
+    /// Writes the full 32-byte structure, including zeroed reserved fields.
     ///
     /// # Errors
     /// Returns [`BufferTooSmall`] if the buffer cannot hold the report.
     pub fn write_to(self, buf: &mut [u8]) -> Result<(), BufferTooSmall> {
-        if buf.len() < HID_DEVICE_ATTRIBUTES_LEN {
-            return Err(BufferTooSmall);
-        }
-        write_prefix(buf, &self.header_bytes())
+        write_prefix(buf, &self.to_bytes())
     }
 
     /// Decodes `VendorID`, `ProductID` and `VersionNumber` from a 32-byte structure, for example the
@@ -305,7 +296,7 @@ mod tests {
     }
 
     #[test]
-    fn attributes_write_to_leaves_reserved() {
+    fn attributes_write_to_zeros_reserved() {
         let a = HidDeviceAttributes {
             vendor_id: 0x05ac,
             product_id: 0x027a,
@@ -317,7 +308,7 @@ mod tests {
             buf[..10],
             [0x20, 0, 0, 0, 0xac, 0x05, 0x7a, 0x02, 0x01, 0x00]
         );
-        assert!(buf[10..].iter().all(|&b| b == 0xAA));
+        assert!(buf[10..].iter().all(|&b| b == 0));
         let mut short = [0xAA_u8; HID_DEVICE_ATTRIBUTES_LEN - 1];
         assert_eq!(a.write_to(&mut short), Err(BufferTooSmall));
         assert!(short.iter().all(|&b| b == 0xAA));

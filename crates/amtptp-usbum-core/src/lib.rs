@@ -61,9 +61,9 @@
 //! state.set_config_row(config::lookup_config_row(0x0265)); // Magic Trackpad 2
 //! let cfg = state.config().unwrap();
 //! assert_eq!(cfg.profile.tp_type.reader_transfer_length(), 156);
-//! // 7th MT2 golden row of spec 7.6: the INT_MIN negation case gives Y = 0.
+//! // The minimum signed Y reading maps to the upper edge.
 //! let contact = input::mt2_contact(cfg, &[0, 0, 0, 2, 1, 1, 0, 0, 0]);
-//! assert_eq!((contact.x, contact.y), (3678, 0));
+//! assert_eq!((contact.x, contact.y), (3678, 5065));
 //! ```
 
 #![no_std]
