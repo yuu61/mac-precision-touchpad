@@ -88,10 +88,10 @@ pub fn set_wellspring_mode<T: ControlTransfer + ?Sized>(
     io: &mut T,
     on: bool,
 ) -> NtStatus {
-    let cfg = state.config();
+    let format = state.config().profile.tp_type;
 
     // Device.c:525-528. No table row is TYPE3, so this never runs; kept to mirror the C.
-    if matches!(cfg.profile.tp_type, TrackpadType::Type3) {
+    if matches!(format, TrackpadType::Type3) {
         state.set_wellspring_mode_on(on);
         return STATUS_SUCCESS;
     }
@@ -101,18 +101,9 @@ pub fn set_wellspring_mode<T: ControlTransfer + ?Sized>(
         // B4 fixed: nothing was allocated, so there is nothing to delete.
         Err(status) => return status,
     };
-    let data = buffer.as_mut();
-    // RtlZeroMemory. B3 fixed: all 4 bytes the descriptor covers are ours and zeroed.
-    *data = [0; WELLSPRING_DATA_LEN];
-
-    let status = io.control_transfer(&wellspring_read_setup(cfg), data);
-    if !nt_success(status) {
-        return status;
-    }
-
-    apply_mode_byte(cfg, data, on);
-
-    let status = io.control_transfer(&wellspring_write_setup(cfg), data);
+    let status = UsbMsg::for_type(format).set_mode(buffer.as_mut(), on, |setup, data| {
+        io.control_transfer(setup, data)
+    });
     if !nt_success(status) {
         return status;
     }

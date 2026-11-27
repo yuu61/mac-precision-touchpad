@@ -5,7 +5,7 @@
 //! `-fwrapv` two's-complement results of the C UB). [`on_read_complete`] strings them together in the C
 //! order, driving the `READ_REPORT` queue and the control pipe through the [`crate::io`] traits.
 
-use ptp_hid::common::PTP_CONTACT_SLOTS;
+use bcm5974::input::{build_usb_report, usb_contact_count};
 use ptp_hid::input::{PTP_REPORT_LEN, PtpContact, PtpReport};
 
 use crate::config::{TrackpadType, WellspringDevice};
@@ -52,19 +52,14 @@ pub const fn classify_packet(
     wellspring_mode_on: bool,
     len: usize,
 ) -> PacketDisposition {
-    let header = cfg.profile.tp_type.header() as usize;
-    let finger = cfg.profile.tp_type.finger_size() as usize;
-    let fingers = match len.checked_sub(header) {
-        Some(body) => match (body.checked_rem(finger), body.checked_div(finger)) {
-            (Some(0), Some(fingers)) => fingers,
-            _ => return PacketDisposition::Malformed,
-        },
-        None => return PacketDisposition::Malformed,
+    let format = cfg.profile.tp_type;
+    let Some(fingers) = usb_contact_count(format, len) else {
+        return PacketDisposition::Malformed;
     };
     if !wellspring_mode_on {
         return PacketDisposition::ModeOff;
     }
-    match cfg.profile.tp_type {
+    match format {
         TrackpadType::Type1 => PacketDisposition::Unsupported,
         TrackpadType::Type2 | TrackpadType::Type3 | TrackpadType::Type4 | TrackpadType::Type5 => {
             PacketDisposition::Report { fingers }
@@ -89,48 +84,18 @@ pub fn build_report(
     button_on: bool,
     scan_time: u16,
 ) -> PtpReport {
-    let mut report = PtpReport {
-        scan_time,
-        ..PtpReport::EMPTY
-    };
-    if surface_on {
-        let header = cfg.profile.tp_type.header() as usize;
-        let finger_len = cfg.profile.tp_type.finger_size() as usize;
-        let fingers = packet
-            .len()
-            .checked_sub(header)
-            .and_then(|body| body.checked_div(finger_len))
-            .unwrap_or(0);
-        let count = fingers.min(PTP_CONTACT_SLOTS);
-        // count <= 5
-        report.contact_count = count as u8;
-        let base = header.saturating_add(cfg.profile.tp_type.delta() as usize);
-        for (slot, contact) in report.contacts.iter_mut().enumerate().take(count) {
-            let start = base.saturating_add(slot.saturating_mul(finger_len));
-            // Only the bytes of the finger struct are sliced: for TYPE4 a full stride from `start` would
-            // run 2 bytes past the end of the last finger block.
-            let finger = packet.get(start..).unwrap_or(&[]);
-            *contact = match cfg.profile.tp_type {
-                TrackpadType::Type5 => match finger.first_chunk::<MT2_FINGER_LEN>() {
-                    Some(block) => mt2_contact(cfg, block),
-                    None => mt2_contact(cfg, &[0; MT2_FINGER_LEN]),
-                },
-                TrackpadType::Type1
-                | TrackpadType::Type2
-                | TrackpadType::Type3
-                | TrackpadType::Type4 => wellspring_contact(cfg, finger, slot),
-            };
+    let format = cfg.profile.tp_type;
+    let mut report = build_usb_report(format, packet, surface_on, button_on, |finger, slot| {
+        if format == TrackpadType::Type5 {
+            let block = finger
+                .first_chunk::<MT2_FINGER_LEN>()
+                .unwrap_or(&[0; MT2_FINGER_LEN]);
+            mt2_contact(cfg, block)
+        } else {
+            wellspring_contact(cfg, finger, slot)
         }
-    }
-    if button_on
-        && packet
-            .get(cfg.profile.tp_type.button() as usize)
-            .copied()
-            .unwrap_or(0)
-            != 0
-    {
-        report.is_button_clicked = 1;
-    }
+    });
+    report.scan_time = scan_time;
     report
 }
 

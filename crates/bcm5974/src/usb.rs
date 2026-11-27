@@ -1,5 +1,7 @@
 //! USB class control transfers for switching Wellspring raw input mode.
 
+use ptp_hid::status::{NtStatus, nt_success};
+
 use crate::config::TrackpadType;
 
 /// Length of the USB data stage used by the drivers.
@@ -117,5 +119,26 @@ impl UsbMsg {
         if let Some(byte) = data.get_mut(self.mode_offset) {
             *byte = if enabled { self.mode_on } else { self.mode_off };
         }
+    }
+
+    /// Reads the mode register into a zeroed transfer buffer, updates its mode byte,
+    /// and writes it back. Returns the first failure or the final transfer status.
+    pub fn set_mode<F>(
+        self,
+        data: &mut [u8; MODE_SWITCH_TRANSFER_LEN],
+        enabled: bool,
+        mut transfer: F,
+    ) -> NtStatus
+    where
+        F: FnMut(&UsbSetupPacket, &mut [u8; MODE_SWITCH_TRANSFER_LEN]) -> NtStatus,
+    {
+        *data = [0; MODE_SWITCH_TRANSFER_LEN];
+        let status = transfer(&self.read_setup(), data);
+        if !nt_success(status) {
+            return status;
+        }
+
+        self.apply_mode(data, enabled);
+        transfer(&self.write_setup(), data)
     }
 }

@@ -82,17 +82,14 @@ pub fn set_wellspring_mode<C: ControlPipe>(
         state.set_wellspring_mode_on(enable);
         return STATUS_SUCCESS;
     }
-    let mut buffer = [0_u8; MODE_SWITCH_TRANSFER_LEN];
-    let status = read_mode_register(cfg, control, &mut buffer);
-    if !nt_success(status) {
-        return status;
+    let mut buffer = [0; MODE_SWITCH_TRANSFER_LEN];
+    let status =
+        UsbMsg::for_type(cfg.profile.tp_type).set_mode(&mut buffer, enable, |setup, data| {
+            control.send_control_transfer(setup, data)
+        });
+    if nt_success(status) {
+        state.set_wellspring_mode_on(enable);
     }
-    UsbMsg::for_type(cfg.profile.tp_type).apply_mode(&mut buffer, enable);
-    let status = control.send_control_transfer(&wellspring_mode_write_setup(cfg), &mut buffer);
-    if !nt_success(status) {
-        return status;
-    }
-    state.set_wellspring_mode_on(enable);
     status
 }
 

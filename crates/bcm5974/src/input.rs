@@ -1,8 +1,9 @@
-//! Contact decoding for Wellspring and Magic Trackpad 2 input packets.
+//! USB input report assembly and contact decoding for Wellspring and Magic Trackpad 2.
 
-use ptp_hid::input::PtpContact;
+use ptp_hid::common::PTP_CONTACT_SLOTS;
+use ptp_hid::input::{PtpContact, PtpReport};
 
-use crate::config::Bcm5974Config;
+use crate::config::{Bcm5974Config, TrackpadType};
 
 /// Size of the unpacked TYPE1–4 finger structure, excluding any packet prefix.
 pub const TRACKPAD_FINGER_LEN: usize = 28;
@@ -13,6 +14,58 @@ const FINGER_ABS_X: usize = 2;
 const FINGER_ABS_Y: usize = 4;
 const FINGER_TOUCH_MAJOR: usize = 16;
 const FINGER_TOUCH_MINOR: usize = 18;
+
+/// Counts the raw contacts in a frame with a complete header and whole finger records.
+#[must_use]
+pub const fn usb_contact_count(format: TrackpadType, packet_len: usize) -> Option<usize> {
+    let Some(payload) = packet_len.checked_sub(format.header() as usize) else {
+        return None;
+    };
+    let stride = format.finger_size() as usize;
+    if payload.is_multiple_of(stride) {
+        Some(payload / stride)
+    } else {
+        None
+    }
+}
+
+/// Assembles a PTP report from a USB frame. The caller handles malformed frames,
+/// the scan clock, and the contact decoding policy.
+#[must_use]
+pub fn build_usb_report<F>(
+    format: TrackpadType,
+    packet: &[u8],
+    report_touch: bool,
+    report_button: bool,
+    mut decode_contact: F,
+) -> PtpReport
+where
+    F: FnMut(&[u8], usize) -> PtpContact,
+{
+    let mut report = PtpReport::EMPTY;
+    if report_touch {
+        let header = format.header() as usize;
+        let stride = format.finger_size() as usize;
+        let count = (packet.len().saturating_sub(header) / stride).min(PTP_CONTACT_SLOTS);
+        report.contact_count = count as u8;
+        let base = header + format.delta() as usize;
+        for (slot, contact) in report.contacts.iter_mut().take(count).enumerate() {
+            let start = base + slot * stride;
+            // TYPE4 has a two-byte prefix to each finger record. The contact decoders
+            // read only their own fields from the remaining bytes.
+            let finger = packet.get(start..).unwrap_or_default();
+            *contact = decode_contact(finger, slot);
+        }
+    }
+    if report_button
+        && packet
+            .get(format.button() as usize)
+            .is_some_and(|&byte| byte != 0)
+    {
+        report.is_button_clicked = 1;
+    }
+    report
+}
 
 /// Decodes a TYPE1–4 contact from the start of a finger block after any format-specific prefix.
 ///

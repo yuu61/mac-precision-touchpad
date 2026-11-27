@@ -19,9 +19,9 @@
 //! 0 but not above (B19), Y is inverted, contact IDs are slot indices (B18), more than 5 contacts fail the
 //! read (B8), Tip = `major*2 >= 200 || minor*2 >= 150`, Confidence = `minor*2 > 0`.
 
-use bcm5974::input::wellspring_contact;
+use bcm5974::input::{build_usb_report, usb_contact_count, wellspring_contact};
 use ptp_hid::common::PTP_CONTACT_SLOTS;
-use ptp_hid::input::{PTP_REPORT_LEN, PtpReport};
+use ptp_hid::input::PTP_REPORT_LEN;
 
 use crate::config::T2Device;
 use crate::output::OutputMemory;
@@ -69,49 +69,21 @@ fn parse_packet_with_clock<F: FnOnce() -> u16>(
     gates: InputGates,
     scan_time: F,
 ) -> PacketAction {
-    let n = packet.len();
     let format = cfg.profile.tp_type;
-    let header = format.header() as usize;
-    let fsize = format.finger_size() as usize;
-
-    // Length gate. A zero fsize (no table row) would be a division by zero in C; treat it as malformed.
-    let Some(payload) = n.checked_sub(header) else {
+    let Some(raw_count) = usb_contact_count(format, packet.len()) else {
         return PacketAction::Discard;
     };
-    match payload.checked_rem(fsize) {
-        Some(0) => {}
-        _ => return PacketAction::Discard,
-    }
-    let mut raw_n = payload.checked_div(fsize).unwrap_or(0);
-
-    let mut report = PtpReport::EMPTY; // RtlZeroMemory + ReportID 0x05
-
-    if gates.report_touch {
-        // if (raw_n >= PTP_MAX_CONTACT_POINTS) raw_n = PTP_MAX_CONTACT_POINTS;
-        raw_n = raw_n.min(PTP_CONTACT_SLOTS);
-        // size_t arithmetic; raw_n <= 5, so this cannot wrap for any realistic fsize.
-        if raw_n.wrapping_mul(fsize) < payload {
-            return PacketAction::Deliver(ReadReportResult::DataError);
-        }
-        report.contact_count = raw_n as u8; // (UCHAR) raw_n, raw_n <= 5
-
-        // f_base = TouchBuffer + header + tp_delta (int added to a pointer: sign-extended).
-        let f_base = header.wrapping_add(format.delta() as usize);
-        for (i, contact) in report.contacts.iter_mut().enumerate().take(raw_n) {
-            let f = f_base.wrapping_add(i.wrapping_mul(fsize));
-            let finger = packet.get(f..).unwrap_or_default();
-            *contact = wellspring_contact(&cfg.profile, finger, i, Some(150));
-        }
+    if gates.report_touch && raw_count > PTP_CONTACT_SLOTS {
+        return PacketAction::Deliver(ReadReportResult::DataError);
     }
 
-    if gates.report_button {
-        // TouchBuffer[tp_button] (int index, sign-extended); byte 31 < header <= N.
-        let button = packet.get(format.button() as usize).copied().unwrap_or(0);
-        if button != 0 {
-            report.is_button_clicked = 1;
-        }
-    }
-
+    let mut report = build_usb_report(
+        format,
+        packet,
+        gates.report_touch,
+        gates.report_button,
+        |finger, slot| wellspring_contact(&cfg.profile, finger, slot, Some(150)),
+    );
     report.scan_time = scan_time();
     PacketAction::Deliver(ReadReportResult::Report(report.to_bytes()))
 }
