@@ -22,8 +22,8 @@ use std::collections::{BTreeMap, VecDeque};
 
 use amtptp_spikm_core::device::{APPLE_VENDOR_ID, SpiTrackpadInfo, lookup_trackpad};
 use amtptp_spikm_core::runtime::{
-    D0_EXIT_DRAIN_STATUS, DeviceRuntime, DeviceStatus, LowerReadOrigin, RECOVERY_TIMER_DUE_TIME,
-    ReadTicket, ReadTracker,
+    ContactTracker, D0_EXIT_DRAIN_STATUS, DeviceRuntime, DeviceStatus, LowerReadOrigin,
+    RECOVERY_TIMER_DUE_TIME, ReadTicket, ReadTracker,
 };
 use amtptp_spikm_core::status::{NtStatus, STATUS_SUCCESS};
 use amtptp_spikm_core::wire::LOWER_READ_BUFFER_LEN;
@@ -46,6 +46,7 @@ const REWRITTEN: &str = "superseded (SPI-B12/B13, rewritten below)";
 struct Framework {
     rt: DeviceRuntime,
     tracker: ReadTracker<u32>,
+    contacts: ContactTracker,
     trackpad: &'static SpiTrackpadInfo,
     hidq: VecDeque<String>,
     /// Lower reads outstanding at the lower driver, with the ticket stored in their context.
@@ -67,6 +68,7 @@ impl Framework {
         Self {
             rt: DeviceRuntime::new(),
             tracker: ReadTracker::new(),
+            contacts: ContactTracker::new(),
             trackpad: lookup_trackpad(APPLE_VENDOR_ID, 0x0272).expect("0272"),
             hidq: VecDeque::new(),
             inflight: Vec::new(),
@@ -167,6 +169,7 @@ impl Framework {
     /// the lower driver completes them).
     fn suspend(&mut self) {
         let cancelled = self.rt.suspend(&mut self.tracker);
+        self.contacts.reset();
         self.timer_armed = false;
         for read in cancelled.iter() {
             let label = format!("l{read}");
@@ -186,6 +189,7 @@ impl Framework {
         match name {
             "D0Entry" => {
                 self.qpc_calls += 1;
+                self.contacts.reset();
                 format!("{:08x}", self.rt.on_d0_entry(QPC_FREQUENCY) as u32)
             }
             "SelfManagedIoInit" | "SelfManagedIoRestart" => {
@@ -259,12 +263,16 @@ impl Framework {
                     && let Some(up) = self.hidq.pop_front()
                 {
                     let mut q = 0;
-                    let result = self
-                        .rt
-                        .complete_lower_read(self.trackpad, len, &pkt1(), || {
+                    let result = self.rt.complete_lower_read(
+                        self.trackpad,
+                        &mut self.contacts,
+                        len,
+                        &pkt1(),
+                        || {
                             q += 1;
                             QPC_FREQUENCY
-                        });
+                        },
+                    );
                     self.qpc_calls += q;
                     match result {
                         Ok(bytes) => {

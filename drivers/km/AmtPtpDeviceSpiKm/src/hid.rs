@@ -244,6 +244,10 @@ pub(crate) fn set_features(context: &DeviceContext, request: &Request) -> NTSTAT
     let status = context
         .runtime
         .set_feature(packet.reportId, packet.reportBufferLen, report_bytes);
+    if !context.runtime.ptp_settings().effective_reporting().surface_report {
+        // SAFETY: `context` belongs to our live device; IRQL <= DISPATCH_LEVEL.
+        unsafe { context.with_contacts(|_, contacts| contacts.reset()) };
+    }
     tlg::write_event!(
         PROVIDER,
         "SetFeature",

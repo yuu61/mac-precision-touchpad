@@ -142,29 +142,35 @@ fn set_report_byte(
 }
 
 /// `PtpInputOn`, `PtpReportButton` and `PtpReportTouch`, written by `SET_FEATURE` 0x04/0x06. The input
-/// report honours the two selective-reporting switches ([`PtpSettings::selective_reporting`], P3 fix of
-/// SPI-B3: C never read them); `PtpInputOn` is still write-only. Atomics, because `SET_FEATURE` can run
+/// report honours both `PtpInputOn` (`SET_FEATURE` 0x04) and the two selective-reporting switches
+/// (`SET_FEATURE` 0x06) via [`PtpSettings::effective_reporting`]. Atomics, because `SET_FEATURE` can run
 /// concurrently at `DISPATCH_LEVEL` (SPI-B15).
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct PtpSettings {
     input_on: AtomicBool,
     report_button: AtomicBool,
     report_touch: AtomicBool,
 }
 
+impl Default for PtpSettings {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PtpSettings {
-    /// `PtpInputOn` FALSE, as in the zeroed device context, and both selective-reporting switches on
-    /// ([`SelectiveReportBits::POWER_ON`]; C started with them FALSE, which it never read).
+    /// Power-on defaults: `PtpInputOn` TRUE (`SelfManagedIoInit` immediately switches the SPI trackpad
+    /// into multitouch mode) and both selective-reporting switches on ([`SelectiveReportBits::POWER_ON`]).
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            input_on: AtomicBool::new(false),
+            input_on: AtomicBool::new(true),
             report_button: AtomicBool::new(SelectiveReportBits::POWER_ON.button_report),
             report_touch: AtomicBool::new(SelectiveReportBits::POWER_ON.surface_report),
         }
     }
 
-    /// The selective-reporting switches the input report honours.
+    /// The selective-reporting switches configured by `SET_FEATURE` 0x06.
     pub fn selective_reporting(&self) -> SelectiveReportBits {
         SelectiveReportBits {
             surface_report: self.report_touch(),
@@ -172,9 +178,24 @@ impl PtpSettings {
         }
     }
 
-    /// Back to [`SelectiveReportBits::POWER_ON`]: the state is not kept across a power reset, so the
-    /// glue calls this in `PrepareHardware`.
+    /// Effective input gates combining `PtpInputOn` (`SET_FEATURE` 0x04) with
+    /// [`Self::selective_reporting`] (`SET_FEATURE` 0x06). When `PtpInputOn` is FALSE (mouse mode),
+    /// both surface and button reporting are suppressed on the PTP collection.
+    pub fn effective_reporting(&self) -> SelectiveReportBits {
+        if self.input_on() {
+            self.selective_reporting()
+        } else {
+            SelectiveReportBits {
+                surface_report: false,
+                button_report: false,
+            }
+        }
+    }
+
+    /// Resets `PtpInputOn` and both selective-reporting switches back to power-on enabled state
+    /// (`PrepareHardware`).
     pub fn reset_selective_reporting(&self) {
+        self.input_on.store(true, Ordering::Relaxed);
         self.store_selective_reporting(SelectiveReportBits::POWER_ON);
     }
 
@@ -295,12 +316,22 @@ mod tests {
     }
 
     #[test]
-    fn set_mode_short_report_reads_zero() {
+    fn set_mode_short_report_reads_zero_and_gates_effective_reporting() {
         let s = PtpSettings::new();
-        assert_eq!(s.set_feature(4, 2, Some(&[4, 3])), STATUS_SUCCESS);
         assert!(s.input_on());
+        assert_eq!(s.effective_reporting(), SelectiveReportBits::POWER_ON);
         // reportBufferLen 1: byte 1 is past the report and reads as 0 = mouse mode.
         assert_eq!(s.set_feature(4, 1, Some(&[4])), STATUS_SUCCESS);
         assert!(!s.input_on());
+        assert_eq!(
+            s.effective_reporting(),
+            SelectiveReportBits {
+                surface_report: false,
+                button_report: false,
+            }
+        );
+        assert_eq!(s.set_feature(4, 2, Some(&[4, 3])), STATUS_SUCCESS);
+        assert!(s.input_on());
+        assert_eq!(s.effective_reporting(), SelectiveReportBits::POWER_ON);
     }
 }

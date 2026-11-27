@@ -25,6 +25,7 @@
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
+pub use ptp_hid::contact_tracker::ContactTracker;
 use ptp_hid::input::SPI_PTP_REPORT_LEN;
 pub use ptp_hid::read_tracker::{
     LowerReadOrigin, MAX_IN_FLIGHT_READS, ReadTicket, ReadTracker, SuspendedReads,
@@ -311,15 +312,11 @@ impl DeviceRuntime {
     ///   ([`check_declared_fingers`]), else `Err(STATUS_DEVICE_DATA_ERROR)` without sampling the clock
     ///   (P3: C read missing fingers as 0 or as stale lookaside bytes). Pass only memory that is
     ///   initialized.
+    /// - `contacts`: per-device [`ContactTracker`] maintaining stable `ContactID`s and liftoff frames.
     /// - `query_counter`: samples the QPC counter once after the length gate.
     ///
-    /// On success the 30 report bytes are returned, honouring the selective-reporting switches. The glue
-    /// then
-    /// does `WdfRequestRetrieveOutputMemory` + `WdfMemoryCopyFromBuffer(mem, 0, bytes, 30)` (either failing
-    /// completes with that status, Information 0), `WdfRequestSetInformation(30)` and completes with
-    /// `STATUS_SUCCESS`. On `Err(status)` it completes with `status`. Either way it then deletes the lower
-    /// request and its memory (reading the memory handle **before** deleting the request: P2 fix of the
-    /// use-after-free SPI-B10).
+    /// On success the 30 report bytes are returned, honouring `PtpInputOn` and the selective-reporting
+    /// switches ([`PtpSettings::effective_reporting`]).
     ///
     /// # Errors
     /// Returns `STATUS_DEVICE_DATA_ERROR` if the reported length is shorter than the packet header or
@@ -327,6 +324,7 @@ impl DeviceRuntime {
     pub fn complete_lower_read<F: FnOnce() -> i64>(
         &self,
         trackpad: &SpiTrackpadInfo,
+        contacts: &mut ContactTracker,
         information: u64,
         buffer: &[u8],
         query_counter: F,
@@ -339,7 +337,8 @@ impl DeviceRuntime {
             &packet,
             trackpad,
             scan_time,
-            self.ptp.selective_reporting(),
+            self.ptp.effective_reporting(),
+            contacts,
         ))
     }
 
@@ -490,10 +489,11 @@ mod tests {
 
         let rt = DeviceRuntime::new();
         let tp = SPI_MODELS[0].trackpad;
+        let mut contacts = ContactTracker::new();
 
         // Below 46: STATUS_DEVICE_DATA_ERROR, reporting clock not sampled.
         let mut queried = false;
-        let short = rt.complete_lower_read(&tp, 45, &[], || {
+        let short = rt.complete_lower_read(&tp, &mut contacts, 45, &[], || {
             queried = true;
             7
         });
@@ -503,13 +503,13 @@ mod tests {
 
         // No buffer at all: the header is missing, so the frame is rejected too.
         assert_eq!(
-            rt.complete_lower_read(&tp, 46, &[], || 0),
+            rt.complete_lower_read(&tp, &mut contacts, 46, &[], || 0),
             Err(STATUS_DEVICE_DATA_ERROR)
         );
 
         // A zeroed 46-byte header: SUCCESS with the all-zero report (05, no contacts, ContactCount 0,
         // button 0); ScanTime starts at zero in this reporting session.
-        let report = rt.complete_lower_read(&tp, 46, &[0; 46], || 0);
+        let report = rt.complete_lower_read(&tp, &mut contacts, 46, &[0; 46], || 0);
         assert_eq!(report, Ok(SpiPtpReport::EMPTY.to_bytes()));
         assert_eq!(
             report.ok().and_then(|bytes| bytes.first().copied()),
