@@ -9,14 +9,13 @@
 #![cfg(test)]
 
 mod common;
-#[path = "../../bcm5974/tests/support/mt2.rs"]
-mod mt2;
 
 use amtptp_hidfilter_core::{
     Bcm5974Param, DeviceSnapshot, DeviceState, HID_VID_APPLE_USB, REPORT_BUFFER_SIZE, ReadTicket,
     STATUS_SUCCESS, complete_lower_read, multitouch_report_id,
 };
 use common::*;
+use ptp_hid::common::MAX_FINGERS;
 use ptp_hid::input::{PTP_REPORT_LEN, PTP_REPORT_SCAN_TIME_OFFSET};
 
 const OUTMEM_P2: &str = "P2-fixed: upper completed with RetrieveOutputMemory status (HF-B9)";
@@ -129,6 +128,60 @@ fn run(r: &Rec, snap: &DeviceSnapshot, tail: u8) -> Outcome {
     }
 }
 
+/// Independent Step 2 specification for frame-0 Magic Trackpad 2 report encoding over `snap`.
+fn expected_frame0_mt2_report(
+    snap: &DeviceSnapshot,
+    packet: &[u8],
+    rinfo: usize,
+) -> [u8; PTP_REPORT_LEN] {
+    let mut report = [0_u8; PTP_REPORT_LEN];
+    report[0] = 0x05;
+    let byte_at = |base: Option<usize>, off: usize| -> u8 {
+        base.and_then(|b| b.checked_add(off))
+            .and_then(|i| (i < rinfo).then(|| packet.get(i).copied().unwrap_or(0)))
+            .unwrap_or(0)
+    };
+    report[49] = byte_at(Some(snap.input_button_delta), 0) & 1;
+
+    let raw_count = rinfo
+        .checked_sub(snap.input_header_size)
+        .and_then(|p| p.checked_div(snap.input_finger_size))
+        .unwrap_or(0)
+        .min(usize::from(MAX_FINGERS));
+    let first = snap.input_header_size.checked_add(snap.input_finger_delta);
+    let signed13 = |bits: u32| (bits & 0xfff) as i32 - (bits & 0x1000) as i32;
+    let mut seen_ids = 0_u16;
+    let mut count = 0_usize;
+
+    for i in 0..raw_count {
+        let base = first.and_then(|f| f.checked_add(i.checked_mul(snap.input_finger_size)?));
+        let mut rec = [0_u8; 9];
+        for (j, b) in rec.iter_mut().enumerate() {
+            *b = byte_at(base, j);
+        }
+        let coords = u32::from_le_bytes([rec[0], rec[1], rec[2], rec[3]]);
+        let x = signed13(coords).saturating_sub(snap.x.min).clamp(0, 7612) as u16;
+        let y = (-signed13(coords >> 13))
+            .saturating_sub(snap.y.min)
+            .clamp(0, 5065) as u16;
+        let tip = rec[4] > 0;
+        let conf = rec[5] <= 172;
+        let id = u32::from(rec[8] & 0x0f);
+        if !tip || (seen_ids & (1 << id)) != 0 || count >= 5 {
+            continue;
+        }
+        seen_ids |= 1 << id;
+        let off = 1 + 9 * count;
+        report[off] = u8::from(conf) | 0x02;
+        report[off + 1..off + 5].copy_from_slice(&id.to_le_bytes());
+        report[off + 5..off + 7].copy_from_slice(&x.to_le_bytes());
+        report[off + 7..off + 9].copy_from_slice(&y.to_le_bytes());
+        count += 1;
+    }
+    report[48] = count as u8;
+    report
+}
+
 fn replay(file: &str, fam: &str, total: usize, acts: &[(&str, usize)]) {
     let recs = load(file);
     assert_eq!(recs.len(), total);
@@ -181,13 +234,9 @@ fn replay(file: &str, fam: &str, total: usize, acts: &[(&str, usize)]) {
                 let (s, info) = a.completed.expect("completed");
                 assert_eq!(st(s), r.get("status"), "{}", r.case());
                 assert_eq!(info as i128, r.num("info"), "{}", r.case());
-                // `out` has the C-uninitialised bits as 0; the port zero-initialises (HF-B4).
-                let mut expected = r.bytes("out");
-                expected[PTP_REPORT_SCAN_TIME_OFFSET..PTP_REPORT_SCAN_TIME_OFFSET + 2]
-                    .copy_from_slice(&0_u16.to_le_bytes());
                 let packet = r.bytes("in");
-                let records = &packet[snap.input_header_size + snap.input_finger_delta..];
-                mt2::correct_coordinates(&mut expected, records);
+                let rinfo = usize::try_from(r.num("rinfo")).expect("rinfo");
+                let expected = expected_frame0_mt2_report(&snap, &packet, rinfo);
                 assert_eq!(a.buf[..PTP_REPORT_LEN], expected, "{}", r.case());
                 assert!(a.buf[50..].iter().all(|&x| x == 0xEE), "{}", r.case());
                 if r.get("undef").bytes().any(|c| c != b'0') {

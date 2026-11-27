@@ -145,8 +145,12 @@ fn expected<'a>(r: &'a Rec, recs: &'a [Rec]) -> Expected<'a> {
             .find(|x| x.case() == format!("resume-{cfg}"))
             .expect("matching resume record");
         assert_eq!(resume.get("st_in"), r.get("st_in"), "{case}: same start state");
-        // PrepareHardware also turns both selective-reporting switches back on.
-        let st_out = with_state(&with_state(resume.get("st_out"), "touch", "1"), "btn", "1");
+        // PrepareHardware also restores input mode and both selective-reporting switches to on.
+        let st_out = with_state(
+            &with_state(&with_state(resume.get("st_out"), "inp_on", "1"), "touch", "1"),
+            "btn",
+            "1",
+        );
         return Expected {
             ret: resume.get("ret").to_owned(),
             events: with_status_reads(&events(resume), 0),

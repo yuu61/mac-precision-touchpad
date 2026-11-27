@@ -6,9 +6,10 @@
 //! the C outcome of every successful multitouch packet, and [`build_report`] then parses up to five
 //! 9-byte finger records.
 
-use ptp_hid::common::{PTP_CONTACT_SLOTS, PTP_MAX_CONTACT_POINTS};
+use ptp_hid::common::{MAX_FINGERS, PTP_CONTACT_SLOTS, PTP_MAX_CONTACT_POINTS};
+use ptp_hid::contact_tracker::ContactTracker;
 use ptp_hid::feature::SelectiveReportBits;
-use ptp_hid::input::{PTP_REPORT_LEN, PtpReport};
+use ptp_hid::input::{PTP_REPORT_LEN, PtpContact, PtpReport};
 
 use crate::device::{HID_VID_APPLE_USB, is_apple_vendor};
 use crate::status::{NtStatus, nt_success};
@@ -152,37 +153,23 @@ fn byte_at(buffer: &[u8], base: Option<usize>, offset: usize) -> u8 {
         .unwrap_or(0)
 }
 
-/// Builds the 50-byte `PTP_REPORT` for a [`LowerReadClass::Report`] packet (Input.c:182-223).
-///
-/// `buffer` is the lower read's output buffer. Finger `i` (i < [`contact_count`]) is read at
-/// `header_size + finger_delta + i * finger_size`, and the button is bit 0 of
-/// `buffer[button_delta]`. Bytes C would read outside `buffer` read as 0. Unused contact slots and the
-/// contact padding bits are zero (C leaves them uninitialised, HF-B4, fixed).
+const MAX_RAW_MT2_FINGERS: usize = MAX_FINGERS as usize;
+
+/// Decodes up to 16 raw Magic Trackpad 2 finger records and the button bit from `buffer`.
 #[must_use]
-pub fn build_report(
+pub(crate) fn decode_raw_packet(
     layout: &InputLayout,
     length: usize,
     buffer: &[u8],
-    scan_time: u16,
-    selective: SelectiveReportBits,
-) -> [u8; PTP_REPORT_LEN] {
-    // Selective reporting (P3 fix of HF-B20): no contacts with the surface switch off, no button with
-    // the button switch off.
-    let count = if selective.surface_report {
-        contact_count(layout, length)
-    } else {
-        0
-    };
-    let mut report = PtpReport {
-        scan_time,
-        contact_count: count,
-        ..PtpReport::EMPTY
-    };
+) -> ([PtpContact; MAX_RAW_MT2_FINGERS], usize, bool) {
+    let raw_count = length
+        .checked_sub(layout.header_size)
+        .and_then(|p| p.checked_div(layout.finger_size))
+        .unwrap_or(0)
+        .min(MAX_RAW_MT2_FINGERS);
+    let mut contacts = [PtpContact::EMPTY; MAX_RAW_MT2_FINGERS];
     let first = layout.header_size.checked_add(layout.finger_delta);
-    for (i, slot) in report.contacts.iter_mut().enumerate() {
-        if i >= usize::from(count) {
-            break;
-        }
+    for (i, slot) in contacts.iter_mut().take(raw_count).enumerate() {
         let base = first.and_then(|f| {
             let o = i.checked_mul(layout.finger_size)?;
             f.checked_add(o)
@@ -193,10 +180,48 @@ pub fn build_report(
         }
         *slot = parse_finger(&record, layout.x_min, layout.y_min);
     }
-    if selective.button_report && byte_at(buffer, Some(layout.button_delta), 0) & 1 != 0 {
-        report.is_button_clicked = 1;
+    let button_pressed = byte_at(buffer, Some(layout.button_delta), 0) & 1 != 0;
+    (contacts, raw_count, button_pressed)
+}
+
+/// Assembles a tracked 50-byte `PTP_REPORT` from decoded Magic Trackpad 2 observations using
+/// `contacts` for persistent hardware-ID tracking and 1-frame `TipSwitch = 0` liftoff synthesis.
+#[must_use]
+pub(crate) fn finish_tracked_report(
+    decoded: &[PtpContact],
+    button_pressed: bool,
+    scan_time: u16,
+    selective: SelectiveReportBits,
+    contacts: &mut ContactTracker,
+) -> [u8; PTP_REPORT_LEN] {
+    let mut report = PtpReport {
+        scan_time,
+        is_button_clicked: u8::from(selective.button_report && button_pressed),
+        ..PtpReport::EMPTY
+    };
+    if selective.surface_report {
+        let tracked = contacts.update_hardware_ids(decoded);
+        report.contacts = tracked.contacts;
+        report.contact_count = tracked.count;
+    } else {
+        contacts.reset();
     }
     report.to_bytes()
+}
+
+/// Builds a tracked 50-byte `PTP_REPORT` for a [`LowerReadClass::Report`] packet using `contacts`.
+#[must_use]
+pub fn build_report(
+    layout: &InputLayout,
+    length: usize,
+    buffer: &[u8],
+    scan_time: u16,
+    selective: SelectiveReportBits,
+    contacts: &mut ContactTracker,
+) -> [u8; PTP_REPORT_LEN] {
+    let (decoded, count, button_pressed) = decode_raw_packet(layout, length, buffer);
+    let slice = decoded.get(..count).unwrap_or_default();
+    finish_tracked_report(slice, button_pressed, scan_time, selective, contacts)
 }
 
 const _: () = assert!(PTP_MAX_CONTACT_POINTS as usize == PTP_CONTACT_SLOTS);

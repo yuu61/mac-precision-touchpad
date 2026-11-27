@@ -8,7 +8,7 @@ use core::ffi::c_void;
 use core::ptr::null_mut;
 use core::sync::atomic::{AtomicPtr, Ordering};
 
-use amtptp_hidfilter_core::{DeviceState, ReadTicket, ReadTracker};
+use amtptp_hidfilter_core::{ContactTracker, DeviceState, ReadTicket, ReadTracker};
 use wdf_support::declare_context_type;
 use wdf_support::handle::{ContextPtr, WdfHandle};
 use wdf_support::sync::SpinLocked;
@@ -100,6 +100,9 @@ pub(crate) struct DeviceContext {
     /// The lower reads in flight and their epoch (not in C, see `amtptp_hidfilter_core::FilterIo::
     /// with_reads`). The spin lock is created in `create_device`, before any callback can run.
     pub(crate) reads: SpinLocked<ReadTracker<LowerRead>>,
+    /// Active hardware-ID contacts and liftoff state, protected by a spin lock created in
+    /// `create_device`.
+    pub(crate) contacts: SpinLocked<ContactTracker>,
     /// The data source's strings (not in C). The spin lock is created in `create_device`.
     pub(crate) strings: SpinLocked<SourceStrings>,
     /// The link the interface notification found, for the source work item (not in C). The spin
@@ -128,6 +131,7 @@ impl DeviceContext {
             hid_transport_recovery_timer: AtomicPtr::new(null_mut()),
             hid_transport_recovery_work_item: AtomicPtr::new(null_mut()),
             reads: SpinLocked::new(ReadTracker::new()),
+            contacts: SpinLocked::new(ContactTracker::new()),
             strings: SpinLocked::new(SourceStrings::UNKNOWN),
             pending_link: SpinLocked::new(PendingLink {
                 units: [0; MAX_LINK_UNITS],

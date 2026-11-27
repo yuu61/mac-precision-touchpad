@@ -13,6 +13,7 @@
 //!
 //! Handles are `Copy` associated types (WDF handles in the glue). None of the methods may panic.
 
+use ptp_hid::contact_tracker::ContactTracker;
 use ptp_hid::read_tracker::{ReadTicket, ReadTracker};
 
 use crate::device::XferBuffer;
@@ -154,6 +155,9 @@ pub trait FilterIo {
     /// tracker behind a `WDFSPINLOCK`: `f` runs at `DISPATCH_LEVEL` and only touches the tracker (and
     /// atomics), never a request.
     fn with_reads<R, F: FnOnce(&mut ReadTracker<Self::LowerRead>) -> R>(&mut self, f: F) -> R;
+    /// Runs `f` on the device's [`ContactTracker`] while holding its spin lock. `f` runs at
+    /// `DISPATCH_LEVEL` and performs only pure contact-tracking updates or resets.
+    fn with_contacts<R, F: FnOnce(&mut ContactTracker) -> R>(&mut self, f: F) -> R;
     /// `D0Exit` (not in C, P3 fix of HF-B14): under the tracker's lock, [`ReadTracker::suspend`] (a new
     /// epoch; the completion of every read sent before is stale) and `WdfObjectReference` each read it
     /// hands out; then, outside the lock, `WdfRequestCancelSentRequest` and `WdfObjectDereference` each

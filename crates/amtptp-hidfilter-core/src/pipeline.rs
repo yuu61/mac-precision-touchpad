@@ -18,7 +18,9 @@ use ptp_hid::read_tracker::{LowerReadOrigin, ReadTicket};
 
 use crate::config::{MAX_IMMEDIATE_READ_RETRIES, TRANSPORT_RETRY_DUE_TIME};
 use crate::device::DeviceState;
-use crate::input::{InputLayout, LowerReadClass, build_report, classify_lower_read};
+use crate::input::{
+    InputLayout, LowerReadClass, classify_lower_read, decode_raw_packet, finish_tracked_report,
+};
 use crate::io::{FailedAction, FilterIo};
 use crate::pnp::configure_multitouch;
 use crate::status::{NtStatus, nt_success};
@@ -214,13 +216,15 @@ fn deliver_report<P: FilterIo>(
         return;
     };
     let scan_time = state.scan_clock.sample(io.query_performance_counter());
-    let report: [u8; PTP_REPORT_LEN] = build_report(
-        layout,
-        length,
-        io.lower_read_buffer(memory),
-        scan_time,
-        state.selective_reporting(),
-    );
+    let (decoded, count, button_pressed) = {
+        let buffer = io.lower_read_buffer(memory);
+        decode_raw_packet(layout, length, buffer)
+    };
+    let selective = state.effective_reporting();
+    let slice = decoded.get(..count).unwrap_or_default();
+    let report: [u8; PTP_REPORT_LEN] = io.with_contacts(|contacts| {
+        finish_tracked_report(slice, button_pressed, scan_time, selective, contacts)
+    });
     let upper_memory = match io.retrieve_output_memory(upper) {
         Ok(m) => m,
         Err(status) => {

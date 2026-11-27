@@ -1,9 +1,11 @@
-//! The golden vectors of the porting spec (`specs/hidfilter.md`, Appendix A.4 and D.1-D.6).
+//! The golden vectors of the porting spec (`specs/hidfilter.md`, Appendix A.4 and D.1-D.6),
+//! updated for Step 2 descriptor cleanup, `ContactTracker` hardware-ID liftoff synthesis, and
+//! `SET_FEATURE 0x04` input-mode gating.
 
 #![cfg(test)]
 
-use ptp_hid::feature::SelectiveReportBits;
 use amtptp_hidfilter_core::*;
+use ptp_hid::feature::SelectiveReportBits;
 
 const BT: InputLayout = InputLayout {
     header_size: 4,
@@ -26,7 +28,6 @@ fn h(s: &str) -> Vec<u8> {
 
 #[test]
 fn d1_single_finger() {
-    // (raw bytes, x, y, contact id, tip, confidence)
     let rows: [(&str, u16, u16, u32, bool, bool); 10] = [
         ("00 00 00 00 0a 0a 00 00 01", 3678, 2479, 1, true, true),
         ("64 00 19 00 0a 0a 00 00 02", 3778, 2279, 2, true, true),
@@ -47,7 +48,6 @@ fn d1_single_finger() {
             (x, y, id, tip, conf),
             "{raw}"
         );
-        // Bits 26-31, bytes 6-7 and the high nibble of byte 8 must not matter.
         let mut g = f;
         g[3] |= 0xFC;
         g[6] = 0x5A;
@@ -80,20 +80,37 @@ fn d2_whole_bt_packet() {
         classify_lower_read(0x004C, &BT, STATUS_SUCCESS, 58, buffer.first().copied()),
         LowerReadClass::Report { length: 58 }
     );
-    assert_eq!(build_report(&BT, 58, &buffer, 0, SelectiveReportBits::POWER_ON).to_vec(), expected);
+    assert_eq!(
+        build_report(
+            &BT,
+            58,
+            &buffer,
+            0,
+            SelectiveReportBits::POWER_ON,
+            &mut ContactTracker::new(),
+        )
+        .to_vec(),
+        expected
+    );
 }
 
-/// `SET_FEATURE` 0x06 `[06, bits]` for each combination, then a one-contact Bluetooth packet with the
-/// button down; `PrepareHardware` restores both switches.
 #[test]
 fn selective_reporting_shapes_the_input_report() {
     let packet = h("31 01 00 00 00 00 00 00 14 14 00 00 00");
     let mut buffer = vec![0_u8; REPORT_BUFFER_SIZE];
     buffer[..packet.len()].copy_from_slice(&packet);
     let state = DeviceState::new();
+    let mut tracker = ContactTracker::new();
     for (bits, contacts, button) in [(0_u8, 0_u8, 0_u8), (1, 1, 0), (2, 0, 1), (3, 1, 1)] {
         state.apply_feature_change(decode_set_feature(0x06, &[0x06, bits]).unwrap());
-        let r = build_report(&BT, packet.len(), &buffer, 0, state.selective_reporting());
+        let r = build_report(
+            &BT,
+            packet.len(),
+            &buffer,
+            0,
+            state.effective_reporting(),
+            &mut tracker,
+        );
         assert_eq!((r[48], r[49]), (contacts, button), "switch byte {bits}");
         if contacts == 0 {
             assert!(r[1..46].iter().all(|&b| b == 0), "no contact data");
@@ -101,6 +118,103 @@ fn selective_reporting_shapes_the_input_report() {
     }
     assert_eq!(prepare_hardware(&state), STATUS_SUCCESS);
     assert_eq!(state.selective_reporting(), SelectiveReportBits::POWER_ON);
+}
+
+#[test]
+fn input_mode_0x04_gates_hidfilter_delivery() {
+    let packet = h("31 01 00 00 00 00 00 00 14 14 00 00 00");
+    let mut buffer = vec![0_u8; REPORT_BUFFER_SIZE];
+    buffer[..packet.len()].copy_from_slice(&packet);
+    let state = DeviceState::new();
+    let mut tracker = ContactTracker::new();
+
+    // Fresh DeviceState starts in PTP mode (ptp_input_on = true).
+    let r_on = build_report(
+        &BT,
+        packet.len(),
+        &buffer,
+        0,
+        state.effective_reporting(),
+        &mut tracker,
+    );
+    assert_eq!((r_on[48], r_on[49]), (1, 1));
+    assert!(tracker.has_active_contacts());
+
+    // SET_FEATURE 0x04 mode 0 (mouse collection) suppresses both surface and button and resets contacts.
+    state.apply_feature_change(decode_set_feature(0x04, &[0x04, 0x00]).unwrap());
+    let r_off = build_report(
+        &BT,
+        packet.len(),
+        &buffer,
+        0,
+        state.effective_reporting(),
+        &mut tracker,
+    );
+    assert_eq!((r_off[48], r_off[49]), (0, 0));
+    assert!(!tracker.has_active_contacts());
+
+    // PrepareHardware restores ptp_input_on = true.
+    assert_eq!(prepare_hardware(&state), STATUS_SUCCESS);
+    assert_eq!(state.effective_reporting(), SelectiveReportBits::POWER_ON);
+}
+
+#[test]
+fn mt2_hardware_id_tracking_and_liftoff_synthesis() {
+    let mut tracker = ContactTracker::new();
+
+    // Pre-touch hover (touch_major = 0) produces ContactCount = 0.
+    let hover = h("31 00 00 00 00 00 00 00 00 14 00 00 07");
+    let r0 = build_report(
+        &BT,
+        hover.len(),
+        &hover,
+        0,
+        SelectiveReportBits::POWER_ON,
+        &mut tracker,
+    );
+    assert_eq!(r0[48], 0);
+
+    // Two contacts touch down: ID 7 (normal) and ID 12 (palm: minor = 0xad > 0xac -> Confidence = 0).
+    let down = h("31 00 00 00
+        00 00 00 00 14 14 00 00 07
+        64 00 19 00 14 ad 00 00 0c");
+    let r1 = build_report(
+        &BT,
+        down.len(),
+        &down,
+        10,
+        SelectiveReportBits::POWER_ON,
+        &mut tracker,
+    );
+    assert_eq!(r1[48], 2);
+    assert_eq!((r1[1], r1[2]), (0x03, 7));
+    assert_eq!((r1[10], r1[11]), (0x02, 12));
+
+    // ID 7 disappears implicitly while ID 12 shrinks (Confidence must stay latched 0!) and lifts explicitly.
+    let lift = h("31 00 00 00 64 00 19 00 00 14 00 00 0c");
+    let r2 = build_report(
+        &BT,
+        lift.len(),
+        &lift,
+        20,
+        SelectiveReportBits::POWER_ON,
+        &mut tracker,
+    );
+    assert_eq!(r2[48], 2);
+    assert_eq!((r2[1], r2[2]), (0x01, 7), "ID 7 implicit liftoff (Confidence=1, TipSwitch=0)");
+    assert_eq!((r2[10], r2[11]), (0x00, 12), "ID 12 explicit liftoff keeps Confidence=0 latched");
+
+    // Subsequent empty header emits ContactCount = 0.
+    let empty = h("31 00 00 00");
+    let r3 = build_report(
+        &BT,
+        empty.len(),
+        &empty,
+        30,
+        SelectiveReportBits::POWER_ON,
+        &mut tracker,
+    );
+    assert_eq!(r3[48], 0);
 }
 
 #[test]
@@ -118,8 +232,11 @@ fn d3_length_classification() {
         (USB, 21, report(21)),
         (USB, 11, LowerReadClass::Malformed),
     ] {
-        // Each layout with its transport's vendor ID and multitouch report ID.
-        let (vendor, report_id) = if layout == USB { (0x05AC, 0x02) } else { (0x004C, 0x31) };
+        let (vendor, report_id) = if layout == USB {
+            (0x05AC, 0x02)
+        } else {
+            (0x004C, 0x31)
+        };
         assert_eq!(
             classify_lower_read(vendor, &layout, STATUS_SUCCESS, info, Some(report_id)),
             class,
@@ -129,11 +246,16 @@ fn d3_length_classification() {
     assert_eq!(contact_count(&BT, 4), 0);
     assert_eq!(contact_count(&BT, 13), 1);
     assert_eq!(contact_count(&BT, 58), 5);
-    // BT length 4 with buf[1] bit 0 set: ContactCount 0, button 1.
-    let r = build_report(&BT, 4, &[0x31, 0x01, 0, 0], 0, SelectiveReportBits::POWER_ON);
+    let r = build_report(
+        &BT,
+        4,
+        &[0x31, 0x01, 0, 0],
+        0,
+        SelectiveReportBits::POWER_ON,
+        &mut ContactTracker::new(),
+    );
     assert_eq!((r[48], r[49]), (0, 1));
 }
-
 
 #[test]
 fn d5_feature_requests() {
@@ -163,7 +285,11 @@ fn d5_feature_requests() {
         decode_set_feature(0x04, &[0x04, 0x05]),
         Ok(FeatureChange::None)
     );
-    for (byte, button, touch) in [(0x03_u8, true, true), (0x02, true, false), (0x01, false, true)] {
+    for (byte, button, touch) in [
+        (0x03_u8, true, true),
+        (0x02, true, false),
+        (0x01, false, true),
+    ] {
         state.apply_feature_change(decode_set_feature(0x06, &[0x06, byte]).unwrap());
         let s = state.snapshot();
         assert_eq!((s.ptp_report_button, s.ptp_report_touch), (button, touch));

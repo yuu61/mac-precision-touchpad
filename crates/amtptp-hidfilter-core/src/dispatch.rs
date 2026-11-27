@@ -194,6 +194,9 @@ fn set_feature<P: FilterIo>(
     match decoded {
         Ok(change) => {
             state.apply_feature_change(change);
+            if !state.effective_reporting().surface_report {
+                io.with_contacts(ptp_hid::contact_tracker::ContactTracker::reset);
+            }
             STATUS_SUCCESS
         }
         Err(status) => status,
