@@ -5,7 +5,8 @@
 use amtptp_spikm_core::descriptors::{
     HID_DESCRIPTOR, REPORT_DESCRIPTOR_F1, REPORT_DESCRIPTOR_F1_TOUCHSCREEN, REPORT_DESCRIPTOR_F2,
     REPORT_DESCRIPTOR_F2_TOUCHSCREEN, REPORT_DESCRIPTOR_F3A, REPORT_DESCRIPTOR_F3A_TOUCHSCREEN,
-    REPORT_DESCRIPTOR_F3B, REPORT_DESCRIPTOR_F3B_TOUCHSCREEN, device_attributes,
+    REPORT_DESCRIPTOR_F3B, REPORT_DESCRIPTOR_F3B_TOUCHSCREEN, REPORT_DESCRIPTOR_LEN,
+    device_attributes,
 };
 use amtptp_spikm_core::device::{
     APPLE_VENDOR_ID, DeviceConfig, Family, ReportType, family_for_product, lookup_trackpad,
@@ -15,9 +16,13 @@ use amtptp_spikm_core::input::{SpiPacket, build_report, lower_read_length};
 use amtptp_spikm_core::runtime::{DeviceRuntime, ReadTracker};
 use amtptp_spikm_core::status::*;
 use amtptp_spikm_core::wire::{POOL_TAG, SetStatePacket};
-use ptp_hid::descriptor::{SPI_CONTACT_ID_LOGICAL_MAX, SPI_CONTACT_ID_MAX_OFFSETS};
-use ptp_hid::feature::SelectiveReportBits;
 use core::fmt::Write as _;
+use ptp_hid::common::{MAX_FINGERS, PTP_COLLECTION_WINDOWS};
+use ptp_hid::descriptor::{
+    FINGER_COLLECTION_SPI_LEN, FINGER_SEPARATOR_LEN, GLOBAL_RESET, SPI_CONTACT_ID_LOGICAL_MAX,
+    SPI_CONTACT_ID_MAX_OFFSETS, TOUCHPAD_TLC_HEADER_LEN,
+};
+use ptp_hid::feature::SelectiveReportBits;
 
 /// Minimal SHA-256 (FIPS 180-4) for checking the spec's descriptor hashes.
 fn sha256(data: &[u8]) -> String {
@@ -160,47 +165,81 @@ fn sha256_self_test() {
 
 #[test]
 fn report_descriptor_hashes_spec_5_1() {
-    let table: [(&[u8; 501], &str); 8] = [
+    let table: [(&[u8; REPORT_DESCRIPTOR_LEN], bool, &str); 8] = [
         (
             &REPORT_DESCRIPTOR_F1,
+            true,
             "21a4d11df641c918bbe5b9718c7b054f6d399b21d4296b81bd3e9f85cc617cd3",
         ),
         (
             &REPORT_DESCRIPTOR_F1_TOUCHSCREEN,
+            true,
             "868c9d50ac9ca620a578e717daf8dfb215086e83e8bf175851b712a6f809b1aa",
         ),
         (
             &REPORT_DESCRIPTOR_F2,
+            false,
             "5dab7a973382bbada6cedb4c47e0f1d7bc2d72d263ed5fd86545f96f2f8c9a3f",
         ),
         (
             &REPORT_DESCRIPTOR_F2_TOUCHSCREEN,
+            false,
             "d4d5f0b8146fa01c0421653fff153cee5ff73679576546a1e8378f44cf479bbe",
         ),
         (
             &REPORT_DESCRIPTOR_F3A,
+            false,
             "fb0db27b1cdf967200ffd68b01005a15ffcebfd0e2786f8dba7bd163b324fcf9",
         ),
         (
             &REPORT_DESCRIPTOR_F3A_TOUCHSCREEN,
+            false,
             "28d6043da39c1cc339b20f49f20059f5bf91c32573ca74c25b9fa865e01582bf",
         ),
         (
             &REPORT_DESCRIPTOR_F3B,
+            false,
             "31cd97cce4b5bfafc67bb490a1b3d2f2cf0d573c03e811181e2e7b424490361b",
         ),
         (
             &REPORT_DESCRIPTOR_F3B_TOUCHSCREEN,
+            false,
             "976e5046059319cf83acb73000237753a9d2e74e52f5f73da65b5f74b16359d7",
         ),
     ];
-    for (desc, hash) in table {
-        // The spec hashes are of the C bytes, whose contact-ID logical maximum is 3 (the port declares 4).
-        let mut c_bytes = desc.to_vec();
+    for (desc, is_f1, hash) in table {
+        let mut patched = desc.to_vec();
         for offset in SPI_CONTACT_ID_MAX_OFFSETS {
-            assert_eq!(c_bytes[offset], SPI_CONTACT_ID_LOGICAL_MAX);
-            c_bytes[offset] = 3;
+            assert_eq!(patched[offset], SPI_CONTACT_ID_LOGICAL_MAX);
+            patched[offset] = 3;
         }
+        let step = FINGER_COLLECTION_SPI_LEN + FINGER_SEPARATOR_LEN;
+        if is_f1 {
+            for finger in 0..5 {
+                let y_max_off = TOUCHPAD_TLC_HEADER_LEN + finger * step + 54;
+                assert_eq!(&patched[y_max_off..y_max_off + 2], &6217_u16.to_le_bytes());
+                patched[y_max_off..y_max_off + 2].copy_from_slice(&7855_u16.to_le_bytes());
+            }
+        }
+        let f3_reset = TOUCHPAD_TLC_HEADER_LEN
+            + 2 * step
+            + (FINGER_COLLECTION_SPI_LEN - 1 - GLOBAL_RESET.len());
+        let f5_reset = TOUCHPAD_TLC_HEADER_LEN
+            + 4 * step
+            + (FINGER_COLLECTION_SPI_LEN - 1 - GLOBAL_RESET.len());
+        let tail_start =
+            TOUCHPAD_TLC_HEADER_LEN + 5 * FINGER_COLLECTION_SPI_LEN + 4 * FINGER_SEPARATOR_LEN;
+        let scan_time_reset = tail_start + 21;
+        let input_mode_max_offset = tail_start + 88 + 17;
+        assert_eq!(patched[input_mode_max_offset], PTP_COLLECTION_WINDOWS);
+
+        let mut c_bytes = Vec::with_capacity(501);
+        c_bytes.extend_from_slice(&patched[..f3_reset]);
+        c_bytes.extend_from_slice(&patched[f3_reset + 6..f5_reset]);
+        c_bytes.extend_from_slice(&patched[f5_reset + 6..scan_time_reset]);
+        c_bytes.extend_from_slice(&patched[scan_time_reset + 6..input_mode_max_offset]);
+        c_bytes.push(MAX_FINGERS);
+        c_bytes.extend_from_slice(&patched[input_mode_max_offset + 1..]);
         assert_eq!(sha256(&c_bytes), hash);
     }
 }
@@ -216,7 +255,6 @@ fn hqa_blob_hash() {
 
 #[test]
 fn appendix_a_head_and_family_patches() {
-    // Appendix A row 0000 and the end of the descriptor.
     assert_eq!(
         REPORT_DESCRIPTOR_F1[..16],
         [
@@ -225,15 +263,15 @@ fn appendix_a_head_and_family_patches() {
         ]
     );
     assert_eq!(
-        REPORT_DESCRIPTOR_F1[0x1F0..],
+        REPORT_DESCRIPTOR_F1[REPORT_DESCRIPTOR_LEN - 5..],
         [0x95, 0x03, 0xB1, 0x02, 0xC0]
     );
-    // F1 -> F2 patch at the first finger collection (spec 5.1).
+    // F1 -> F2 patch at the first finger collection; F1 Y logical maximum is 6217 (0x1849).
     let f1 = &REPORT_DESCRIPTOR_F1;
     let f2 = &REPORT_DESCRIPTOR_F2;
     assert_eq!(
         (f1[43], f1[44], f1[54], f1[61], f1[62], f1[64], f1[65]),
-        (0xaa, 0x29, 0x5e, 0xc7, 0x02, 0xaf, 0x1e)
+        (0xaa, 0x29, 0x5e, 0xc7, 0x02, 0x49, 0x18)
     );
     assert_eq!(
         (f2[43], f2[44], f2[54], f2[61], f2[62], f2[64], f2[65]),
@@ -245,7 +283,7 @@ fn appendix_a_head_and_family_patches() {
 fn hid_descriptor_spec_5_3() {
     assert_eq!(
         HID_DESCRIPTOR,
-        [0x09, 0x21, 0x00, 0x01, 0x00, 0x01, 0x22, 0xF5, 0x01]
+        [0x09, 0x21, 0x00, 0x01, 0x00, 0x01, 0x22, 0x07, 0x02]
     );
 }
 

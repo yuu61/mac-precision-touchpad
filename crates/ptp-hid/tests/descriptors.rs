@@ -1,16 +1,22 @@
-//! Byte-for-byte golden tests: all 16 C report descriptors, the HQA blob and the C struct sizes, against the
-//! fixtures generated from the C headers at commit 2edb0f2 (see `fixtures/README.md`).
+//! Descriptor and layout verification tests:
+//! - verifies that every generated report descriptor matches the legacy C fixtures byte for byte once
+//!   the four intentional HID conformance fixes are accounted for;
+//! - verifies that walking the HID item stream produces zero global-state unit/physical-maximum leaks
+//!   across finger collections, Scan Time, Contact Count, Button, and Feature TLCs;
+//! - verifies `HID_DESCRIPTOR`, `HQA_BLOB`, and C struct sizes.
 
 #![cfg(test)]
 
 use core::fmt::Write as _;
 use std::collections::BTreeMap;
 
+use ptp_hid::common::{MAX_FINGERS, PTP_COLLECTION_WINDOWS};
 use ptp_hid::descriptor::{
-    SPI_CONTACT_ID_LOGICAL_MAX, SPI_CONTACT_ID_MAX_OFFSETS,
-    Axes, REPORT_DESCRIPTOR_SPI_UMAPP_LEN, REPORT_DESCRIPTOR_U32_ID_LEN,
-    REPORT_DESCRIPTOR_U32_ID_UMAPP_LEN, TlcUsage, report_descriptor_spi_umapp,
-    report_descriptor_u32_id, report_descriptor_u32_id_umapp,
+    Axes, FINGER_COLLECTION_SPI_LEN, FINGER_COLLECTION_U32_ID_LEN, FINGER_SEPARATOR_LEN,
+    GLOBAL_RESET, REPORT_DESCRIPTOR_SPI_UMAPP_LEN, REPORT_DESCRIPTOR_U32_ID_LEN,
+    REPORT_DESCRIPTOR_U32_ID_UMAPP_LEN, SPI_CONTACT_ID_LOGICAL_MAX, SPI_CONTACT_ID_MAX_OFFSETS,
+    TOUCHPAD_TLC_HEADER_LEN, TlcUsage, report_descriptor_spi_umapp, report_descriptor_u32_id,
+    report_descriptor_u32_id_umapp,
 };
 use ptp_hid::feature::{
     DEVICE_CAPS_REPORT_LEN, HQA_BLOB, HQA_REPORT_LEN, INPUT_MODE_REPORT_LEN,
@@ -20,6 +26,12 @@ use ptp_hid::hidport::{
     HID_DESCRIPTOR_SPI_UMAPP, HID_DESCRIPTOR_U32_ID, HID_DESCRIPTOR_U32_ID_UMAPP, hid_descriptor,
 };
 use ptp_hid::input::{PTP_CONTACT_LEN, PTP_REPORT_LEN, SPI_PTP_CONTACT_LEN, SPI_PTP_REPORT_LEN};
+use ptp_hid::item::{
+    BEGIN_COLLECTION, END_COLLECTION, FEATURE, INPUT, LOGICAL_MAXIMUM, LOGICAL_MAXIMUM_2,
+    LOGICAL_MAXIMUM_3, LOGICAL_MINIMUM, PHYSICAL_MAXIMUM, PHYSICAL_MAXIMUM_2, PHYSICAL_MAXIMUM_3,
+    REPORT_COUNT, REPORT_COUNT_2, REPORT_ID, REPORT_SIZE, UNIT, UNIT_2, UNIT_EXPONENT, USAGE,
+    USAGE_PAGE, USAGE_PAGE_1,
+};
 
 // ---- per-family axis values (crosscut spec A4; they belong to the core crates) ----
 
@@ -130,11 +142,12 @@ fn hqa() -> Fixture {
     parse(include_str!("fixtures/hqa.txt"))
 }
 
-/// The 16 descriptors: (fixture file, entry name, Rust builder output).
-fn all_sixteen() -> Vec<(&'static str, &'static str, Vec<u8>)> {
-    let u32_umapp = |a| report_descriptor_u32_id_umapp(a).to_vec();
-    let spi_pad = |a| as_c_spi(report_descriptor_spi_umapp(TlcUsage::TouchPad, a).to_vec());
-    let spi_ts = |a| as_c_spi(report_descriptor_spi_umapp(TlcUsage::TouchScreen, a).to_vec());
+/// The 16 descriptors: (fixture file, entry name, Rust builder output downgraded only at the four
+/// intentional HID conformance fixes so every other byte is verified against the C fixture).
+fn all_sixteen_as_legacy_c() -> Vec<(&'static str, &'static str, Vec<u8>)> {
+    let u32_umapp = |a| to_legacy_c_u32(&report_descriptor_u32_id_umapp(a));
+    let spi_pad = |a| to_legacy_c_spi(&report_descriptor_spi_umapp(TlcUsage::TouchPad, a));
+    let spi_ts = |a| to_legacy_c_spi(&report_descriptor_spi_umapp(TlcUsage::TouchScreen, a));
     vec![
         ("um", "AmtPtp3ReportDescriptor", u32_umapp(WELLSPRING3)),
         ("um", "AmtPtp5ReportDescriptor", u32_umapp(WELLSPRING5)),
@@ -149,7 +162,7 @@ fn all_sixteen() -> Vec<(&'static str, &'static str, Vec<u8>)> {
         (
             "km",
             "AmtPtpT2ReportDescriptor",
-            report_descriptor_u32_id(WELLSPRING_T2).to_vec(),
+            to_legacy_c_u32(&report_descriptor_u32_id(WELLSPRING_T2)),
         ),
         ("spi", "S1", spi_pad(SPI_SERIES1)),
         ("spi", "S1T", spi_ts(SPI_SERIES1)),
@@ -162,21 +175,57 @@ fn all_sixteen() -> Vec<(&'static str, &'static str, Vec<u8>)> {
         (
             "flt",
             "PtpReportDescriptorMagicTrackpad2",
-            report_descriptor_u32_id(MAGIC_TRACKPAD2).to_vec(),
+            to_legacy_c_u32(&report_descriptor_u32_id(MAGIC_TRACKPAD2)),
         ),
     ]
 }
 
-/// The C bytes of a port SPI report descriptor. The C descriptors declare a contact-ID logical maximum of
-/// 3 although the driver reports IDs 0..=4; the port declares 4 (P3). Checks that the five values are
-/// the only difference.
-fn as_c_spi(mut bytes: Vec<u8>) -> Vec<u8> {
+/// Converts a clean 9-byte-contact Rust report descriptor into its legacy C counterpart by undoing
+/// the three shared descriptor fixes (finger 3/5 `GLOBAL_RESET`, post-Scan-Time `GLOBAL_RESET`, and
+/// `Input Mode` `LOGICAL_MAXIMUM` `3 -> 16`).
+fn to_legacy_c_u32(bytes: &[u8]) -> Vec<u8> {
+    to_legacy_c_common(bytes, FINGER_COLLECTION_U32_ID_LEN)
+}
+
+/// Converts a clean SPI Rust report descriptor into its legacy C counterpart by undoing the SPI
+/// `ContactID` logical maximum fix (`4 -> 3`) and the three shared descriptor fixes.
+fn to_legacy_c_spi(bytes: &[u8]) -> Vec<u8> {
+    let mut patched = bytes.to_vec();
     for offset in SPI_CONTACT_ID_MAX_OFFSETS {
-        assert_eq!(bytes[offset - 1], 0x25, "Logical Maximum item at {offset}");
-        assert_eq!(bytes[offset], SPI_CONTACT_ID_LOGICAL_MAX, "contact-ID maximum at {offset}");
-        bytes[offset] = 3;
+        assert_eq!(patched[offset - 1], 0x25, "Logical Maximum item at {offset}");
+        assert_eq!(
+            patched[offset], SPI_CONTACT_ID_LOGICAL_MAX,
+            "contact-ID maximum at {offset}"
+        );
+        patched[offset] = 3;
     }
-    bytes
+    to_legacy_c_common(&patched, FINGER_COLLECTION_SPI_LEN)
+}
+
+fn to_legacy_c_common(bytes: &[u8], fc_len: usize) -> Vec<u8> {
+    let step = fc_len + FINGER_SEPARATOR_LEN;
+    let f3_reset = TOUCHPAD_TLC_HEADER_LEN + 2 * step + (fc_len - 1 - GLOBAL_RESET.len());
+    let f5_reset = TOUCHPAD_TLC_HEADER_LEN + 4 * step + (fc_len - 1 - GLOBAL_RESET.len());
+    let tail_start = TOUCHPAD_TLC_HEADER_LEN + 5 * fc_len + 4 * FINGER_SEPARATOR_LEN;
+    // Scan Time ends 19 bytes into TOUCHPAD_TLC_TAIL (`05 0d 55 0c 66 01 10 47 ff ff 00 00 27 ff ff 00 00 09 56 81 02` = 21 bytes).
+    let scan_time_reset = tail_start + 21;
+    let cfg_tlc_start = tail_start + 88;
+    let input_mode_max_offset = cfg_tlc_start + 17;
+
+    assert_eq!(&bytes[f3_reset..f3_reset + 6], &GLOBAL_RESET);
+    assert_eq!(&bytes[f5_reset..f5_reset + 6], &GLOBAL_RESET);
+    assert_eq!(&bytes[scan_time_reset..scan_time_reset + 6], &GLOBAL_RESET);
+    assert_eq!(bytes[input_mode_max_offset - 1], LOGICAL_MAXIMUM);
+    assert_eq!(bytes[input_mode_max_offset], PTP_COLLECTION_WINDOWS);
+
+    let mut out = Vec::with_capacity(bytes.len() - 18);
+    out.extend_from_slice(&bytes[..f3_reset]);
+    out.extend_from_slice(&bytes[f3_reset + 6..f5_reset]);
+    out.extend_from_slice(&bytes[f5_reset + 6..scan_time_reset]);
+    out.extend_from_slice(&bytes[scan_time_reset + 6..input_mode_max_offset]);
+    out.push(MAX_FINGERS);
+    out.extend_from_slice(&bytes[input_mode_max_offset + 1..]);
+    out
 }
 
 fn first_difference(a: &[u8], b: &[u8]) -> Option<usize> {
@@ -190,11 +239,11 @@ fn first_difference(a: &[u8], b: &[u8]) -> Option<usize> {
 }
 
 #[test]
-fn all_sixteen_descriptors_match_byte_for_byte() {
+fn all_sixteen_descriptors_differ_from_c_only_at_documented_fixes() {
     let files = [("um", um()), ("km", km()), ("spi", spi()), ("flt", flt())];
     let total: usize = files.iter().map(|(_, f)| f.entries.len()).sum();
     assert_eq!(total, 16, "the fixtures must hold exactly 16 descriptors");
-    let cases = all_sixteen();
+    let cases = all_sixteen_as_legacy_c();
     assert_eq!(cases.len(), 16);
     for (file, fixture) in &files {
         let mapped = cases.iter().filter(|(f, _, _)| f == file).count();
@@ -204,45 +253,46 @@ fn all_sixteen_descriptors_match_byte_for_byte() {
             "every {file} entry must be mapped to a builder"
         );
     }
-    for (file, name, built) in &cases {
+    for (file, name, built_as_c) in &cases {
         let fixture = &files.iter().find(|(f, _)| f == file).expect("file").1;
         let golden = fixture
             .entries
             .get(*name)
             .unwrap_or_else(|| panic!("{file}:{name} missing"));
         assert_eq!(
-            first_difference(built, golden),
+            first_difference(built_as_c, golden),
             None,
             "{file}:{name}: first differing byte (built len {}, golden len {})",
-            built.len(),
+            built_as_c.len(),
             golden.len()
         );
-        assert_eq!(built, golden, "{file}:{name}");
+        assert_eq!(built_as_c, golden, "{file}:{name}");
     }
 }
 
 #[test]
-fn descriptor_lengths_per_driver() {
-    for (name, bytes) in um().entries {
-        assert_eq!(bytes.len(), 516, "{name}");
-    }
-    for (name, bytes) in km().entries.into_iter().chain(flt().entries) {
-        assert_eq!(bytes.len(), 493, "{name}");
-    }
-    for (name, bytes) in spi().entries {
-        assert_eq!(bytes.len(), 501, "{name}");
-    }
+fn clean_descriptor_lengths_per_driver() {
+    assert_eq!(UM_MT2.len(), 534);
+    assert_eq!(KM_T2.len(), 511);
+    assert_eq!(FLT_MT2.len(), 511);
+    assert_eq!(SPI_S1.len(), 519);
 }
 
 #[test]
-fn const_and_static_builders_match_fixtures() {
-    assert_eq!(UM_MT2[..], um().entries["AmtPtpMt2ReportDescriptor"][..]);
-    assert_eq!(KM_T2[..], km().entries["AmtPtpT2ReportDescriptor"][..]);
+fn const_and_static_builders_match_fixtures_after_fix_projection() {
     assert_eq!(
-        FLT_MT2[..],
-        flt().entries["PtpReportDescriptorMagicTrackpad2"][..]
+        to_legacy_c_u32(&UM_MT2),
+        um().entries["AmtPtpMt2ReportDescriptor"]
     );
-    assert_eq!(as_c_spi(SPI_S1.to_vec()), spi().entries["S1"]);
+    assert_eq!(
+        to_legacy_c_u32(&KM_T2),
+        km().entries["AmtPtpT2ReportDescriptor"]
+    );
+    assert_eq!(
+        to_legacy_c_u32(&FLT_MT2),
+        flt().entries["PtpReportDescriptorMagicTrackpad2"]
+    );
+    assert_eq!(to_legacy_c_spi(&SPI_S1), spi().entries["S1"]);
 }
 
 #[test]
@@ -252,47 +302,167 @@ fn hidfilter_is_the_usbum_mt2_prefix() {
 
 #[test]
 fn touchscreen_variants_differ_only_at_byte_3() {
-    let spi = spi();
-    for family in ["S1", "S2", "S3a", "S3b"] {
-        let pad = &spi.entries[family];
-        let ts = &spi.entries[&format!("{family}T")];
+    for axes in [SPI_SERIES1, SPI_SERIES2, SPI_SERIES3_13, SPI_SERIES3_15] {
+        let pad = report_descriptor_spi_umapp(TlcUsage::TouchPad, axes);
+        let ts = report_descriptor_spi_umapp(TlcUsage::TouchScreen, axes);
         let diffs: Vec<usize> = (0..pad.len()).filter(|&i| pad[i] != ts[i]).collect();
-        assert_eq!(diffs, [3], "{family}");
-        assert_eq!((pad[3], ts[3]), (0x05, 0x04), "{family}");
+        assert_eq!(diffs, [3]);
+        assert_eq!((pad[3], ts[3]), (0x05, 0x04));
     }
 }
 
 #[test]
-fn hid_descriptors_match_fixture_lengths() {
-    let len = |f: &Fixture, n: &str| u16::try_from(f.entries[n].len()).expect("u16");
+fn hid_descriptors_match_clean_lengths() {
     assert_eq!(
         HID_DESCRIPTOR_U32_ID_UMAPP,
-        hid_descriptor(len(&um(), "AmtPtp3ReportDescriptor"))
+        hid_descriptor(u16::try_from(REPORT_DESCRIPTOR_U32_ID_UMAPP_LEN).expect("u16"))
     );
     assert_eq!(
         HID_DESCRIPTOR_U32_ID,
-        hid_descriptor(len(&km(), "AmtPtpT2ReportDescriptor"))
-    );
-    assert_eq!(
-        HID_DESCRIPTOR_U32_ID,
-        hid_descriptor(len(&flt(), "PtpReportDescriptorMagicTrackpad2"))
+        hid_descriptor(u16::try_from(REPORT_DESCRIPTOR_U32_ID_LEN).expect("u16"))
     );
     assert_eq!(
         HID_DESCRIPTOR_SPI_UMAPP,
-        hid_descriptor(len(&spi(), "S3bT"))
+        hid_descriptor(u16::try_from(REPORT_DESCRIPTOR_SPI_UMAPP_LEN).expect("u16"))
     );
     assert_eq!(
         HID_DESCRIPTOR_U32_ID_UMAPP,
-        [0x09, 0x21, 0x00, 0x01, 0x00, 0x01, 0x22, 0x04, 0x02]
+        [0x09, 0x21, 0x00, 0x01, 0x00, 0x01, 0x22, 0x16, 0x02]
     );
     assert_eq!(
         HID_DESCRIPTOR_U32_ID,
-        [0x09, 0x21, 0x00, 0x01, 0x00, 0x01, 0x22, 0xed, 0x01]
+        [0x09, 0x21, 0x00, 0x01, 0x00, 0x01, 0x22, 0xff, 0x01]
     );
     assert_eq!(
         HID_DESCRIPTOR_SPI_UMAPP,
-        [0x09, 0x21, 0x00, 0x01, 0x00, 0x01, 0x22, 0xf5, 0x01]
+        [0x09, 0x21, 0x00, 0x01, 0x00, 0x01, 0x22, 0x07, 0x02]
     );
+}
+
+#[test]
+fn item_stream_has_no_global_state_leaks() {
+    fn verify_globals(desc: &[u8]) {
+        let mut usage_page: u16 = 0;
+        let mut logical_min: i64 = 0;
+        let mut logical_max: u64 = 0;
+        let mut physical_max: u64 = 0;
+        let mut unit_exponent: u8 = 0;
+        let mut unit: u32 = 0;
+        let mut report_size: u32 = 0;
+        let mut report_count: u32 = 0;
+        let mut report_id: u8 = 0;
+        let mut usages: Vec<u16> = Vec::new();
+        let mut saw_input_mode = false;
+
+        let mut i = 0;
+        while i < desc.len() {
+            let prefix = desc[i];
+            let size = match prefix & 3 {
+                3 => 4,
+                s => s as usize,
+            };
+            let payload = &desc[i + 1..i + 1 + size];
+            match (prefix, payload) {
+                (USAGE_PAGE, &[p0]) => usage_page = u16::from(p0),
+                (USAGE_PAGE_1, &[p0, p1]) => usage_page = u16::from_le_bytes([p0, p1]),
+                (LOGICAL_MINIMUM, &[p0]) => logical_min = i64::from(p0 as i8),
+                (LOGICAL_MAXIMUM, &[p0]) => logical_max = u64::from(p0),
+                (LOGICAL_MAXIMUM_2, &[p0, p1]) => {
+                    logical_max = u64::from(u16::from_le_bytes([p0, p1]));
+                }
+                (LOGICAL_MAXIMUM_3, &[p0, p1, p2, p3]) => {
+                    logical_max = u64::from(u32::from_le_bytes([p0, p1, p2, p3]));
+                }
+                (PHYSICAL_MAXIMUM, &[p0]) => physical_max = u64::from(p0),
+                (PHYSICAL_MAXIMUM_2, &[p0, p1]) => {
+                    physical_max = u64::from(u16::from_le_bytes([p0, p1]));
+                }
+                (PHYSICAL_MAXIMUM_3, &[p0, p1, p2, p3]) => {
+                    physical_max = u64::from(u32::from_le_bytes([p0, p1, p2, p3]));
+                }
+                (UNIT_EXPONENT, &[p0]) => unit_exponent = p0,
+                (UNIT, &[p0]) => unit = u32::from(p0),
+                (UNIT_2, &[p0, p1]) => unit = u32::from(u16::from_le_bytes([p0, p1])),
+                (REPORT_SIZE, &[p0]) => report_size = u32::from(p0),
+                (REPORT_COUNT, &[p0]) => report_count = u32::from(p0),
+                (REPORT_COUNT_2, &[p0, p1]) => {
+                    report_count = u32::from(u16::from_le_bytes([p0, p1]));
+                }
+                (REPORT_ID, &[p0]) => report_id = p0,
+                (USAGE, &[p0]) => usages.push(u16::from(p0)),
+                (BEGIN_COLLECTION | END_COLLECTION, &[_]) | (END_COLLECTION, &[]) => {
+                    usages.clear();
+                }
+                (INPUT | FEATURE, &[p0]) => {
+                    let is_const = p0 & 0x01 != 0;
+                    if is_const {
+                        // Constant padding fields also must not carry stale physical/unit globals.
+                        assert_eq!(unit, 0, "unit leaked onto const padding");
+                        assert_eq!(unit_exponent, 0, "unit_exponent leaked onto const padding");
+                        assert_eq!(physical_max, 0, "physical_max leaked onto const padding");
+                    } else {
+                        for &u in &usages {
+                            match (usage_page, u) {
+                                // X / Y coordinates: cm (0x11), exponent -2 (0x0e), non-zero physical max
+                                (0x01, 0x30 | 0x31) => {
+                                    assert_eq!(unit, 0x11);
+                                    assert_eq!(unit_exponent, 0x0e);
+                                    assert!(physical_max > 0);
+                                    assert_eq!(report_size, 16);
+                                    assert_eq!(report_count, 1);
+                                }
+                                // Scan Time: seconds (0x1001), exponent -4 (0x0c), physical max 0xFFFF
+                                (0x0d, 0x56) => {
+                                    assert_eq!(report_id, 0x05);
+                                    assert_eq!(unit, 0x1001);
+                                    assert_eq!(unit_exponent, 0x0c);
+                                    assert_eq!(physical_max, 0xFFFF);
+                                    assert_eq!(logical_max, 0xFFFF);
+                                    assert_eq!(report_size, 16);
+                                    assert_eq!(report_count, 1);
+                                }
+                                // Input Mode (Report 0x04): logical range 0..=3, no physical/unit leak
+                                (0x0d, 0x52) => {
+                                    saw_input_mode = true;
+                                    assert_eq!(report_id, 0x04);
+                                    assert_eq!(logical_min, 0);
+                                    assert_eq!(logical_max, u64::from(PTP_COLLECTION_WINDOWS));
+                                    assert_eq!(unit, 0);
+                                    assert_eq!(unit_exponent, 0);
+                                    assert_eq!(physical_max, 0);
+                                }
+                                // Every other field must have clean unit=0, exp=0, physical_max=0!
+                                other => {
+                                    assert_eq!(unit, 0, "unit leaked onto {other:#x?}");
+                                    assert_eq!(
+                                        unit_exponent, 0,
+                                        "unit_exponent leaked onto {other:#x?}"
+                                    );
+                                    assert_eq!(
+                                        physical_max, 0,
+                                        "physical_max leaked onto {other:#x?}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    usages.clear();
+                }
+                other => panic!("unexpected HID item {other:#04x?} at {i}"),
+            }
+            i += 1 + size;
+        }
+        assert!(saw_input_mode);
+    }
+
+    verify_globals(&UM_MT2);
+    verify_globals(&KM_T2);
+    verify_globals(&FLT_MT2);
+    verify_globals(&SPI_S1);
+    verify_globals(&report_descriptor_spi_umapp(
+        TlcUsage::TouchScreen,
+        SPI_SERIES3_15,
+    ));
 }
 
 #[test]
@@ -481,64 +651,85 @@ fn sha256_self_test() {
 }
 
 #[test]
-fn builders_match_spec_sha256() {
+fn legacy_projected_builders_match_spec_sha256() {
     // usbum.md 5.1, spikm.md 5.1, crosscut A7.1.
     let cases: [(&str, Vec<u8>); 15] = [
         (
             "a94733137748c90e10982b8e472b2f82f4e1fac862b32b83ee67e7629aed214c",
-            report_descriptor_u32_id_umapp(WELLSPRING3).to_vec(),
+            to_legacy_c_u32(&report_descriptor_u32_id_umapp(WELLSPRING3)),
         ),
         (
             "3b57036a6f16393ef1be451395fc4eec774f0630d798288a762b5e38133285ca",
-            report_descriptor_u32_id_umapp(WELLSPRING5).to_vec(),
+            to_legacy_c_u32(&report_descriptor_u32_id_umapp(WELLSPRING5)),
         ),
         (
             "83e1b906e55b42957a3a504d36219004ffcb83065ed2fd2d6d035bb14485d007",
-            report_descriptor_u32_id_umapp(WELLSPRING6).to_vec(),
+            to_legacy_c_u32(&report_descriptor_u32_id_umapp(WELLSPRING6)),
         ),
         (
             "9a509e4407b52d68371a8e49b999cc7c55e268c5e4e5d75437c8ba4c34e21703",
-            report_descriptor_u32_id_umapp(WELLSPRING7A).to_vec(),
+            to_legacy_c_u32(&report_descriptor_u32_id_umapp(WELLSPRING7A)),
         ),
         (
             "13d94c5f486b201ef4d7919d2f955415560799cc78b12524b874bce6dee7724a",
-            report_descriptor_u32_id_umapp(WELLSPRING8).to_vec(),
+            to_legacy_c_u32(&report_descriptor_u32_id_umapp(WELLSPRING8)),
         ),
         (
             "c803f5c305a07a33d24e518be786ade6338bad844105657e64c582ba7fa13f25",
-            UM_MT2.to_vec(),
+            to_legacy_c_u32(&UM_MT2),
         ),
         (
             "21a4d11df641c918bbe5b9718c7b054f6d399b21d4296b81bd3e9f85cc617cd3",
-            as_c_spi(SPI_S1.to_vec()),
+            to_legacy_c_spi(&SPI_S1),
         ),
         (
             "868c9d50ac9ca620a578e717daf8dfb215086e83e8bf175851b712a6f809b1aa",
-            as_c_spi(report_descriptor_spi_umapp(TlcUsage::TouchScreen, SPI_SERIES1).to_vec()),
+            to_legacy_c_spi(&report_descriptor_spi_umapp(
+                TlcUsage::TouchScreen,
+                SPI_SERIES1,
+            )),
         ),
         (
             "5dab7a973382bbada6cedb4c47e0f1d7bc2d72d263ed5fd86545f96f2f8c9a3f",
-            as_c_spi(report_descriptor_spi_umapp(TlcUsage::TouchPad, SPI_SERIES2).to_vec()),
+            to_legacy_c_spi(&report_descriptor_spi_umapp(
+                TlcUsage::TouchPad,
+                SPI_SERIES2,
+            )),
         ),
         (
             "d4d5f0b8146fa01c0421653fff153cee5ff73679576546a1e8378f44cf479bbe",
-            as_c_spi(report_descriptor_spi_umapp(TlcUsage::TouchScreen, SPI_SERIES2).to_vec()),
+            to_legacy_c_spi(&report_descriptor_spi_umapp(
+                TlcUsage::TouchScreen,
+                SPI_SERIES2,
+            )),
         ),
         (
             "fb0db27b1cdf967200ffd68b01005a15ffcebfd0e2786f8dba7bd163b324fcf9",
-            as_c_spi(report_descriptor_spi_umapp(TlcUsage::TouchPad, SPI_SERIES3_13).to_vec()),
+            to_legacy_c_spi(&report_descriptor_spi_umapp(
+                TlcUsage::TouchPad,
+                SPI_SERIES3_13,
+            )),
         ),
         (
             "28d6043da39c1cc339b20f49f20059f5bf91c32573ca74c25b9fa865e01582bf",
-            as_c_spi(report_descriptor_spi_umapp(TlcUsage::TouchScreen, SPI_SERIES3_13).to_vec()),
+            to_legacy_c_spi(&report_descriptor_spi_umapp(
+                TlcUsage::TouchScreen,
+                SPI_SERIES3_13,
+            )),
         ),
         (
             "31cd97cce4b5bfafc67bb490a1b3d2f2cf0d573c03e811181e2e7b424490361b",
-            as_c_spi(report_descriptor_spi_umapp(TlcUsage::TouchPad, SPI_SERIES3_15).to_vec()),
+            to_legacy_c_spi(&report_descriptor_spi_umapp(
+                TlcUsage::TouchPad,
+                SPI_SERIES3_15,
+            )),
         ),
         (
             "976e5046059319cf83acb73000237753a9d2e74e52f5f73da65b5f74b16359d7",
-            as_c_spi(report_descriptor_spi_umapp(TlcUsage::TouchScreen, SPI_SERIES3_15).to_vec()),
+            to_legacy_c_spi(&report_descriptor_spi_umapp(
+                TlcUsage::TouchScreen,
+                SPI_SERIES3_15,
+            )),
         ),
         (
             "b57b851d567808906f61a0122273da05c972140f1007355390aaf5dda8a072af",

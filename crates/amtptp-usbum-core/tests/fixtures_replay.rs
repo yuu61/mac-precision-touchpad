@@ -22,6 +22,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use amtptp_usbum_core::NtStatus;
 use amtptp_usbum_core::config::{CONFIG_TABLE, Family, lookup_config_row};
+use amtptp_usbum_core::descriptors::{HID_DESCRIPTOR, HidRegistry, REPORT_DESCRIPTOR_LEN};
 use amtptp_usbum_core::hid::{
     IoctlOutcome, IoctlRoute, get_device_attributes, get_feature, get_hid_descriptor,
     get_report_descriptor, get_string, route_ioctl, set_feature,
@@ -37,6 +38,11 @@ use amtptp_usbum_core::status::{STATUS_INVALID_DEVICE_STATE, STATUS_SUCCESS, nt_
 use common::{
     FAKE_DECIDED, FakeQueue, FakeReq, FakeStrings, FakeUsb, Rec, check_dev2, fake_decided, fixture,
     hex, normalize_wire, records, status_hex, to_hex,
+};
+use ptp_hid::common::{MAX_FINGERS, PTP_COLLECTION_WINDOWS};
+use ptp_hid::descriptor::{
+    FINGER_COLLECTION_U32_ID_LEN, FINGER_HEAD_U32_ID_LEN, FINGER_SEPARATOR_LEN, GLOBAL_RESET,
+    TOUCHPAD_TLC_HEADER_LEN,
 };
 
 const B1_UMASK: &str = "B1 TYPE4/5 SET payload bytes past a short GET are 00 (umask)";
@@ -321,6 +327,65 @@ fn devices() {
 // descriptors.txt
 // =================================================================================================
 
+const C_REPORT_DESCRIPTOR_LEN: usize = 516;
+const REPORT_DESCRIPTOR_DELTA: usize = REPORT_DESCRIPTOR_LEN - C_REPORT_DESCRIPTOR_LEN;
+
+/// Projects a clean 534-byte `UsbUm` report descriptor back to the 516-byte C descriptor, including
+/// the `Ws5a` (`Ws7a -> Ws5`) and `Ws9` (`Ws9 -> Ws8`) axis alignments of Step 2 (`A-2.4`).
+fn to_legacy_c_usbum(bytes: &[u8], family: Option<Family>) -> Vec<u8> {
+    let mut patched = bytes.to_vec();
+    let step = FINGER_COLLECTION_U32_ID_LEN + FINGER_SEPARATOR_LEN;
+    match family {
+        Some(Family::Ws5a) => {
+            for finger in 0..5 {
+                let base = TOUCHPAD_TLC_HEADER_LEN + finger * step + FINGER_HEAD_U32_ID_LEN;
+                assert_eq!(&patched[base + 3..base + 5], &10030_u16.to_le_bytes());
+                patched[base + 3..base + 5].copy_from_slice(&9465_u16.to_le_bytes());
+                assert_eq!(&patched[base + 14..base + 16], &1064_u16.to_le_bytes());
+                patched[base + 14..base + 16].copy_from_slice(&1050_u16.to_le_bytes());
+                assert_eq!(&patched[base + 21..base + 23], &773_u16.to_le_bytes());
+                patched[base + 21..base + 23].copy_from_slice(&810_u16.to_le_bytes());
+                assert_eq!(&patched[base + 24..base + 26], &6880_u16.to_le_bytes());
+                patched[base + 24..base + 26].copy_from_slice(&6735_u16.to_le_bytes());
+            }
+        }
+        Some(Family::Ws9) => {
+            for finger in 0..5 {
+                let base = TOUCHPAD_TLC_HEADER_LEN + finger * step + FINGER_HEAD_U32_ID_LEN;
+                assert_eq!(&patched[base + 3..base + 5], &10173_u16.to_le_bytes());
+                patched[base + 3..base + 5].copy_from_slice(&9760_u16.to_le_bytes());
+                assert_eq!(&patched[base + 24..base + 26], &7006_u16.to_le_bytes());
+                patched[base + 24..base + 26].copy_from_slice(&6750_u16.to_le_bytes());
+            }
+        }
+        _ => {}
+    }
+    let f3_reset = TOUCHPAD_TLC_HEADER_LEN
+        + 2 * step
+        + (FINGER_COLLECTION_U32_ID_LEN - 1 - GLOBAL_RESET.len());
+    let f5_reset = TOUCHPAD_TLC_HEADER_LEN
+        + 4 * step
+        + (FINGER_COLLECTION_U32_ID_LEN - 1 - GLOBAL_RESET.len());
+    let tail_start =
+        TOUCHPAD_TLC_HEADER_LEN + 5 * FINGER_COLLECTION_U32_ID_LEN + 4 * FINGER_SEPARATOR_LEN;
+    let scan_time_reset = tail_start + 21;
+    let input_mode_max_offset = tail_start + 88 + 17;
+
+    assert_eq!(&patched[f3_reset..f3_reset + 6], &GLOBAL_RESET);
+    assert_eq!(&patched[f5_reset..f5_reset + 6], &GLOBAL_RESET);
+    assert_eq!(&patched[scan_time_reset..scan_time_reset + 6], &GLOBAL_RESET);
+    assert_eq!(patched[input_mode_max_offset], PTP_COLLECTION_WINDOWS);
+
+    let mut out = Vec::with_capacity(C_REPORT_DESCRIPTOR_LEN);
+    out.extend_from_slice(&patched[..f3_reset]);
+    out.extend_from_slice(&patched[f3_reset + 6..f5_reset]);
+    out.extend_from_slice(&patched[f5_reset + 6..scan_time_reset]);
+    out.extend_from_slice(&patched[scan_time_reset + 6..input_mode_max_offset]);
+    out.push(MAX_FINGERS);
+    out.extend_from_slice(&patched[input_mode_max_offset + 1..]);
+    out
+}
+
 #[test]
 fn descriptors() {
     let text = fixture("descriptors.txt");
@@ -346,18 +411,25 @@ fn descriptors() {
             assert_eq!(state.config(), None, "{case}: injected PID must be unknown");
             tally.note("inj=1 (unknown PID via context injection, B3 exclusion)");
         }
+        let code = rec.u("ioctl") as u32;
+        let route = route_ioctl(code);
         let mut req = ioctl_request(&rec);
+        let c_outlen = rec.u("outlen") as usize;
+        if route == IoctlRoute::GetReportDescriptor
+            && (C_REPORT_DESCRIPTOR_LEN - 1..=C_REPORT_DESCRIPTOR_LEN + 4).contains(&c_outlen)
+        {
+            req = FakeReq::new(req.input, c_outlen + REPORT_DESCRIPTOR_DELTA, 0xa5);
+        }
         let mut usb = FakeUsb::default();
         let mut strings = FakeStrings::new();
         if case == "str-queryfail" {
             strings.fail_all = Some(rec.status("status"));
         }
-        let code = rec.u("ioctl") as u32;
         let outcome = dispatch(&state, code, &mut req, &mut usb, &mut strings)
             .unwrap_or_else(|| panic!("{case}: not completed"));
 
         let mut expected = expected_ioctl_out(&rec);
-        if route_ioctl(code) == IoctlRoute::GetString && rec.status("status") == STATUS_SUCCESS {
+        if route == IoctlRoute::GetString && rec.status("status") == STATUS_SUCCESS {
             let expected_completion = if rec.s("strq") == "-" {
                 IoctlOutcome::NOT_SUPPORTED
             } else {
@@ -375,9 +447,47 @@ fn descriptors() {
             };
             assert_eq!(outcome, expected_completion, "{case}");
             assert_eq!(req.out, expected, "{case}");
+        } else if route == IoctlRoute::GetReportDescriptor {
+            assert_eq!(rec.s("cpl"), "1", "{case}: completed once");
+            assert_eq!(
+                status_hex(outcome.status),
+                status_hex(rec.status("status")),
+                "{case}: status"
+            );
+            if outcome.status == STATUS_SUCCESS {
+                assert_eq!(rec.u("info") as usize, C_REPORT_DESCRIPTOR_LEN, "{case}");
+                assert_eq!(outcome.information, REPORT_DESCRIPTOR_LEN, "{case}");
+                let reg = HidRegistry::for_pid(pid_of(&rec)).expect("supported PID");
+                assert_eq!(
+                    &req.out[..REPORT_DESCRIPTOR_LEN],
+                    reg.report_descriptor(),
+                    "{case}: clean descriptor"
+                );
+                let projected = to_legacy_c_usbum(
+                    &req.out[..REPORT_DESCRIPTOR_LEN],
+                    state.config().map(|c| c.family),
+                );
+                assert_eq!(
+                    to_hex(&projected),
+                    to_hex(&expected[..C_REPORT_DESCRIPTOR_LEN]),
+                    "{case}: legacy C projection"
+                );
+                assert!(
+                    req.out[REPORT_DESCRIPTOR_LEN..].iter().all(|&b| b == 0xa5)
+                        && expected[C_REPORT_DESCRIPTOR_LEN..].iter().all(|&b| b == 0xa5),
+                    "{case}: trailing prefill"
+                );
+            } else {
+                assert_eq!(outcome.information, 0, "{case}");
+                assert!(req.out.iter().all(|&b| b == 0xa5), "{case}: untouched");
+            }
         } else {
-            if route_ioctl(code) == IoctlRoute::GetDeviceAttributes && rec.u("info") == 32 {
+            if route == IoctlRoute::GetDeviceAttributes && rec.u("info") == 32 {
                 expected[10..32].fill(0);
+            }
+            if route == IoctlRoute::GetDeviceDescriptor && outcome.status == STATUS_SUCCESS {
+                assert_eq!(&req.out[..9], &HID_DESCRIPTOR, "{case}: HID descriptor");
+                expected[7..9].copy_from_slice(&(REPORT_DESCRIPTOR_LEN as u16).to_le_bytes());
             }
             check_ioctl(&rec, &outcome, &req, Some(expected));
         }

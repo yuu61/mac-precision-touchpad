@@ -10,8 +10,9 @@ use amtptp_usbum_core::config::{
     CONFIG_TABLE, Family, TrackpadType, lookup_config, lookup_config_row,
 };
 use amtptp_usbum_core::descriptors::{
-    HID_DESCRIPTOR, HidRegistry, REPORT_DESCRIPTOR_MT2, REPORT_DESCRIPTOR_WS3,
-    REPORT_DESCRIPTOR_WS5, REPORT_DESCRIPTOR_WS6, REPORT_DESCRIPTOR_WS7A, REPORT_DESCRIPTOR_WS8,
+    HID_DESCRIPTOR, HidRegistry, REPORT_DESCRIPTOR_LEN, REPORT_DESCRIPTOR_MT2,
+    REPORT_DESCRIPTOR_WS3, REPORT_DESCRIPTOR_WS5, REPORT_DESCRIPTOR_WS6, REPORT_DESCRIPTOR_WS7A,
+    REPORT_DESCRIPTOR_WS8, REPORT_DESCRIPTOR_WS9,
 };
 use amtptp_usbum_core::hid::{
     IoctlOutcome, IoctlRoute, TraceEvent, get_string, route_ioctl, set_feature,
@@ -23,6 +24,10 @@ use amtptp_usbum_core::status::{STATUS_BUFFER_TOO_SMALL, STATUS_INVALID_DEVICE_S
 use amtptp_usbum_core::usb::{wellspring_mode_read_setup, wellspring_mode_write_setup};
 use amtptp_usbum_core::io::{PipeInfo, PipeType};
 use common::{FakeQueue, FakeReq, FakeUsb, hex, to_hex};
+use ptp_hid::common::{MAX_FINGERS, PTP_COLLECTION_WINDOWS};
+use ptp_hid::descriptor::{
+    FINGER_COLLECTION_U32_ID_LEN, FINGER_SEPARATOR_LEN, GLOBAL_RESET, TOUCHPAD_TLC_HEADER_LEN,
+};
 use ptp_hid::input::PtpContact;
 
 fn cfg(family: Family) -> &'static amtptp_usbum_core::config::WellspringDevice {
@@ -32,8 +37,32 @@ fn cfg(family: Family) -> &'static amtptp_usbum_core::config::WellspringDevice {
         .expect("family")
 }
 
+fn to_legacy_c(bytes: &[u8]) -> Vec<u8> {
+    let step = FINGER_COLLECTION_U32_ID_LEN + FINGER_SEPARATOR_LEN;
+    let f3_reset = TOUCHPAD_TLC_HEADER_LEN
+        + 2 * step
+        + (FINGER_COLLECTION_U32_ID_LEN - 1 - GLOBAL_RESET.len());
+    let f5_reset = TOUCHPAD_TLC_HEADER_LEN
+        + 4 * step
+        + (FINGER_COLLECTION_U32_ID_LEN - 1 - GLOBAL_RESET.len());
+    let tail_start =
+        TOUCHPAD_TLC_HEADER_LEN + 5 * FINGER_COLLECTION_U32_ID_LEN + 4 * FINGER_SEPARATOR_LEN;
+    let scan_time_reset = tail_start + 21;
+    let input_mode_max_offset = tail_start + 88 + 17;
+    assert_eq!(bytes[input_mode_max_offset], PTP_COLLECTION_WINDOWS);
+
+    let mut out = Vec::with_capacity(516);
+    out.extend_from_slice(&bytes[..f3_reset]);
+    out.extend_from_slice(&bytes[f3_reset + 6..f5_reset]);
+    out.extend_from_slice(&bytes[f5_reset + 6..scan_time_reset]);
+    out.extend_from_slice(&bytes[scan_time_reset + 6..input_mode_max_offset]);
+    out.push(MAX_FINGERS);
+    out.extend_from_slice(&bytes[input_mode_max_offset + 1..]);
+    out
+}
+
 // ------------------------------------------------------------------------------------------------
-// Descriptors (spec 5.1): SHA-256 of the six report descriptors and the WS3 byte dump
+// Descriptors (spec 5.1): SHA-256 of the report descriptors and the WS3 byte dump
 // ------------------------------------------------------------------------------------------------
 
 /// Minimal SHA-256 (FIPS 180-4) for the spec's descriptor hashes.
@@ -186,6 +215,7 @@ fn sha256_self_test() {
 
 #[test]
 fn report_descriptor_hashes() {
+    assert_eq!(REPORT_DESCRIPTOR_LEN, 534);
     for (bytes, sha) in [
         (
             &REPORT_DESCRIPTOR_WS3,
@@ -212,18 +242,18 @@ fn report_descriptor_hashes() {
             "c803f5c305a07a33d24e518be786ade6338bad844105657e64c582ba7fa13f25",
         ),
     ] {
-        assert_eq!(bytes.len(), 516);
-        assert_eq!(sha256(bytes), sha);
+        assert_eq!(bytes.len(), 534);
+        assert_eq!(sha256(&to_legacy_c(bytes)), sha);
     }
+    assert_eq!(REPORT_DESCRIPTOR_WS9.len(), 534);
     assert_eq!(
         HID_DESCRIPTOR,
-        [0x09, 0x21, 0x00, 0x01, 0x00, 0x01, 0x22, 0x04, 0x02]
+        [0x09, 0x21, 0x00, 0x01, 0x00, 0x01, 0x22, 0x16, 0x02]
     );
 }
 
 #[test]
 fn ws3_report_descriptor_dump() {
-    // Spec 5.1, full byte dump of AmtPtp3ReportDescriptor.
     let dump = [
         "05 0d 09 05 a1 01 85 05 09 22 a1 02 25 01 09 47 09 42 95 02 75 01 81 02 75 01 95 06 81 03 95 01",
         "75 20 27 ff ff ff ff 09 51 81 02 05 01 26 9a 25 75 10 55 0e 65 11 09 30 46 1a 04 95 01 81 02 46",
@@ -245,41 +275,43 @@ fn ws3_report_descriptor_dump() {
     ]
     .concat();
     let compact: String = dump.chars().filter(char::is_ascii_hexdigit).collect();
-    assert_eq!(to_hex(&REPORT_DESCRIPTOR_WS3), compact);
+    assert_eq!(to_hex(&to_legacy_c(&REPORT_DESCRIPTOR_WS3)), compact);
 }
 
 #[test]
 fn pid_to_descriptor_switch() {
-    // Spec 8.3: not every config row has a descriptor.
     for pid in [0x0223_u16, 0x0230, 0x023f, 0x0242, 0x027d, 0x0000, 0x0266] {
         assert_eq!(HidRegistry::for_pid(pid), None, "{pid:04x}");
     }
-    assert_eq!(HidRegistry::for_pid(0x0254), Some(HidRegistry::Ws5)); // WS5A -> AmtPtp5 (B18)
-    assert_eq!(HidRegistry::for_pid(0x0272), Some(HidRegistry::Ws8)); // WS9 -> AmtPtp8 (B18)
+    assert_eq!(HidRegistry::for_pid(0x0254), Some(HidRegistry::Ws7a)); // WS5A -> 10030x6880 (Step 2 A-2.4)
+    assert_eq!(HidRegistry::for_pid(0x0272), Some(HidRegistry::Ws9)); // WS9 -> 10173x7006 (Step 2 A-2.4)
     assert_eq!(HidRegistry::for_pid(0x0292), Some(HidRegistry::Ws8)); // WS8 JIS
     assert_eq!(HidRegistry::for_pid(0x024b), Some(HidRegistry::Ws6)); // WS6A
     assert_eq!(HidRegistry::for_pid(0x025b), Some(HidRegistry::Ws7a)); // WS7A
     assert_eq!(HidRegistry::for_pid(0x0265), Some(HidRegistry::Mt2));
 }
 
-/// The C PID switch of `AmtPtpGetHidDescriptor` / `AmtPtpGetReportDescriptor`, kept as the oracle of the
-/// family-based selection.
-const fn c_descriptor_switch(pid: u16) -> Option<HidRegistry> {
+const fn expected_descriptor_switch(pid: u16) -> Option<HidRegistry> {
     match pid {
         0x0236..=0x0238 => Some(HidRegistry::Ws3),
-        0x0245..=0x0247 | 0x0252..=0x0254 => Some(HidRegistry::Ws5),
+        0x0245..=0x0247 => Some(HidRegistry::Ws5),
         0x0249..=0x024e => Some(HidRegistry::Ws6),
-        0x0262..=0x0264 | 0x0259..=0x025b => Some(HidRegistry::Ws7a),
-        0x0290..=0x0292 | 0x0272..=0x0274 => Some(HidRegistry::Ws8),
+        0x0252..=0x0254 | 0x0262..=0x0264 | 0x0259..=0x025b => Some(HidRegistry::Ws7a),
+        0x0290..=0x0292 => Some(HidRegistry::Ws8),
+        0x0272..=0x0274 => Some(HidRegistry::Ws9),
         0x0265 => Some(HidRegistry::Mt2),
         _ => None,
     }
 }
 
 #[test]
-fn family_based_descriptor_selection_equals_the_c_switch() {
+fn family_based_descriptor_selection_matches_axis_spans() {
     for pid in 0..=u16::MAX {
-        assert_eq!(HidRegistry::for_pid(pid), c_descriptor_switch(pid), "{pid:04x}");
+        assert_eq!(
+            HidRegistry::for_pid(pid),
+            expected_descriptor_switch(pid),
+            "{pid:04x}"
+        );
     }
 }
 

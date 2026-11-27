@@ -17,15 +17,15 @@ pub const MT2_AXES: Axes = Axes {
     y_logical_max: 5065,
 };
 
-/// `PtpReportDescriptorMagicTrackpad2`: the touchpad TLC plus the Windows configuration TLC, 493 bytes
-/// (spec Appendix A.1; no user-mode-app TLC).
+/// `PtpReportDescriptorMagicTrackpad2`: the touchpad TLC plus the Windows configuration TLC, 511 bytes
+/// (no user-mode-app TLC).
 pub static REPORT_DESCRIPTOR: [u8; REPORT_DESCRIPTOR_U32_ID_LEN] =
     report_descriptor_u32_id(MT2_AXES);
 
-/// `PtpDefaultHidDescriptorMagicTrackpad2`: `09 21 00 01 00 01 22 ED 01`.
+/// `PtpDefaultHidDescriptorMagicTrackpad2`: `09 21 00 01 00 01 22 FF 01`.
 pub static HID_DESCRIPTOR: [u8; HID_DESCRIPTOR_LEN] = HID_DESCRIPTOR_U32_ID;
 
-const _: () = assert!(REPORT_DESCRIPTOR_U32_ID_LEN == 493);
+const _: () = assert!(REPORT_DESCRIPTOR_U32_ID_LEN == 511);
 // C copies `DescriptorList[0].wReportLength` bytes of the report descriptor; it equals its length.
 const _: () = assert!(
     u16::from_le_bytes([HID_DESCRIPTOR_U32_ID[7], HID_DESCRIPTOR_U32_ID[8]]) as usize
@@ -72,11 +72,11 @@ mod tests {
     fn identity() {
         assert_eq!(
             HID_DESCRIPTOR,
-            [0x09, 0x21, 0x00, 0x01, 0x00, 0x01, 0x22, 0xED, 0x01]
+            [0x09, 0x21, 0x00, 0x01, 0x00, 0x01, 0x22, 0xFF, 0x01]
         );
         assert_eq!(REPORT_DESCRIPTOR[..6], [0x05, 0x0D, 0x09, 0x05, 0xA1, 0x01]);
         assert_eq!(
-            REPORT_DESCRIPTOR[487..],
+            REPORT_DESCRIPTOR[505..],
             [0x95, 0x06, 0xB1, 0x03, 0xC0, 0xC0]
         );
         assert!(hid_descriptor_for(0x0266).is_none());

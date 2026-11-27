@@ -1,8 +1,5 @@
-//! The HID identity this driver reports upward: the 9-byte HID descriptor, the eight 501-byte report
+//! The HID identity this driver reports upward: the 9-byte HID descriptor, the eight 519-byte report
 //! descriptors (4 families x {Touch Pad, Touch Screen}) and `HID_DEVICE_ATTRIBUTES`.
-//!
-//! The descriptor bytes are built by `ptp_hid` from the per-family axis values below; the fixtures replay
-//! them byte for byte against the C driver's output (spec §5.1 SHA-256 values).
 
 use ptp_hid::common::DEVICE_VID;
 use ptp_hid::descriptor::{
@@ -15,17 +12,17 @@ use ptp_hid::hidport::{
 use crate::device::{DeviceConfig, Family, ReportType, family_for_product};
 use crate::status::{NtStatus, STATUS_NOT_FOUND};
 
-/// Length of every `SpiKm` report descriptor: 501 bytes (0x01F5).
+/// Length of every `SpiKm` report descriptor: 519 bytes (0x0207).
 pub const REPORT_DESCRIPTOR_LEN: usize = REPORT_DESCRIPTOR_SPI_UMAPP_LEN;
-const _: () = assert!(REPORT_DESCRIPTOR_LEN == 501);
+const _: () = assert!(REPORT_DESCRIPTOR_LEN == 519);
 
-/// Series 1 axis items (SpiTrackpadSeries1.h). The Y logical maximum 7855 does not match the table's Y
-/// span 6217 (preserved known issue SPI-B18).
+/// Series 1 axis items (SpiTrackpadSeries1.h), with `y_logical_max` aligned to the Series 1 sensor Y span
+/// (`6089 - (-128) = 6217`).
 pub const AXES_F1: Axes = Axes {
     x_logical_max: 10666,
     x_physical_max: 1118,
     y_physical_max: 711,
-    y_logical_max: 7855,
+    y_logical_max: 6217,
 };
 /// Series 2 axis items (SpiTrackpadSeries2.h).
 pub const AXES_F2: Axes = Axes {
@@ -75,7 +72,7 @@ pub static REPORT_DESCRIPTOR_F3B_TOUCHSCREEN: [u8; REPORT_DESCRIPTOR_LEN] =
     report_descriptor_spi_umapp(TlcUsage::TouchScreen, AXES_F3B);
 
 /// `AmtPtpSpiFamily{1,2,3a,3b}DefaultHidDescriptor`: identical for all families,
-/// `09 21 00 01 00 01 22 f5 01`. `wReportLength` (501) is also the `CopiedSize` C uses for the report
+/// `09 21 00 01 00 01 22 07 02`. `wReportLength` (519) is also the `CopiedSize` for the report
 /// descriptor.
 pub static HID_DESCRIPTOR: [u8; HID_DESCRIPTOR_LEN] = HID_DESCRIPTOR_SPI_UMAPP;
 
@@ -181,7 +178,7 @@ mod tests {
     fn hid_descriptor_bytes() {
         assert_eq!(
             HID_DESCRIPTOR,
-            [0x09, 0x21, 0x00, 0x01, 0x00, 0x01, 0x22, 0xf5, 0x01]
+            [0x09, 0x21, 0x00, 0x01, 0x00, 0x01, 0x22, 0x07, 0x02]
         );
     }
 

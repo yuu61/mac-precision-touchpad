@@ -177,9 +177,9 @@ fn d5_feature_requests() {
 fn d6_identity_and_mode_switch() {
     assert_eq!(
         hid_descriptor_for(0x0265).unwrap(),
-        h("09 21 00 01 00 01 22 ED 01")
+        h("09 21 00 01 00 01 22 FF 01")
     );
-    assert_eq!(report_descriptor_for(0x0265).unwrap().len(), 493);
+    assert_eq!(report_descriptor_for(0x0265).unwrap().len(), 511);
     assert!(hid_descriptor_for(0x0266).is_none() && report_descriptor_for(0x0266).is_none());
     let mut attrs = [0xCC_u8; 32];
     device_attributes(0x0265).write_to(&mut attrs).unwrap();
@@ -200,7 +200,6 @@ fn d6_identity_and_mode_switch() {
     }
 }
 
-/// Appendix A.1 spot checks beyond the fixtures: the first and last rows of the dump.
 #[test]
 fn a1_report_descriptor_rows() {
     assert_eq!(
@@ -208,7 +207,7 @@ fn a1_report_descriptor_rows() {
         h("05 0D 09 05 A1 01 85 05 09 22 A1 02 25 01 09 47")[..]
     );
     assert_eq!(
-        REPORT_DESCRIPTOR[0x1E0..],
+        REPORT_DESCRIPTOR[REPORT_DESCRIPTOR.len() - 13..],
         h("01 95 02 25 01 B1 02 95 06 B1 03 C0 C0")[..]
     );
 }

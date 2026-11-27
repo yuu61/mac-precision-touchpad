@@ -7,6 +7,10 @@ mod common;
 
 use amtptp_hidfilter_core as core_;
 use common::*;
+use ptp_hid::common::{MAX_FINGERS, PTP_COLLECTION_WINDOWS};
+use ptp_hid::descriptor::{
+    FINGER_COLLECTION_U32_ID_LEN, FINGER_SEPARATOR_LEN, GLOBAL_RESET, TOUCHPAD_TLC_HEADER_LEN,
+};
 use ptp_hid::feature::{
     DEVICE_CAPS_REPORT_LEN, HQA_BLOB, HQA_REPORT_LEN, INPUT_MODE_REPORT_LEN, SELECTIVE_REPORT_LEN,
 };
@@ -15,6 +19,32 @@ use ptp_hid::input::{PTP_CONTACT_LEN, PTP_REPORT_LEN, PtpContact, PtpReport};
 use ptp_hid::ioctl;
 
 const TOTAL: usize = 99;
+const C_REPORT_DESCRIPTOR_LEN: usize = 493;
+const REPORT_DESCRIPTOR_DELTA: usize = core_::REPORT_DESCRIPTOR.len() - C_REPORT_DESCRIPTOR_LEN;
+
+fn to_legacy_c(bytes: &[u8]) -> Vec<u8> {
+    let step = FINGER_COLLECTION_U32_ID_LEN + FINGER_SEPARATOR_LEN;
+    let f3_reset = TOUCHPAD_TLC_HEADER_LEN
+        + 2 * step
+        + (FINGER_COLLECTION_U32_ID_LEN - 1 - GLOBAL_RESET.len());
+    let f5_reset = TOUCHPAD_TLC_HEADER_LEN
+        + 4 * step
+        + (FINGER_COLLECTION_U32_ID_LEN - 1 - GLOBAL_RESET.len());
+    let tail_start =
+        TOUCHPAD_TLC_HEADER_LEN + 5 * FINGER_COLLECTION_U32_ID_LEN + 4 * FINGER_SEPARATOR_LEN;
+    let scan_time_reset = tail_start + 21;
+    let input_mode_max_offset = tail_start + 88 + 17;
+    assert_eq!(bytes[input_mode_max_offset], PTP_COLLECTION_WINDOWS);
+
+    let mut out = Vec::with_capacity(C_REPORT_DESCRIPTOR_LEN);
+    out.extend_from_slice(&bytes[..f3_reset]);
+    out.extend_from_slice(&bytes[f3_reset + 6..f5_reset]);
+    out.extend_from_slice(&bytes[f5_reset + 6..scan_time_reset]);
+    out.extend_from_slice(&bytes[scan_time_reset + 6..input_mode_max_offset]);
+    out.push(MAX_FINGERS);
+    out.extend_from_slice(&bytes[input_mode_max_offset + 1..]);
+    out
+}
 
 /// Value of a `facts` / `layout` key in the Rust port, or `None` for keys that describe private C
 /// layout the port does not mirror.
@@ -142,7 +172,14 @@ fn is_private_layout(key: &str) -> bool {
 
 fn check_keys(r: &Rec, checked: &mut usize, unmirrored: &mut usize) {
     for (k, v) in r.fields.iter().skip(1) {
-        if let Some(p) = port_value(k) {
+        if k == "sizeof_report_descriptor" {
+            assert_eq!(num(v), C_REPORT_DESCRIPTOR_LEN as i128, "{}: {k}", r.case());
+            assert_eq!(
+                port_value(k),
+                Some((C_REPORT_DESCRIPTOR_LEN + REPORT_DESCRIPTOR_DELTA) as i128)
+            );
+            *checked += 1;
+        } else if let Some(p) = port_value(k) {
             assert_eq!(p, num(v), "{}: {k}", r.case());
             *checked += 1;
         } else {
@@ -197,19 +234,71 @@ fn replay_descriptors() {
 
 fn replay_ioctl(r: &Rec) {
     let state = core_::DeviceState::with(&parse_state(r.get("st_in")));
-    let outlen = r.num("outlen") as usize;
+    let code = r.num("ioctl") as u32;
+    let c_outlen = r.num("outlen") as usize;
+    let outlen = if code == ioctl::IOCTL_HID_GET_REPORT_DESCRIPTOR
+        && (C_REPORT_DESCRIPTOR_LEN - 1..=C_REPORT_DESCRIPTOR_LEN).contains(&c_outlen)
+    {
+        c_outlen + REPORT_DESCRIPTOR_DELTA
+    } else {
+        c_outlen
+    };
     let mut m = Mock::new();
     let req = m.add_upper(Upper::with_output(outlen, 0xCC));
-    core_::dispatch_internal_ioctl(&mut m, &state, req, outlen, 0, r.num("ioctl") as u32);
+    core_::dispatch_internal_ioctl(&mut m, &state, req, outlen, 0, code);
     let (s, info) = m.uppers[req].completed.expect("completed");
     assert_eq!(st(s), r.get("status"), "{}", r.case());
-    assert_eq!(info as i128, r.num("info"), "{}", r.case());
+    let expected_info = if s == 0 && code == ioctl::IOCTL_HID_GET_REPORT_DESCRIPTOR {
+        r.num("info") + REPORT_DESCRIPTOR_DELTA as i128
+    } else {
+        r.num("info")
+    };
+    assert_eq!(info as i128, expected_info, "{}", r.case());
     let mut expected = r.bytes("out");
-    if r.num("ioctl") as u32 == ioctl::IOCTL_HID_GET_DEVICE_ATTRIBUTES && info == 32 {
-        expected[10..32].fill(0);
+    match (s, code) {
+        (0, ioctl::IOCTL_HID_GET_DEVICE_ATTRIBUTES) => {
+            expected[10..32].fill(0);
+            assert_eq!(m.uppers[req].buf, expected, "{}", r.case());
+        }
+        (0, ioctl::IOCTL_HID_GET_DEVICE_DESCRIPTOR) => {
+            assert_eq!(&m.uppers[req].buf[..9], &core_::HID_DESCRIPTOR, "{}", r.case());
+            expected[7..9].copy_from_slice(&(core_::REPORT_DESCRIPTOR.len() as u16).to_le_bytes());
+            assert_eq!(m.uppers[req].buf, expected, "{}", r.case());
+        }
+        (0, ioctl::IOCTL_HID_GET_REPORT_DESCRIPTOR) => {
+            let n = core_::REPORT_DESCRIPTOR.len();
+            assert_eq!(&m.uppers[req].buf[..n], &core_::REPORT_DESCRIPTOR, "{}", r.case());
+            assert_eq!(
+                to_legacy_c(&m.uppers[req].buf[..n]),
+                expected[..C_REPORT_DESCRIPTOR_LEN],
+                "{}",
+                r.case()
+            );
+            assert!(
+                m.uppers[req].buf[n..].iter().all(|&b| b == 0xCC)
+                    && expected[C_REPORT_DESCRIPTOR_LEN..].iter().all(|&b| b == 0xCC),
+                "{}",
+                r.case()
+            );
+        }
+        (_, ioctl::IOCTL_HID_GET_REPORT_DESCRIPTOR) if outlen != c_outlen => {
+            assert!(m.uppers[req].buf.iter().all(|&b| b == 0xCC), "{}", r.case());
+        }
+        _ => {
+            assert_eq!(m.uppers[req].buf, expected, "{}", r.case());
+        }
     }
-    assert_eq!(m.uppers[req].buf, expected, "{}", r.case());
-    assert_eq!(m.ev, events(r), "{}", r.case());
+    let expected_ev: Vec<String> = events(r)
+        .into_iter()
+        .map(|ev| {
+            if code == ioctl::IOCTL_HID_GET_REPORT_DESCRIPTOR {
+                ev.replace("len=493", "len=511").replace("info=493", "info=511")
+            } else {
+                ev
+            }
+        })
+        .collect();
+    assert_eq!(m.ev, expected_ev, "{}", r.case());
     assert_eq!(
         state.snapshot(),
         parse_state(r.get("st_in")),

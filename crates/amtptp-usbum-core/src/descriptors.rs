@@ -1,13 +1,12 @@
 //! HID descriptors and device attributes (`StaticHidRegistry.h`, Hid.c:7-397).
 //!
-//! The six 516-byte report descriptors are built at compile time from the shared [`ptp_hid`] builders with
-//! this driver's per-family axis values (spec 5.1; byte-identical to the C arrays, verified against the
-//! oracle fixtures). All six HID descriptors are the same 9 bytes `09 21 00 01 00 01 22 04 02`.
+//! Seven 534-byte report descriptors are built at compile time from the shared [`ptp_hid`] builders with
+//! this driver's per-family axis values so every supported family's `LOGICAL_MAXIMUM` matches its sensor
+//! coordinate span (`max - min`). All HID descriptors are the same 9 bytes `09 21 00 01 00 01 22 16 02`.
 //!
-//! The C PID-to-descriptor switch (Hid.c:42-137 and :280-339) listed the PIDs a second time. Here the
-//! descriptor is chosen by the config row's family ([`HidRegistry::for_family`]), so every PID is listed
-//! once, in the config table: WS1/WS2/WS4/WS4A and T2 have config rows but no descriptor, and WS5A uses
-//! the WS5 descriptor and WS9 the WS8 one (UM-B18, P3 PRESERVED).
+//! Here the descriptor is chosen by the config row's family ([`HidRegistry::for_family`]), so every PID is
+//! listed once, in the config table: WS1/WS2/WS4/WS4A and T2 have config rows but no descriptor, WS5A
+//! shares WS7A's `10030 x 6880` descriptor, and WS9 has its own `10173 x 7006` descriptor.
 
 use ptp_hid::common::DEVICE_VID;
 
@@ -17,50 +16,57 @@ use ptp_hid::descriptor::{
 };
 use ptp_hid::hidport::{HID_DESCRIPTOR_LEN, HID_DESCRIPTOR_U32_ID_UMAPP, HidDeviceAttributes};
 
-/// Length of every `UsbUm` report descriptor (`DescriptorList[0].wReportLength` = 516).
+/// Length of every `UsbUm` report descriptor (`DescriptorList[0].wReportLength` = 534).
 pub const REPORT_DESCRIPTOR_LEN: usize = REPORT_DESCRIPTOR_U32_ID_UMAPP_LEN;
 
 /// `DEVICE_VERSION` (Hid.h:19): `HID_DEVICE_ATTRIBUTES.VersionNumber`.
 pub const DEVICE_VERSION: u16 = 0x0001;
 
-/// `AmtPtp{3,5,6,7a,8,Mt2}DefaultHidDescriptor`: identical for all six families because every report
-/// descriptor is 516 bytes: `09 21 00 01 00 01 22 04 02`.
+/// `AmtPtp*DefaultHidDescriptor`: identical for all supported families because every report descriptor is
+/// 534 bytes: `09 21 00 01 00 01 22 16 02`.
 pub const HID_DESCRIPTOR: [u8; HID_DESCRIPTOR_LEN] = HID_DESCRIPTOR_U32_ID_UMAPP;
 
-/// Wellspring3.h axis values.
+/// Wellspring3.h axis values (`WS3`).
 pub const AXES_WS3: Axes = Axes {
     x_logical_max: 9626,
     x_physical_max: 1050,
     y_physical_max: 760,
     y_logical_max: 6775,
 };
-/// Wellspring5.h axis values (also used for WS5A, UM-B18).
+/// Wellspring5.h axis values (`WS5`).
 pub const AXES_WS5: Axes = Axes {
     x_logical_max: 9465,
     x_physical_max: 1050,
     y_physical_max: 810,
     y_logical_max: 6735,
 };
-/// Wellspring6.h axis values (WS6 and WS6A).
+/// Wellspring6.h axis values (`WS6` and `WS6A`).
 pub const AXES_WS6: Axes = Axes {
     x_logical_max: 9760,
     x_physical_max: 1067,
     y_physical_max: 762,
     y_logical_max: 6750,
 };
-/// Wellspring7A.h axis values (WS7 and WS7A).
+/// Wellspring7A.h axis values (`WS5A`, `WS7` and `WS7A`).
 pub const AXES_WS7A: Axes = Axes {
     x_logical_max: 10030,
     x_physical_max: 1064,
     y_physical_max: 773,
     y_logical_max: 6880,
 };
-/// Wellspring8.h axis values (WS8, and WS9, UM-B18).
+/// Wellspring8.h axis values (`WS8`).
 pub const AXES_WS8: Axes = Axes {
     x_logical_max: 9760,
     x_physical_max: 1045,
     y_physical_max: 750,
     y_logical_max: 6750,
+};
+/// Wellspring 9 axis values (`WS9`, matching `WS9_GEOMETRY` `10173 x 7006`).
+pub const AXES_WS9: Axes = Axes {
+    x_logical_max: 10173,
+    x_physical_max: 1045,
+    y_physical_max: 750,
+    y_logical_max: 7006,
 };
 /// WellspringMt2.h axis values (Magic Trackpad 2).
 pub const AXES_MT2: Axes = Axes {
@@ -70,38 +76,43 @@ pub const AXES_MT2: Axes = Axes {
     y_logical_max: 5065,
 };
 
-/// `AmtPtp3ReportDescriptor` (SHA-256 a9473313...).
+/// `AmtPtp3ReportDescriptor`.
 pub static REPORT_DESCRIPTOR_WS3: [u8; REPORT_DESCRIPTOR_LEN] =
     report_descriptor_u32_id_umapp(AXES_WS3);
-/// `AmtPtp5ReportDescriptor` (SHA-256 3b57036a...).
+/// `AmtPtp5ReportDescriptor`.
 pub static REPORT_DESCRIPTOR_WS5: [u8; REPORT_DESCRIPTOR_LEN] =
     report_descriptor_u32_id_umapp(AXES_WS5);
-/// `AmtPtp6ReportDescriptor` (SHA-256 83e1b906...).
+/// `AmtPtp6ReportDescriptor`.
 pub static REPORT_DESCRIPTOR_WS6: [u8; REPORT_DESCRIPTOR_LEN] =
     report_descriptor_u32_id_umapp(AXES_WS6);
-/// `AmtPtp7aReportDescriptor` (SHA-256 9a509e44...).
+/// `AmtPtp7aReportDescriptor`.
 pub static REPORT_DESCRIPTOR_WS7A: [u8; REPORT_DESCRIPTOR_LEN] =
     report_descriptor_u32_id_umapp(AXES_WS7A);
-/// `AmtPtp8ReportDescriptor` (SHA-256 13d94c5f...).
+/// `AmtPtp8ReportDescriptor`.
 pub static REPORT_DESCRIPTOR_WS8: [u8; REPORT_DESCRIPTOR_LEN] =
     report_descriptor_u32_id_umapp(AXES_WS8);
-/// `AmtPtpMt2ReportDescriptor` (SHA-256 c803f5c3...).
+/// `AmtPtp9ReportDescriptor` (`WS9`).
+pub static REPORT_DESCRIPTOR_WS9: [u8; REPORT_DESCRIPTOR_LEN] =
+    report_descriptor_u32_id_umapp(AXES_WS9);
+/// `AmtPtpMt2ReportDescriptor`.
 pub static REPORT_DESCRIPTOR_MT2: [u8; REPORT_DESCRIPTOR_LEN] =
     report_descriptor_u32_id_umapp(AXES_MT2);
 
-/// The six static HID registries of `StaticHidRegistry.h`.
+/// Static HID descriptor registries for `UsbUm`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum HidRegistry {
     /// `AmtPtp3*`: WS3.
     Ws3,
-    /// `AmtPtp5*`: WS5 and WS5A.
+    /// `AmtPtp5*`: WS5.
     Ws5,
     /// `AmtPtp6*`: WS6 and WS6A.
     Ws6,
-    /// `AmtPtp7a*`: WS7 and WS7A.
+    /// `AmtPtp7a*`: WS5A, WS7 and WS7A.
     Ws7a,
-    /// `AmtPtp8*`: WS8 and WS9.
+    /// `AmtPtp8*`: WS8.
     Ws8,
+    /// `AmtPtp9*`: WS9.
+    Ws9,
     /// `AmtPtpMt2*`: Magic Trackpad 2.
     Mt2,
 }
@@ -113,10 +124,11 @@ impl HidRegistry {
     pub const fn for_family(family: Family) -> Option<Self> {
         match family {
             Family::Ws3 => Some(Self::Ws3),
-            Family::Ws5 | Family::Ws5a => Some(Self::Ws5),
+            Family::Ws5 => Some(Self::Ws5),
             Family::Ws6 | Family::Ws6a => Some(Self::Ws6),
-            Family::Ws7 | Family::Ws7a => Some(Self::Ws7a),
-            Family::Ws8 | Family::Ws9 => Some(Self::Ws8),
+            Family::Ws5a | Family::Ws7 | Family::Ws7a => Some(Self::Ws7a),
+            Family::Ws8 => Some(Self::Ws8),
+            Family::Ws9 => Some(Self::Ws9),
             Family::Mt2 => Some(Self::Mt2),
             Family::Ws1 | Family::Ws2 | Family::Ws4 | Family::Ws4a | Family::T2 => None,
         }
@@ -124,13 +136,13 @@ impl HidRegistry {
 
     /// The descriptor `AmtPtpGetHidDescriptor` / `AmtPtpGetReportDescriptor` answer for `pid`: the family
     /// of its config row ([`lookup_config`]), then [`Self::for_family`]. `None` for every other PID (the
-    /// handlers then return `STATUS_INVALID_DEVICE_STATE`). Equals the C PID switch for every PID.
+    /// handlers then return `STATUS_INVALID_DEVICE_STATE`).
     #[must_use]
     pub fn for_pid(pid: u16) -> Option<Self> {
         Self::for_family(lookup_config(pid)?.family)
     }
 
-    /// The 516-byte report descriptor.
+    /// The 534-byte report descriptor.
     #[must_use]
     pub const fn report_descriptor(self) -> &'static [u8; REPORT_DESCRIPTOR_LEN] {
         match self {
@@ -139,6 +151,7 @@ impl HidRegistry {
             Self::Ws6 => &REPORT_DESCRIPTOR_WS6,
             Self::Ws7a => &REPORT_DESCRIPTOR_WS7A,
             Self::Ws8 => &REPORT_DESCRIPTOR_WS8,
+            Self::Ws9 => &REPORT_DESCRIPTOR_WS9,
             Self::Mt2 => &REPORT_DESCRIPTOR_MT2,
         }
     }
@@ -158,11 +171,12 @@ impl HidRegistry {
             Self::Ws6 => AXES_WS6,
             Self::Ws7a => AXES_WS7A,
             Self::Ws8 => AXES_WS8,
+            Self::Ws9 => AXES_WS9,
             Self::Mt2 => AXES_MT2,
         }
     }
 
-    /// The C symbol prefix (`"AmtPtp3"` ... `"AmtPtpMt2"`).
+    /// The descriptor symbol prefix (`"AmtPtp3"` ... `"AmtPtpMt2"`).
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
@@ -171,6 +185,7 @@ impl HidRegistry {
             Self::Ws6 => "AmtPtp6",
             Self::Ws7a => "AmtPtp7a",
             Self::Ws8 => "AmtPtp8",
+            Self::Ws9 => "AmtPtp9",
             Self::Mt2 => "AmtPtpMt2",
         }
     }

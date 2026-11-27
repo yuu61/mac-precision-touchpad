@@ -14,7 +14,10 @@ use amtptp_usbkm_core::hid::{
 use amtptp_usbkm_core::input::TRACKPAD_FINGER_LEN;
 use amtptp_usbkm_core::lifecycle::DEVICE_INTERFACE_GUID;
 use amtptp_usbkm_core::wellspring::{POOL_TAG_PTP_CONTROL, TRANSFER_BUFFER_POOL_TYPE};
-use common::{Record, Tally, hex, load, num, replay_descriptor_ioctl};
+use common::{
+    C_REPORT_DESCRIPTOR_LEN, REPORT_DESCRIPTOR_DELTA, Record, Tally, hex, load, num,
+    replay_descriptor_ioctl, to_legacy_c_u32,
+};
 use ptp_hid::feature::{
     DEVICE_CAPS_REPORT_LEN, HQA_REPORT_LEN, INPUT_MODE_REPORT_LEN,
     SELECTIVE_REPORT_DEVICE_MODE_STRUCT_LEN,
@@ -88,13 +91,17 @@ fn descriptors_fixture() {
         let id = r.id();
         match r.req("kind") {
             "report_descriptor" => {
-                assert_eq!(num(r.req("len")) as usize, REPORT_DESCRIPTOR_LEN);
-                assert_eq!(hex(r.req("bytes")), REPORT_DESCRIPTOR.to_vec());
+                assert_eq!(num(r.req("len")) as usize, C_REPORT_DESCRIPTOR_LEN);
+                assert_eq!(REPORT_DESCRIPTOR_LEN, C_REPORT_DESCRIPTOR_LEN + REPORT_DESCRIPTOR_DELTA);
+                assert_eq!(hex(r.req("bytes")), to_legacy_c_u32(&REPORT_DESCRIPTOR, false));
                 tally.add("report_descriptor");
             }
             "hid_descriptor" => {
                 assert_eq!(num(r.req("len")) as usize, HID_DESCRIPTOR_LEN);
-                assert_eq!(hex(r.req("bytes")), HID_DESCRIPTOR.to_vec());
+                let mut c_hid = hex(r.req("bytes"));
+                assert_eq!(&c_hid[7..9], &(C_REPORT_DESCRIPTOR_LEN as u16).to_le_bytes());
+                c_hid[7..9].copy_from_slice(&(REPORT_DESCRIPTOR_LEN as u16).to_le_bytes());
+                assert_eq!(c_hid, HID_DESCRIPTOR.to_vec());
                 tally.add("hid_descriptor");
             }
             "layout" if r.get("device_context").is_some() => {
@@ -120,7 +127,9 @@ fn descriptors_fixture() {
                         "PTP_DEVICE_CAPS_FEATURE_REPORT" => assert_eq!(v(), DEVICE_CAPS_REPORT_LEN),
                         "PTP_DEVICE_HQA_CERTIFICATION_REPORT" => assert_eq!(v(), HQA_REPORT_LEN),
                         "PTP_DEVICE_INPUT_MODE_REPORT" => assert_eq!(v(), INPUT_MODE_REPORT_LEN),
-                        "wReportLength" => assert_eq!(v(), REPORT_DESCRIPTOR_LEN),
+                        "wReportLength" => {
+                            assert_eq!(v() + REPORT_DESCRIPTOR_DELTA, REPORT_DESCRIPTOR_LEN);
+                        }
                         // HID_XFER_PACKET field offsets: the glue reads the struct (glue contract,
                         // documented in feature.rs); pinned here so a change is noticed.
                         "xfer_off_reportBuffer" => assert_eq!(v(), 0),

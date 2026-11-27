@@ -294,7 +294,7 @@ unsafe extern "C" fn evt_io_internal_device_control(
         InternalIoctl::GetReportDescriptor => {
             let completion = {
                 let mut output = retrieve_output_memory(&request);
-                hid::get_report_descriptor_to(as_output(&mut output))
+                hid::get_report_descriptor_for_to(context.state.config(), as_output(&mut output))
             };
             trace_failure("GetReportDescriptor", &completion);
             complete(request, completion);

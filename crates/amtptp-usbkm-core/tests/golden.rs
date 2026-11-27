@@ -8,7 +8,8 @@ mod common;
 use amtptp_usbkm_core::config::{FALLBACK_CONFIG, config_for_pid};
 use amtptp_usbkm_core::feature::{GetFeaturePacket, SetFeaturePacket, get_feature, set_feature};
 use amtptp_usbkm_core::hid::{
-    HID_DESCRIPTOR, REPORT_DESCRIPTOR, get_device_attributes, get_report_descriptor,
+    HID_DESCRIPTOR, REPORT_DESCRIPTOR, REPORT_DESCRIPTOR_LEN, REPORT_DESCRIPTOR_T2_13,
+    get_device_attributes, get_report_descriptor, get_report_descriptor_for,
 };
 use amtptp_usbkm_core::input::{
     PacketAction, ReadReportResult, complete_read_report, parse_packet, process_packet,
@@ -23,7 +24,7 @@ use amtptp_usbkm_core::wellspring::{
     wellspring_write_setup,
 };
 use common::fake::FakeHw;
-use common::hex;
+use common::{hex, to_legacy_c_u32};
 
 /// Appendix A, 493 bytes.
 const APPENDIX_A: &str = "\
@@ -65,23 +66,35 @@ fn two_finger_packet() -> Vec<u8> {
 
 #[test]
 fn appendix_a_report_descriptor() {
+    assert_eq!(REPORT_DESCRIPTOR_LEN, 511);
     assert_eq!(
         hex(&APPENDIX_A.to_ascii_lowercase()),
-        REPORT_DESCRIPTOR.to_vec()
+        to_legacy_c_u32(&REPORT_DESCRIPTOR, false)
     );
-    let mut out = vec![0_u8; 493];
+    let mut out = vec![0_u8; REPORT_DESCRIPTOR_LEN];
     assert_eq!(
         get_report_descriptor(Ok(&mut out)),
-        Completion::success(493)
+        Completion::success(REPORT_DESCRIPTOR_LEN)
     );
     assert_eq!(out, REPORT_DESCRIPTOR.to_vec());
+
+    // 13-inch T2 (0x027a / 0x027b) selects the 12992x7855 descriptor.
+    assert_eq!(
+        get_report_descriptor_for(config_for_pid(0x027a), Ok(&mut out)),
+        Completion::success(REPORT_DESCRIPTOR_LEN)
+    );
+    assert_eq!(out, REPORT_DESCRIPTOR_T2_13.to_vec());
+    assert_eq!(
+        hex(&APPENDIX_A.to_ascii_lowercase()),
+        to_legacy_c_u32(&REPORT_DESCRIPTOR_T2_13, true)
+    );
 }
 
 #[test]
 fn appendix_b_hid_descriptor() {
     assert_eq!(
         HID_DESCRIPTOR,
-        [0x09, 0x21, 0x00, 0x01, 0x00, 0x01, 0x22, 0xED, 0x01]
+        [0x09, 0x21, 0x00, 0x01, 0x00, 0x01, 0x22, 0xFF, 0x01]
     );
 }
 

@@ -136,16 +136,16 @@ const _: () = assert!(REPORT_DESCRIPTOR_U32_ID_UMAPP_LEN <= u16::MAX as usize);
 const _: () = assert!(REPORT_DESCRIPTOR_U32_ID_LEN <= u16::MAX as usize);
 const _: () = assert!(REPORT_DESCRIPTOR_SPI_UMAPP_LEN <= u16::MAX as usize);
 
-/// `UsbUm`'s HID descriptor (all 6 families, 516-byte report descriptor): `09 21 00 01 00 01 22 04 02`.
+/// `UsbUm`'s HID descriptor (534-byte report descriptor): `09 21 00 01 00 01 22 16 02`.
 pub const HID_DESCRIPTOR_U32_ID_UMAPP: [u8; HID_DESCRIPTOR_LEN] =
-    hid_descriptor(REPORT_DESCRIPTOR_U32_ID_UMAPP_LEN as u16); // 516 fits, asserted above
-/// The HID descriptor of `UsbKm` and `HidFilter` (493-byte report descriptor): `09 21 00 01 00 01 22 ed 01`.
+    hid_descriptor(REPORT_DESCRIPTOR_U32_ID_UMAPP_LEN as u16); // 534 fits, asserted above
+/// The HID descriptor of `UsbKm` and `HidFilter` (511-byte report descriptor): `09 21 00 01 00 01 22 ff 01`.
 pub const HID_DESCRIPTOR_U32_ID: [u8; HID_DESCRIPTOR_LEN] =
-    hid_descriptor(REPORT_DESCRIPTOR_U32_ID_LEN as u16); // 493 fits, asserted above
-/// `SpiKm`'s HID descriptor (all 4 families, both variants, 501-byte report descriptor):
-/// `09 21 00 01 00 01 22 f5 01`.
+    hid_descriptor(REPORT_DESCRIPTOR_U32_ID_LEN as u16); // 511 fits, asserted above
+/// `SpiKm`'s HID descriptor (all 4 families, both variants, 519-byte report descriptor):
+/// `09 21 00 01 00 01 22 07 02`.
 pub const HID_DESCRIPTOR_SPI_UMAPP: [u8; HID_DESCRIPTOR_LEN] =
-    hid_descriptor(REPORT_DESCRIPTOR_SPI_UMAPP_LEN as u16); // 501 fits, asserted above
+    hid_descriptor(REPORT_DESCRIPTOR_SPI_UMAPP_LEN as u16); // 519 fits, asserted above
 
 // ---------------------------------------------------------------------------------------------------
 // HID_DEVICE_ATTRIBUTES
@@ -239,18 +239,17 @@ mod tests {
 
     #[test]
     fn hid_descriptors_of_all_drivers() {
-        // usbum.md 4.3, usbkm.md Appendix B, spikm.md 5.3, hidfilter.md A.4.
         assert_eq!(
             HID_DESCRIPTOR_U32_ID_UMAPP,
-            [0x09, 0x21, 0x00, 0x01, 0x00, 0x01, 0x22, 0x04, 0x02]
+            [0x09, 0x21, 0x00, 0x01, 0x00, 0x01, 0x22, 0x16, 0x02]
         );
         assert_eq!(
             HID_DESCRIPTOR_U32_ID,
-            [0x09, 0x21, 0x00, 0x01, 0x00, 0x01, 0x22, 0xed, 0x01]
+            [0x09, 0x21, 0x00, 0x01, 0x00, 0x01, 0x22, 0xff, 0x01]
         );
         assert_eq!(
             HID_DESCRIPTOR_SPI_UMAPP,
-            [0x09, 0x21, 0x00, 0x01, 0x00, 0x01, 0x22, 0xf5, 0x01]
+            [0x09, 0x21, 0x00, 0x01, 0x00, 0x01, 0x22, 0x07, 0x02]
         );
     }
 
