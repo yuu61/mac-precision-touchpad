@@ -40,7 +40,7 @@ The policy terms come from the [behavior policy](README.md#behavior-policy):
 | KM-B20 | FIXED (P2) stale handle, PRESERVED (P3) selection | `lifecycle::select_interrupt_interface` resets `InterruptPipe` before the selection. A restart that finds no interrupt pipe now fails with `STATUS_INVALID_DEVICE_STATE`; C kept the deleted pipe handle, a use-after-free. It still takes the first interrupt pipe regardless of direction and ignores `tp_ep`. |
 | KM-B21 | PRESERVED (P1) | The descriptor bytes are reproduced exactly (`hid::REPORT_DESCRIPTOR` = `ptp_hid::descriptor::report_descriptor_u32_id(T2_AXES)`): physical maxima 1300/850, COLLECTION_2 without the unit reset, and Contact ID Logical Max `27 FF FF FF FF`. |
 | KM-B22 | PRESERVED (P3) *glue* | `FILETYPE VFT_APP` in the version resource is a driver-crate resource matter, not core logic. |
-| KM-B23 | PRESERVED (P1) *packaging* | Duplicate INF hardware IDs are an INF matter (`package/AmtPtpDevice.inx`). |
+| KM-B23 | PRESERVED (P1) *packaging* | Duplicate INF hardware IDs are an INF matter (`packaging/AmtPtpDevice.inx`). |
 | KM-B24 | PRESERVED (P1) *glue* | `Irp->UserBuffer` is checked only for NULL (`feature::*` closure returns `None`). The glue builds the report slice from `(reportBuffer, reportBufferLen)` and trusts hidclass. |
 | KM-B25 | PRESERVED (P3) | READ_REPORT is forwarded to the InputQueue without a length check (`hid::InternalIoctl::ReadReport`). A short buffer fails at dequeue: with B6/B7 fixed, it is completed with `STATUS_BUFFER_TOO_SMALL` instead of leaking. |
 | KM-B26 | N/A | WPP is replaced by TraceLogging, so the format mismatch no longer exists. |

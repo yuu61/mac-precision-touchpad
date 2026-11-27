@@ -5,10 +5,14 @@
 
 use std::path::{Path, PathBuf};
 
-/// The repository root (parent of `xtask/`).
+/// The repository root, two levels above the `tools/xtask` manifest directory.
 pub fn repo_root() -> PathBuf {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    manifest_dir.parent().unwrap_or(manifest_dir).to_path_buf()
+    manifest_dir
+        .ancestors()
+        .nth(2)
+        .unwrap_or(manifest_dir)
+        .to_path_buf()
 }
 
 /// The host workspace's target directory (`<root>/target`).

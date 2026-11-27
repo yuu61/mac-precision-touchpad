@@ -1,6 +1,6 @@
 # Building, packaging and signing the Rust drivers
 
-The four drivers are built by Cargo and packaged by `cargo xtask` (`xtask/`, std only, no external
+The four drivers are built by Cargo and packaged by `cargo xtask` (`tools/xtask/`, std only, no external
 dependencies). This replaces `AmtPtpDriver.sln`, the driver `.vcxproj` files and
 `AmtPtpDeviceUniversalPkg.vcxproj`.
 
@@ -70,7 +70,7 @@ cargo xtask help
      Inf2Cat does not catalog them. In the packaged `AmtPtpDeviceUsbUm.dll` it clears
      `IMAGE_DLLCHARACTERISTICS_FORCE_INTEGRITY` (0x80); see
      [FORCE_INTEGRITY](#force_integrity-on-the-umdf-dll).
-  3. It writes `package/<inf-name>.inx` as `<inf-name>.inf` with CRLF line endings. The `.inx`
+  3. It writes `packaging/<inf-name>.inx` as `<inf-name>.inf` with CRLF line endings. The `.inx`
      files are LF in git.
   4. It runs `stampinf -f <inf> -d * -a amd64|arm64 -c <inf-name>.cat -v <version|*> -k 1.23
      -u 2.15.0`. The KMDF and UMDF versions are read from `[workspace.metadata.wdk.driver-model]`
@@ -93,7 +93,7 @@ cargo xtask help
      - For x64 these are every id from 1709 (RS3) on that `Inf2Cat /?` of WDK 10.0.28000
        accepts. `Server2016_X64` (1607) and the generic `Server10_X64` are below the floor.
      - ARM64 is client only. Inf2Cat also accepts `ServerRS5_ARM64`, `ServerFE_ARM64` and
-       `Server2025_ARM64`; add them to `Arch::inf2cat_os` in `xtask/src/cli.rs` if ARM64 Server
+       `Server2025_ARM64`; add them to `Arch::inf2cat_os` in `tools/xtask/src/cli.rs` if ARM64 Server
        is ever targeted.
   9. With `--sign`, it signs the `.cat`.
   - Any failing step stops the run with a message naming the tool, its exit code and the full
@@ -101,8 +101,8 @@ cargo xtask help
 - `--driver-version a.b.c.d`: the DriverVer version, with each part from 0 to 65535. The default
   is stampinf's `*`, which is the current time `h.m.s.ms`. The DriverVer date is always the
   current date.
-- `--inf`: `universal` is `package/AmtPtpDevice.inx` with all four drivers. `hidfilter` is
-  `package/AmtPtpHidFilter.inx` with AmtPtpHidFilter only. The default `all` packages both.
+- `--inf`: `universal` is `packaging/AmtPtpDevice.inx` with all four drivers. `hidfilter` is
+  `packaging/AmtPtpHidFilter.inx` with AmtPtpHidFilter only. The default `all` packages both.
 - `test`: runs these steps, all of them, then reports every failure:
   - `cargo test --workspace` in the host workspace (core crates and xtask);
   - Clippy on all host targets, including integration tests.
@@ -131,8 +131,8 @@ target/package/<x64|arm64>/
   AmtPtpHidFilter.symbols/   AmtPtpHidFilter.pdb
 ```
 
-- Each package directory is flat: the INF, CAT and binaries. That is the input
-  `es/New-CabinetFile.ps1 -ContentDirectory` expects.
+- Each package directory contains the INF, CAT and binaries. Pass the directory to
+  `New-CabinetFile -ContentDirectory` after dot-sourcing [the CAB script](../../packaging/New-CabinetFile.ps1).
 - The directory does not record the profile. A dev-profile `package` overwrites a release one.
   Use `--release` for anything you distribute.
 - Each package has its own `.symbols` directory, emptied together with the package, so its PDBs
@@ -220,8 +220,8 @@ target/package/<x64|arm64>/
 
 ## INF changes
 
-- `package/AmtPtpDevice.inx` is `src/AmtPtpDeviceUniversalPkg/AmtPtpDevice.inf` and
-  `package/AmtPtpHidFilter.inx` is `src/AmtPtpHidFilter/AmtPtpHidFilter.inf`, with only the
+- `packaging/AmtPtpDevice.inx` is `src/AmtPtpDeviceUniversalPkg/AmtPtpDevice.inf` and
+  `packaging/AmtPtpHidFilter.inx` is `src/AmtPtpHidFilter/AmtPtpHidFilter.inf`, with only the
   changes below. Line endings are LF, per `.gitattributes`.
 - **Unchanged (P1):**
   - every hardware ID, including the duplicate USB `0273/0274/0290/0291&MI_02` bindings to both

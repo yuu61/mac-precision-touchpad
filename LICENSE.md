@@ -8,4 +8,4 @@ Copyright 2018-2019, Bingxing Wang and other project contributors.
 - The SPI PTP project, `AmtPtpDeviceSpiKm` is licensed unser [MIT](LICENSE-MIT.md):
   `drivers/km/AmtPtpDeviceSpiKm`, `crates/amtptp-spikm-core`.
 - The shared building blocks used by the drivers are licensed under [MIT](LICENSE-MIT.md):
-  `crates/ptp-hid`, `drivers/wdf-support`, `drivers/rc-embed`.
+  `crates/ptp-hid`, `drivers/support/wdf-support`, `drivers/support/rc-embed`.

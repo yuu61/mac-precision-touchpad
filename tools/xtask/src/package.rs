@@ -63,9 +63,9 @@ const HID_FILTER: Binary = Binary {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InfKind {
-    /// `package/AmtPtpDevice.inx`: all four drivers.
+    /// `packaging/AmtPtpDevice.inx`: all four drivers.
     Universal,
-    /// `package/AmtPtpHidFilter.inx`: the standalone Magic Trackpad 2 filter package.
+    /// `packaging/AmtPtpHidFilter.inx`: the standalone Magic Trackpad 2 filter package.
     HidFilter,
 }
 
@@ -82,7 +82,7 @@ impl InfKind {
 
     fn inx(self) -> PathBuf {
         repo_root()
-            .join("package")
+            .join("packaging")
             .join(format!("{}.inx", self.name()))
     }
 
