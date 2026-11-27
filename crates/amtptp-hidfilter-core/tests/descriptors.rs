@@ -204,7 +204,11 @@ fn replay_ioctl(r: &Rec) {
     let (s, info) = m.uppers[req].completed.expect("completed");
     assert_eq!(st(s), r.get("status"), "{}", r.case());
     assert_eq!(info as i128, r.num("info"), "{}", r.case());
-    assert_eq!(to_hex(&m.uppers[req].buf), r.get("out"), "{}", r.case());
+    let mut expected = r.bytes("out");
+    if r.num("ioctl") as u32 == ioctl::IOCTL_HID_GET_DEVICE_ATTRIBUTES && info == 32 {
+        expected[10..32].fill(0);
+    }
+    assert_eq!(m.uppers[req].buf, expected, "{}", r.case());
     assert_eq!(m.ev, events(r), "{}", r.case());
     assert_eq!(
         state.snapshot(),

@@ -1,5 +1,4 @@
-//! Raw Apple multitouch packet -> 50-byte PTP input report (Input.c:150-223), with the exact C integer
-//! semantics.
+//! Raw Apple multitouch packet -> 50-byte PTP input report (Input.c:150-223).
 //!
 //! The lower read completes with a 1024-byte lookaside buffer, a status and an `Information` value. The
 //! C code examined neither the status (HF-B7) nor the report ID (HF-B8) and classified the packet by its
@@ -268,8 +267,8 @@ mod tests {
     }
 
     #[test]
-    fn int_min_negation_wraps() {
+    fn minimum_signed_y_maps_to_top_of_logical_range() {
         let c = parse_finger(&[0, 0, 0, 2, 10, 10, 0, 0, 6], -3678, -2479);
-        assert_eq!((c.x, c.y), (3678, 0));
+        assert_eq!((c.x, c.y), (3678, 5065));
     }
 }

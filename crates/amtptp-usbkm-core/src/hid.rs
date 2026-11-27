@@ -172,8 +172,7 @@ pub const fn device_attributes(ids: UsbDeviceIds) -> HidDeviceAttributes {
 ///
 /// `output` is the result of `WdfRequestRetrieveOutputBuffer(Request, sizeof(HID_DEVICE_ATTRIBUTES), ..)`
 /// (which already fails with `STATUS_BUFFER_TOO_SMALL` below 32 bytes; a shorter `Ok` buffer gives the
-/// same status here). Writes `Size`, `VendorID`, `ProductID` and `VersionNumber` only: `Reserved` (bytes
-/// 10..32) keeps the caller's bytes, as in C (spec B17, preserved). Completes with `Information = 32`.
+/// same status here). Writes `Size`, `VendorID`, `ProductID` and `VersionNumber` and zeroes `Reserved` (bytes 10..32). Completes with `Information = 32`.
 ///
 /// Before the first `PrepareHardware` the cached descriptor is all zero, so `VendorID` and `ProductID` are 0.
 #[must_use]
@@ -271,7 +270,7 @@ mod tests {
     }
 
     #[test]
-    fn attributes_leave_reserved() {
+    fn attributes_zero_reserved() {
         let ids = UsbDeviceIds {
             vendor_id: 0x05ac,
             product_id: 0x027a,
@@ -286,6 +285,7 @@ mod tests {
             out[..10],
             [0x20, 0, 0, 0, 0xac, 0x05, 0x7a, 0x02, 0x01, 0x00]
         );
-        assert!(out[10..].iter().all(|&b| b == 0xcc));
+        assert_eq!(out[10..32], [0; 22]);
+        assert_eq!(out[32..], [0xcc; 16]);
     }
 }

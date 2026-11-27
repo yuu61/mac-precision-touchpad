@@ -3,7 +3,7 @@
 use ptp_hid::common::PTP_CONTACT_SLOTS;
 use ptp_hid::input::{PtpContact, PtpReport};
 
-use crate::config::{Bcm5974Config, TrackpadType};
+use crate::config::{Bcm5974Config, MAGIC_TRACKPAD_2, TrackpadType};
 
 /// Size of the unpacked TYPE1–4 finger structure, excluding any packet prefix.
 pub const TRACKPAD_FINGER_LEN: usize = 28;
@@ -100,14 +100,8 @@ fn raw_i16(bytes: &[u8], offset: usize) -> i32 {
         .map_or(0, |pair| i32::from(i16::from_le_bytes(*pair)))
 }
 
-/// Decodes a 9-byte Magic Trackpad 2 contact with the legacy Windows driver arithmetic.
-///
-/// - X: the low 13 bits of the u16 at bytes 0-1, sign-extended (`(SHORT)(tmp_x << 3) >> 3`).
-/// - Y: `-(INT)(u32 << 6) >> 19`, i.e. `-Y13` when the X bits are zero and `-Y13 - 1` otherwise
-///   (HF-B2); negating `INT_MIN` wraps like MSVC.
-/// - Both minus their `min`, clamped below at 0, never above (HF-B5), then truncated to `USHORT`.
-/// - `ContactID`: low nibble of byte 8. `TipSwitch`: byte 4 != 0. Confidence: byte 5 <= 172 (the C code
-///   tests `TouchMinor` twice, HF-B3).
+/// Decodes the signed 13-bit X and Y fields of a Magic Trackpad 2 finger.
+/// Invert Y after sign extension and keep both coordinates inside the HID logical range.
 #[must_use]
 pub const fn mt2_contact(f: &[u8; MT2_FINGER_LEN], x_min: i32, y_min: i32) -> PtpContact {
     let [
@@ -125,18 +119,26 @@ pub const fn mt2_contact(f: &[u8; MT2_FINGER_LEN], x_min: i32, y_min: i32) -> Pt
     let tmp_y = u32::from_le_bytes([b0, b1, b2, b3]);
     // tmp_x << 3 <= 0xFFF8; (SHORT) reinterprets, >> on a negative SHORT is arithmetic.
     let x = (((tmp_x << 3) as i16) >> 3) as i32;
-    // (tmp_y << 6) drops the top 6 bits; (INT) reinterprets; unary minus binds before >>.
-    let y = ((tmp_y << 6) as i32).wrapping_neg() >> 19;
-    let x = clamp_offset(x, x_min);
-    let y = clamp_offset(y, y_min);
+    let y = -(((tmp_y << 6) as i32) >> 19);
     PtpContact {
         // ((signed short)TouchMinor << 1) < 345, tested twice.
         confidence: ((touch_minor as i16 as i32) << 1) < 345,
         // ((signed short)TouchMajor << 1) > 0.
         tip_switch: ((touch_major as i16 as i32) << 1) > 0,
         contact_id: (orientation_origin & 0x0F) as u32,
-        x: x as u16, // (USHORT)x
-        y: y as u16, // (USHORT)y
+        x: bounded_offset(x, x_min, MAGIC_TRACKPAD_2.x.max - MAGIC_TRACKPAD_2.x.min),
+        y: bounded_offset(y, y_min, MAGIC_TRACKPAD_2.y.max - MAGIC_TRACKPAD_2.y.min),
+    }
+}
+
+const fn bounded_offset(value: i32, minimum: i32, logical_max: i32) -> u16 {
+    let offset = value.saturating_sub(minimum);
+    if offset < 0 {
+        0
+    } else if offset > logical_max {
+        logical_max as u16
+    } else {
+        offset as u16
     }
 }
 

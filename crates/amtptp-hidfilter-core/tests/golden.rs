@@ -29,15 +29,15 @@ fn d1_single_finger() {
     // (raw bytes, x, y, contact id, tip, confidence)
     let rows: [(&str, u16, u16, u32, bool, bool); 10] = [
         ("00 00 00 00 0a 0a 00 00 01", 3678, 2479, 1, true, true),
-        ("64 00 19 00 0a 0a 00 00 02", 3778, 2278, 2, true, true),
+        ("64 00 19 00 0a 0a 00 00 02", 3778, 2279, 2, true, true),
         ("00 00 19 00 0a 0a 00 00 03", 3678, 2279, 3, true, true),
-        ("8c 11 89 02 0a 0a 00 00 04", 0, 5478, 4, true, true),
-        ("ff 0f 00 02 0a 0a 00 00 05", 7773, 6574, 5, true, true),
-        ("00 00 00 02 0a 0a 00 00 06", 3678, 0, 6, true, true),
-        ("0a 40 01 00 01 ac 00 00 07", 3688, 2468, 7, true, true),
-        ("0a 40 01 00 01 ad 00 00 08", 3688, 2468, 8, true, false),
-        ("0a 40 01 00 00 00 00 00 09", 3688, 2468, 9, false, true),
-        ("0a 40 01 00 05 05 00 00 af", 3688, 2468, 15, true, true),
+        ("8c 11 89 02 0a 0a 00 00 04", 0, 5065, 4, true, true),
+        ("ff 0f 00 02 0a 0a 00 00 05", 7612, 5065, 5, true, true),
+        ("00 00 00 02 0a 0a 00 00 06", 3678, 5065, 6, true, true),
+        ("0a 40 01 00 01 ac 00 00 07", 3688, 2469, 7, true, true),
+        ("0a 40 01 00 01 ad 00 00 08", 3688, 2469, 8, true, false),
+        ("0a 40 01 00 00 00 00 00 09", 3688, 2469, 9, false, true),
+        ("0a 40 01 00 05 05 00 00 af", 3688, 2469, 15, true, true),
     ];
     for (raw, x, y, id, tip, conf) in rows {
         let f: [u8; 9] = h(raw).try_into().unwrap();
@@ -69,10 +69,10 @@ fn d2_whole_bt_packet() {
     assert_eq!(packet.len(), 58);
     let expected = h("05
         03 00 00 00 00 5e 0e af 09
-        03 01 00 00 00 c2 0e 7c 09
-        03 02 00 00 00 26 0f 4a 09
-        03 03 00 00 00 8a 0f 18 09
-        03 04 00 00 00 ee 0f e6 08
+        03 01 00 00 00 c2 0e 7d 09
+        03 02 00 00 00 26 0f 4b 09
+        03 03 00 00 00 8a 0f 19 09
+        03 04 00 00 00 ee 0f e7 08
         00 00 05 01");
     let mut buffer = vec![0_u8; REPORT_BUFFER_SIZE];
     buffer[..58].copy_from_slice(&packet);
@@ -184,7 +184,7 @@ fn d6_identity_and_mode_switch() {
     let mut attrs = [0xCC_u8; 32];
     device_attributes(0x0265).write_to(&mut attrs).unwrap();
     assert_eq!(attrs[..10], h("20 00 00 00 10 89 65 02 00 01")[..]);
-    assert!(attrs[10..].iter().all(|&x| x == 0xCC));
+    assert!(attrs[10..].iter().all(|&x| x == 0));
 
     for (transport, id, payload) in [
         (Transport::Usb, 0x02_u8, h("02 01 00 00")),

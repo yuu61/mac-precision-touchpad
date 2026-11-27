@@ -98,9 +98,7 @@ pub(crate) fn get_report_descriptor(context: &DeviceContext, request: &Request) 
 
 /// `AmtPtpGetDeviceAttribs` (Hid.c:306-362), `IOCTL_HID_GET_DEVICE_ATTRIBUTES`.
 ///
-/// `WdfRequestRetrieveOutputBuffer(Request, 32)` (failure: that status), then writes only the first 10
-/// bytes: `Size` = 32, `VendorID` = 0x8910 (deliberately fake), `ProductID` and `VersionNumber` of the real
-/// device. `Reserved` is left untouched, as in C. Information 32.
+/// Writes the full 32-byte structure and sets Information to 32.
 pub(crate) fn get_device_attribs(context: &DeviceContext, request: &Request) -> NTSTATUS {
     // SAFETY: the dispatcher owns this request until the handler returns.
     let (buffer, _) = match unsafe {
@@ -121,12 +119,9 @@ pub(crate) fn get_device_attribs(context: &DeviceContext, request: &Request) -> 
         return STATUS_INVALID_DEVICE_REQUEST;
     }
 
-    let header = device_attributes(&context.config.load()).header_bytes();
-    // SAFETY: the framework guarantees the output buffer holds at least
-    // HID_DEVICE_ATTRIBUTES_LEN (32) bytes, more than the 10 copied; the
-    // caller's buffer cannot overlap the local array. No reference to the
-    // caller's memory is created.
-    unsafe { copy_nonoverlapping(header.as_ptr(), buffer, header.len()) };
+    let attributes = device_attributes(&context.config.load()).to_bytes();
+    // SAFETY: WDF returned at least 32 writable bytes, disjoint from this local array.
+    unsafe { copy_nonoverlapping(attributes.as_ptr(), buffer, attributes.len()) };
     // Lossless: 32.
     request.set_information(DEVICE_ATTRIBUTES_INFORMATION as ULONG_PTR);
     STATUS_SUCCESS

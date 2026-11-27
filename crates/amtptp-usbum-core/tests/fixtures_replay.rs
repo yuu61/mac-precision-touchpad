@@ -15,6 +15,8 @@
 #![cfg(test)]
 
 mod common;
+#[path = "../../bcm5974/tests/support/mt2.rs"]
+mod mt2;
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -354,21 +356,31 @@ fn descriptors() {
         let outcome = dispatch(&state, code, &mut req, &mut usb, &mut strings)
             .unwrap_or_else(|| panic!("{case}: not completed"));
 
-        // B7 (P2): C copies the string into its own stack variable; the port writes it to the caller.
-        let mut expected_out = expected_ioctl_out(&rec);
-        if route_ioctl(code) == IoctlRoute::GetString && rec.s("calls").starts_with("ctb") {
-            let index = rec
-                .s("strq")
-                .split('/')
-                .next()
-                .expect("strq")
-                .parse::<u8>()
-                .expect("index");
-            let string = FakeStrings::utf16(FakeStrings::string(index).expect("known string"));
-            expected_out[..string.len()].copy_from_slice(&string);
-            tally.p2(B7_STRING);
+        let mut expected = expected_ioctl_out(&rec);
+        if route_ioctl(code) == IoctlRoute::GetString && rec.status("status") == STATUS_SUCCESS {
+            let expected_completion = if rec.s("strq") == "-" {
+                IoctlOutcome::NOT_SUPPORTED
+            } else {
+                let (index, _) = rec.s("strq").split_once('/').unwrap();
+                let text = FakeStrings::string(index.parse().unwrap()).unwrap();
+                let mut bytes = FakeStrings::utf16(text);
+                bytes.extend_from_slice(&[0, 0]);
+                tally.p2(B7_STRING);
+                if let Some(dst) = expected.get_mut(..bytes.len()) {
+                    dst.copy_from_slice(&bytes);
+                    IoctlOutcome::success(bytes.len())
+                } else {
+                    IoctlOutcome::status(amtptp_usbum_core::status::STATUS_BUFFER_TOO_SMALL)
+                }
+            };
+            assert_eq!(outcome, expected_completion, "{case}");
+            assert_eq!(req.out, expected, "{case}");
+        } else {
+            if route_ioctl(code) == IoctlRoute::GetDeviceAttributes && rec.u("info") == 32 {
+                expected[10..32].fill(0);
+            }
+            check_ioctl(&rec, &outcome, &req, Some(expected));
         }
-        check_ioctl(&rec, &outcome, &req, Some(expected_out));
         tally.fake_status(outcome.status, &[&req.failures, &strings.failures]);
         let events = outcome.event.map_or("-", |e| e.event_name());
         assert_eq!(events, rec.s("tl"), "{case}: TraceLogging");
@@ -378,7 +390,7 @@ fn descriptors() {
             "{case}: string queries"
         );
     }
-    tally.assert("descriptors.txt", 898, &[(B7_STRING, 35)], &[], 372);
+    tally.assert("descriptors.txt", 898, &[(B7_STRING, 35)], &[], 385);
     assert_eq!(
         tally
             .notes
@@ -421,7 +433,13 @@ fn ioctl_routing() {
             }
             Some(outcome) => {
                 assert_eq!((rec.s("queued"), rec.s("inputq")), ("0", "0"), "{case}");
-                check_ioctl(&rec, &outcome, &req, Some(expected_ioctl_out(&rec)));
+                if matches!(route_ioctl(code), IoctlRoute::GetString | IoctlRoute::SetFeature) {
+                    // The routing probes supply string ID 7 and feature ID 8.
+                    assert_eq!(outcome, IoctlOutcome::NOT_SUPPORTED);
+                    assert_eq!(req.out, expected_ioctl_out(&rec));
+                } else {
+                    check_ioctl(&rec, &outcome, &req, Some(expected_ioctl_out(&rec)));
+                }
                 tally.fake_status(outcome.status, &[&req.failures]);
             }
         }
@@ -461,7 +479,20 @@ fn features() {
             assert!(!req.out_accessed, "{case}: SET touched the output buffer");
             None
         };
-        check_ioctl(&rec, &outcome, &req, expected_out);
+        if route_ioctl(code) == IoctlRoute::SetFeature && rec.u("info") == 0 {
+            // C swallowed framework and transfer errors. Use the original failure recorded
+            // on the wire, or the retrieval status for a missing buffer.
+            let status = if rec.u("outlen") == 0 || rec.u("inlen") == 0 {
+                amtptp_usbum_core::status::STATUS_BUFFER_TOO_SMALL
+            } else if let Some((_, last_status)) = rec.s("wire").rsplit_once('/') {
+                u32::from_str_radix(last_status, 16).unwrap() as i32
+            } else {
+                amtptp_usbum_core::status::STATUS_NOT_SUPPORTED
+            };
+            assert_eq!(outcome, IoctlOutcome::status(status), "{case}");
+        } else {
+            check_ioctl(&rec, &outcome, &req, expected_out);
+        }
         tally.fake_status(outcome.status, &[&req.failures, &usb.failures]);
         let (wire, masked) = normalize_wire(case, rec.s("wire"));
         if masked > 0 {
@@ -471,7 +502,7 @@ fn features() {
         check_dev2(&rec, &usb);
         assert_eq!(state.snapshot(), rec.state_after(), "{case}: state after");
     }
-    tally.assert("feature.txt", 1050, &[(B1_UMASK, 8)], &[], 20);
+    tally.assert("feature.txt", 1050, &[(B1_UMASK, 8)], &[], 72);
     assert_eq!(SELECTIVE_SWAPS.with(core::cell::Cell::get), 258, "SET 0x06 bytes exchanged");
 }
 
@@ -544,6 +575,10 @@ fn run_input(
             // Replays are single frames or use the same QPC sample throughout a sequence.
             let offset = ptp_hid::input::PTP_REPORT_SCAN_TIME_OFFSET;
             expected[offset..offset + 2].copy_from_slice(&0_u16.to_le_bytes());
+            if state.config().is_some_and(|cfg| cfg.family == Family::Mt2) {
+                let records = &packet[12..];
+                mt2::correct_coordinates(&mut expected, records);
+            }
             assert_eq!(&req.out[..50], expected, "{case}: report");
             assert!(
                 req.out[50..].iter().all(|&b| b == 0xee),

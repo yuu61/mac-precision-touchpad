@@ -85,7 +85,7 @@
 //!   `bytes.len()`; `Err(s)`: complete with `s`.
 //! - `GetDeviceAttributes`: `WdfRequestRetrieveOutputBuffer(32)`, then
 //!   get [`descriptors::device_attributes`] for `&config` and write them to `buf`
-//!   (10 bytes; `Reserved` untouched).
+//!   (32 bytes including zeroed reserved fields).
 //!   Information = [`descriptors::DEVICE_ATTRIBUTES_INFORMATION`].
 //! - `GetFeature` / `SetFeature`: see the [`feature`] module docs (Information always 0).
 //! - `GetString`: format with the current type and send-and-forget to the lower target; on send failure

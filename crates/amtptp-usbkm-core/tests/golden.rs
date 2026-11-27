@@ -414,5 +414,5 @@ fn attributes_5_3() {
         out[..10],
         [0x20, 0, 0, 0, 0xac, 0x05, 0x73, 0x02, 0x01, 0x00]
     );
-    assert_eq!(out[10..], [0x11; 22]);
+    assert_eq!(out[10..], [0; 22]);
 }
