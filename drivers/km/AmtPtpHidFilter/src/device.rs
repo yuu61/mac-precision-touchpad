@@ -167,6 +167,15 @@ impl AddDeviceIo for AddDevice {
         };
         self.device = device;
         self.context = context;
+        // The read tracker's lock (not in C), parented to the device. Its failure fails the device
+        // creation step, like the C failures of this step.
+        // SAFETY: PASSIVE_LEVEL; the context was just initialized and no callback can reach it yet;
+        // the device outlives its child lock.
+        let lock_status = unsafe { (*context).reads.create(device.cast()) };
+        if !NT_SUCCESS(lock_status) {
+            Self::trace_failure("WdfSpinLockCreate", lock_status);
+            return lock_status;
+        }
         status
     }
 
@@ -392,8 +401,9 @@ unsafe extern "C" fn evt_device_d0_entry(
 }
 
 /// `PtpFilterDeviceD0Exit` (Device.c:149-182): clears `DeviceConfigured`, leaves D0 (a recovery timer
-/// or work item that runs afterwards does nothing) and completes every parked upper read with
-/// `STATUS_CANCELLED`. In-flight lower reads are left alone (HF-B14, preserved).
+/// or work item that runs afterwards does nothing), stops the recovery timer, cancels the lower reads
+/// in flight (their late completions are stale and dropped: P3 fix of HF-B14) and completes every
+/// parked upper read with `STATUS_CANCELLED`.
 unsafe extern "C" fn evt_device_d0_exit(
     device: WDFDEVICE,
     target_state: WDF_POWER_DEVICE_STATE,

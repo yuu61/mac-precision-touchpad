@@ -10,7 +10,7 @@ use std::collections::VecDeque;
 
 use amtptp_hidfilter_core::{
     AddDeviceIo, Bcm5974Param, DetourIo, DeviceSnapshot, FailedAction, FilterIo, NtStatus,
-    XferBuffer, XferPacket, XferPacketMut,
+    ReadTicket, ReadTracker, XferBuffer, XferPacket, XferPacketMut,
 };
 
 // ------------------------------------------------------------------------------------------------
@@ -336,6 +336,17 @@ pub struct Mock {
     pub lower_reads_pending: i64,
     pub sends: Vec<Send>,
     pub world: World,
+    /// The lower-read tracker (not in the C oracle, so its calls are not recorded in `ev`).
+    pub tracker: ReadTracker<usize>,
+    /// `WdfTimerStop` calls (not in the C oracle).
+    pub timer_stops: usize,
+    /// Reads `cancel_in_flight_reads` cancelled (not in the C oracle).
+    pub cancelled_reads: usize,
+    /// Every lower read sent (its id) with its ticket, in order.
+    pub tickets: Vec<(usize, ReadTicket)>,
+    /// The id the next lower read gets (ids keep the reads apart in the tracker; the recorded events
+    /// name every lower read `lower_read`, as the C oracle does).
+    next_lower_read: usize,
     cfg_mem_addr: Option<usize>,
     cfg_user_buffer: Option<(usize, [u8; 32])>,
 }
@@ -359,6 +370,11 @@ impl Mock {
         }
     }
 
+    /// Lower reads of the current epoch in flight.
+    pub fn in_flight(&self) -> usize {
+        self.tracker.in_flight()
+    }
+
     pub fn add_upper(&mut self, u: Upper) -> usize {
         self.uppers.push(u);
         self.uppers.len() - 1
@@ -376,7 +392,8 @@ impl Mock {
 impl FilterIo for Mock {
     type Request = usize;
     type Memory = usize;
-    type LowerRead = ();
+    /// A lower read's id.
+    type LowerRead = usize;
     type LowerMemory = ();
     type ModeSwitchRequest = ();
     type ModeSwitchMemory = ();
@@ -534,13 +551,18 @@ impl FilterIo for Mock {
         s
     }
 
-    fn create_lower_read(&mut self) -> Result<(), NtStatus> {
+    fn create_lower_read(&mut self) -> Result<usize, NtStatus> {
         let s = self.faults.lower_create.unwrap_or(0);
         self.rec(format!("WdfRequestCreate(ctx=WORKER_REQUEST_CONTEXT,parent=device,exec=inherit,sync=inherit,cleanup=null,destroy=null,target=target)={}", st(s)));
-        if s == 0 { Ok(()) } else { Err(s) }
+        if s != 0 {
+            return Err(s);
+        }
+        let read = self.next_lower_read;
+        self.next_lower_read += 1;
+        Ok(read)
     }
 
-    fn create_lower_read_memory(&mut self, _read: ()) -> Result<(), NtStatus> {
+    fn create_lower_read_memory(&mut self, _read: usize) -> Result<(), NtStatus> {
         let s = self.faults.lookaside.unwrap_or(0);
         self.rec(format!(
             "WdfMemoryCreateFromLookaside(list=lookaside)={}",
@@ -549,20 +571,21 @@ impl FilterIo for Mock {
         if s == 0 { Ok(()) } else { Err(s) }
     }
 
-    fn format_lower_read(&mut self, _read: (), _memory: ()) -> NtStatus {
+    fn format_lower_read(&mut self, _read: usize, _memory: ()) -> NtStatus {
         let s = self.faults.lower_format.unwrap_or(0);
         self.rec(format!("WdfIoTargetFormatRequestForInternalIoctl(target=target,req=lower_read,ioctl=0x000b000b,in=null,in_len=0,in_off=null,out=lower_mem,out_len=1024,out_off=null)={}", st(s)));
         s
     }
 
-    fn set_lower_read_completion(&mut self, _read: ()) {
+    fn set_lower_read_completion(&mut self, _read: usize) {
         self.rec("WdfRequestSetCompletionRoutine(req=lower_read,routine=PtpFilterInputRequestCompletionCallback,ctx=req_context)".into());
     }
 
-    fn send_lower_read(&mut self, _read: ()) -> bool {
+    fn send_lower_read(&mut self, read: usize, ticket: ReadTicket) -> bool {
         let ok = !self.faults.lower_send_false;
         if ok {
             self.lower_reads_pending += 1;
+            self.tickets.push((read, ticket));
         }
         self.rec(format!("WdfRequestSend(req=lower_read,target=target,opts=null,ioctl=0x000b000b,out_len=1024,completion=PtpFilterInputRequestCompletionCallback)={}", if ok { "TRUE" } else { "FALSE" }));
         ok
@@ -572,12 +595,22 @@ impl FilterIo for Mock {
         &self.lower_buf
     }
 
-    fn delete_lower_read(&mut self, _read: ()) {
+    fn delete_lower_read(&mut self, _read: usize) {
         self.rec("WdfObjectDelete(obj=lower_read)".into());
     }
 
     fn delete_lower_memory(&mut self, _memory: ()) {
         self.rec("WdfObjectDelete(obj=lower_mem)".into());
+    }
+
+    fn with_reads<R, F: FnOnce(&mut ReadTracker<usize>) -> R>(&mut self, f: F) -> R {
+        f(&mut self.tracker)
+    }
+
+    fn cancel_in_flight_reads(&mut self) -> usize {
+        let cancelled = self.tracker.suspend().iter().count();
+        self.cancelled_reads += cancelled;
+        cancelled
     }
 
     fn set_failed(&mut self, action: FailedAction) {
@@ -590,6 +623,10 @@ impl FilterIo for Mock {
 
     fn start_recovery_timer(&mut self, due_time: i64) {
         self.rec(format!("WdfTimerStart(timer=timer,due={due_time})"));
+    }
+
+    fn stop_recovery_timer(&mut self) {
+        self.timer_stops += 1;
     }
 
     fn enqueue_recovery_work_item(&mut self) {

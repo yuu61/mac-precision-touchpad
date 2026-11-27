@@ -1,16 +1,50 @@
 //! Replays `fixtures/input_bt.txt` and `fixtures/input_usb.txt`: the lower-read completion
 //! (`PtpFilterInputRequestCompletionCallback`) on every edge and pseudo-random packet.
+//!
+//! Every record completes successfully (C never read the status). Two P3 fixes change the outcome of
+//! some records, which are checked against the outcome the port defines and counted separately:
+//! `Information` above the 1024-byte buffer (HF-B29) and a first byte that is not the transport's
+//! multitouch report ID (HF-B8).
 
 #![cfg(test)]
 
 mod common;
 
-use amtptp_hidfilter_core::{Bcm5974Param, DeviceSnapshot, DeviceState, complete_lower_read};
+use amtptp_hidfilter_core::{
+    Bcm5974Param, DeviceSnapshot, DeviceState, HID_VID_APPLE_USB, REPORT_BUFFER_SIZE, ReadTicket,
+    STATUS_SUCCESS, complete_lower_read, multitouch_report_id,
+};
 use common::*;
 use ptp_hid::input::{PTP_REPORT_LEN, PTP_REPORT_SCAN_TIME_OFFSET};
 
 const OUTMEM_P2: &str = "P2-fixed: upper completed with RetrieveOutputMemory status (HF-B9)";
 const COPY_P2: &str = "P2-fixed: upper completed with CopyFromBuffer status (HF-B9)";
+const OVERSIZE_P3: &str =
+    "P3-fixed: Information above the buffer starts the 3 s timer instead (HF-B29)";
+const OTHER_REPORT_P3: &str =
+    "P3-fixed: another report ID than multitouch enqueues the work item instead (HF-B8)";
+
+/// The port's `act` for a record whose C outcome was `c_act`, and the P3 bucket if they differ. The
+/// vendor check comes first and a zero length is an empty read, as in C; then `Information` above the
+/// buffer, then the report ID.
+fn port_act<'a>(r: &Rec, c_act: &'a str) -> (&'a str, Option<&'static str>) {
+    let information = r.num("rinfo");
+    if c_act == "setfailed_norestart" || information == 0 {
+        return (c_act, None);
+    }
+    let diverge = |act: &'a str, bucket| {
+        if act == c_act { (c_act, None) } else { (act, Some(bucket)) }
+    };
+    if information > REPORT_BUFFER_SIZE as i128 {
+        return diverge("timer3s", OVERSIZE_P3);
+    }
+    let vendor = r.num("vid") as u16;
+    assert!(vendor == HID_VID_APPLE_USB || r.get("fam") == "BT");
+    if r.bytes("in").first().copied() != Some(multitouch_report_id(vendor)) {
+        return diverge("workitem", OTHER_REPORT_P3);
+    }
+    (c_act, None)
+}
 
 /// The exact `ev` sequence README 3.2 gives for each `act` (used for `rand` records, which omit `ev`).
 fn ev_for_act(act: &str) -> Vec<String> {
@@ -72,7 +106,15 @@ fn run(r: &Rec, snap: &DeviceSnapshot, tail: u8) -> Outcome {
         m.read_queue.push_back(req);
     }
     let information = usize::try_from(r.num("rinfo")).expect("64-bit ULONG_PTR");
-    complete_lower_read(&mut m, &state, (), (), information);
+    complete_lower_read(
+        &mut m,
+        &state,
+        0,
+        (),
+        ReadTicket::default(),
+        STATUS_SUCCESS,
+        information,
+    );
     let (completed, buf) = match m.uppers.first() {
         Some(u) => (u.completed, u.buf.clone()),
         None => (None, Vec::new()),
@@ -114,8 +156,10 @@ fn replay(file: &str, fam: &str, total: usize, acts: &[(&str, usize)]) {
         assert_eq!(a.buf, b.buf, "{}: read past `in`", r.case());
         assert_eq!(a.state, b.state);
 
-        let act = r.get("act");
-        let c_ev = if r.get("kind") == "edge" {
+        let (act, p3) = port_act(r, r.get("act"));
+        let c_ev = if p3.is_some() {
+            ev_for_act(act)
+        } else if r.get("kind") == "edge" {
             events(r)
                 .into_iter()
                 .map(|event| event.replace("freq_ptr=nonnull", "freq_ptr=null"))
@@ -153,7 +197,9 @@ fn replay(file: &str, fam: &str, total: usize, acts: &[(&str, usize)]) {
                 assert!(a.buf.iter().all(|&x| x == 0xEE));
             }
             _ => {
-                assert_eq!(r.get("status"), "-");
+                if p3.is_none() {
+                    assert_eq!(r.get("status"), "-");
+                }
                 assert!(a.completed.is_none(), "{}", r.case());
                 assert!(a.buf.iter().all(|&x| x == 0xEE));
             }
@@ -164,10 +210,11 @@ fn replay(file: &str, fam: &str, total: usize, acts: &[(&str, usize)]) {
 
         assert_eq!(a.state, snap, "{}", r.case());
 
-        tally.add(match act {
-            "outmem_fail" => OUTMEM_P2,
-            "copy_fail" => COPY_P2,
-            other => other,
+        tally.add(match (p3, act) {
+            (Some(bucket), _) => bucket,
+            (None, "outmem_fail") => OUTMEM_P2,
+            (None, "copy_fail") => COPY_P2,
+            (None, other) => other,
         });
     }
     let n = tally.assert(acts);
@@ -185,13 +232,15 @@ fn replay_input_bt() {
         "BT",
         1653,
         &[
-            ("complete", 1342),
-            ("timer3s", 239),
+            ("complete", 1197),
+            ("timer3s", 226),
             ("setfailed_norestart", 30),
             ("noupper", 26),
-            ("workitem", 14),
+            ("workitem", 13),
             (OUTMEM_P2, 1),
             (COPY_P2, 1),
+            (OVERSIZE_P3, 47),
+            (OTHER_REPORT_P3, 112),
         ],
     );
 }
@@ -203,13 +252,15 @@ fn replay_input_usb() {
         "USB",
         1661,
         &[
-            ("complete", 1384),
-            ("timer3s", 219),
+            ("complete", 1202),
+            ("timer3s", 209),
             ("setfailed_norestart", 24),
-            ("noupper", 23),
-            ("workitem", 9),
+            ("noupper", 19),
+            ("workitem", 8),
             (OUTMEM_P2, 1),
             (COPY_P2, 1),
+            (OVERSIZE_P3, 55),
+            (OTHER_REPORT_P3, 142),
         ],
     );
 }
@@ -225,7 +276,15 @@ fn lower_read_scan_time_uses_counter_instead_of_frequency() {
         m.counter = counter;
         let req = m.add_upper(Upper::with_output(PTP_REPORT_LEN, 0xEE));
         m.read_queue.push_back(req);
-        complete_lower_read(&mut m, &state, (), (), 4);
+        complete_lower_read(
+            &mut m,
+            &state,
+            0,
+            (),
+            ReadTicket::default(),
+            STATUS_SUCCESS,
+            4,
+        );
         assert_eq!(m.uppers[req].completed, Some((0, PTP_REPORT_LEN)));
         let offset = PTP_REPORT_SCAN_TIME_OFFSET;
         assert_eq!(m.uppers[req].buf[offset..offset + 2], expected.to_le_bytes());

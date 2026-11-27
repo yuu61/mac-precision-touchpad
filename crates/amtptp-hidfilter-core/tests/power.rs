@@ -6,12 +6,39 @@
 mod common;
 
 use amtptp_hidfilter_core::{
-    DeviceState, complete_lower_read, d0_entry, d0_exit, dispatch_internal_ioctl,
+    DeviceState, LowerReadClass, LowerReadOutcome, NtStatus, ReadTicket, STATUS_CANCELLED,
+    STATUS_SUCCESS, complete_lower_read, d0_entry, d0_exit, dispatch_internal_ioctl,
     prepare_hardware, recovery_timer_callback, self_managed_io_init, self_managed_io_restart,
     work_item_callback,
 };
 use common::*;
+use ptp_hid::input::PTP_REPORT_LEN;
 use ptp_hid::ioctl::IOCTL_HID_READ_REPORT;
+
+/// `STATUS_DEVICE_NOT_CONNECTED`: what a lower read fails with once the Bluetooth link is gone.
+const DEVICE_NOT_CONNECTED: NtStatus = 0xC000_009D_u32 as NtStatus;
+/// A one-contact Bluetooth multitouch packet (report ID 0x31).
+const BT_PACKET: [u8; 13] = [0x31, 0, 0, 0, 0, 0, 0, 0, 0x14, 0x14, 0, 0, 0];
+
+/// The completion of lower read `sent` (its id and ticket) with `status` and `packet` in its buffer
+/// (`Information` = the packet length).
+fn complete(
+    m: &mut Mock,
+    state: &DeviceState,
+    sent: (usize, ReadTicket),
+    status: NtStatus,
+    packet: &[u8],
+) -> LowerReadOutcome {
+    m.lower_buf[..packet.len()].copy_from_slice(packet);
+    let (read, ticket) = sent;
+    let outcome = complete_lower_read(m, state, read, (), ticket, status, packet.len());
+    m.lower_reads_pending -= 1;
+    outcome
+}
+
+fn work_items(m: &Mock) -> usize {
+    m.ev.iter().filter(|e| e.starts_with("WdfWorkItemEnqueue(")).count()
+}
 
 /// A Bluetooth Magic Trackpad 2 behind a working detour.
 fn bluetooth() -> (DeviceState, Mock) {
@@ -108,7 +135,7 @@ fn recovery_timer_serves_the_parked_reads() {
     recovery_timer_callback(&mut m, &state);
     assert!(state.device_configured());
     assert_eq!(m.lower_reads_pending, 2);
-    assert_eq!(state.in_flight_reads(), 2);
+    assert_eq!(m.in_flight(), 2);
 }
 
 /// A failed retry arms the timer again while the device is in D0, and issues no read.
@@ -162,17 +189,153 @@ fn work_item_only_serves_a_configured_device() {
     let (state, mut m) = bluetooth();
     start(&state, &mut m);
     let _parked = read_report(&state, &mut m);
-    assert_eq!(state.in_flight_reads(), 1);
-    complete_lower_read(&mut m, &state, (), (), 0);
-    m.lower_reads_pending -= 1;
+    assert_eq!(m.in_flight(), 1);
+    let ticket = m.tickets[0];
+    assert_eq!(
+        complete(&mut m, &state, ticket, STATUS_SUCCESS, &[]),
+        LowerReadOutcome::Handled(LowerReadClass::Empty)
+    );
     assert!(m.ev.contains(&"WdfWorkItemEnqueue(item=workitem)".to_owned()));
-    assert_eq!(state.in_flight_reads(), 0);
+    assert_eq!(m.in_flight(), 0);
     work_item_callback(&mut m, &state);
     assert_eq!(m.lower_reads_pending, 1);
-    assert_eq!(state.in_flight_reads(), 1);
+    assert_eq!(m.in_flight(), 1);
 
     assert_eq!(d0_exit(&mut m, &state), 0);
     m.ev.clear();
     work_item_callback(&mut m, &state);
     assert_eq!(m.ev, Vec::<String>::new());
+}
+
+/// HF-B7 (P3): a failed lower read (here the Bluetooth link is gone, `Information` 0) arms the 3 s
+/// recovery timer instead of the work item, so a lower driver that fails every read cannot make a
+/// zero-delay read loop. The timer then issues the missing read.
+#[test]
+fn failed_read_is_retried_by_the_timer_not_the_work_item() {
+    let (state, mut m) = bluetooth();
+    start(&state, &mut m);
+    let upper = read_report(&state, &mut m);
+    m.ev.clear();
+    let ticket = m.tickets[0];
+    assert_eq!(
+        complete(&mut m, &state, ticket, DEVICE_NOT_CONNECTED, &[]),
+        LowerReadOutcome::Handled(LowerReadClass::Failed {
+            status: DEVICE_NOT_CONNECTED
+        })
+    );
+    assert_eq!(work_items(&m), 0);
+    assert_eq!(timer_starts(&m), 1);
+    assert!(m.ev.contains(&"WdfTimerStart(timer=timer,due=-30000000)".to_owned()));
+    assert!(m.uppers[upper].completed.is_none(), "the upper read stays parked");
+    assert_eq!(m.in_flight(), 0);
+    recovery_timer_callback(&mut m, &state);
+    assert_eq!(m.lower_reads_pending, 1, "the timer issued the read again");
+}
+
+/// HF-B14 (P3): `D0Exit` stops the recovery timer, cancels the lower reads in flight and completes the
+/// parked upper reads. A cancelled read that completes afterwards (even after the resume, with data) is
+/// stale: it serves no upper read and arms nothing.
+#[test]
+fn d0_exit_cancels_the_reads_in_flight_and_drops_their_completions() {
+    let (state, mut m) = bluetooth();
+    start(&state, &mut m);
+    let first = read_report(&state, &mut m);
+    let _second = read_report(&state, &mut m);
+    assert_eq!(m.in_flight(), 2);
+    let old = m.tickets[0];
+    assert_eq!(d0_exit(&mut m, &state), 0);
+    assert_eq!((m.timer_stops, m.cancelled_reads), (1, 2));
+    assert_eq!(m.in_flight(), 0);
+    assert_eq!(
+        m.uppers[first].completed.map(|(s, _)| s),
+        Some(STATUS_CANCELLED)
+    );
+
+    // Resume; a new upper read gets a new lower read.
+    assert_eq!(d0_entry(&state), 0);
+    assert_eq!(self_managed_io_restart(&mut m, &state), 0);
+    let upper = read_report(&state, &mut m);
+    assert_eq!(m.in_flight(), 1);
+    m.ev.clear();
+    // The old reads complete late: one cancelled, one with valid data.
+    assert_eq!(
+        complete(&mut m, &state, old, STATUS_CANCELLED, &[]),
+        LowerReadOutcome::Stale
+    );
+    assert_eq!(
+        complete(&mut m, &state, old, STATUS_SUCCESS, &BT_PACKET),
+        LowerReadOutcome::Stale
+    );
+    assert_eq!(
+        m.ev,
+        [
+            "WdfObjectDelete(obj=lower_read)",
+            "WdfObjectDelete(obj=lower_mem)",
+            "WdfObjectDelete(obj=lower_read)",
+            "WdfObjectDelete(obj=lower_mem)",
+        ]
+    );
+    assert!(m.uppers[upper].completed.is_none());
+    assert_eq!(m.in_flight(), 1, "the current read is still registered");
+    // The current read serves the new upper read.
+    let current = *m.tickets.last().expect("a read was sent");
+    assert_eq!(
+        complete(&mut m, &state, current, STATUS_SUCCESS, &BT_PACKET),
+        LowerReadOutcome::Handled(LowerReadClass::Report { length: 13 })
+    );
+    assert_eq!(m.uppers[upper].completed, Some((0, PTP_REPORT_LEN)));
+    assert_eq!(m.in_flight(), 0);
+}
+
+/// After `D0Exit` neither the work item nor the timer sends a read.
+#[test]
+fn no_read_is_sent_after_d0_exit() {
+    let (state, mut m) = bluetooth();
+    start(&state, &mut m);
+    let _parked = read_report(&state, &mut m);
+    assert_eq!(d0_exit(&mut m, &state), 0);
+    let _late = read_report(&state, &mut m);
+    m.ev.clear();
+    work_item_callback(&mut m, &state);
+    recovery_timer_callback(&mut m, &state);
+    assert_eq!(m.ev, Vec::<String>::new());
+    assert_eq!(m.in_flight(), 0);
+}
+
+/// HF-B8 (P3): a report that is not the multitouch report (here a battery report, 0x90) is dropped
+/// and the work item issues the next read, instead of being parsed as fingers or stalling input for
+/// 3 s.
+#[test]
+fn another_report_is_dropped_and_the_read_reissued() {
+    let (state, mut m) = bluetooth();
+    start(&state, &mut m);
+    let upper = read_report(&state, &mut m);
+    let ticket = m.tickets[0];
+    m.ev.clear();
+    assert_eq!(
+        complete(&mut m, &state, ticket, STATUS_SUCCESS, &[0x90, 0x04, 0x64]),
+        LowerReadOutcome::Handled(LowerReadClass::OtherReport { report_id: 0x90 })
+    );
+    assert_eq!((work_items(&m), timer_starts(&m)), (1, 0));
+    assert!(m.uppers[upper].completed.is_none());
+    work_item_callback(&mut m, &state);
+    assert_eq!(m.lower_reads_pending, 1, "the work item issued the read again");
+}
+
+/// HF-B29 (P3): `Information` above the 1024-byte buffer is not a packet length (C took its low 32
+/// bits, so `0x1_0000_000D` was a 13-byte packet): the 3 s timer, no report.
+#[test]
+fn information_above_the_buffer_is_not_a_length() {
+    let (state, mut m) = bluetooth();
+    start(&state, &mut m);
+    let upper = read_report(&state, &mut m);
+    let ticket = m.tickets[0];
+    m.lower_buf[..BT_PACKET.len()].copy_from_slice(&BT_PACKET);
+    m.ev.clear();
+    assert_eq!(
+        complete_lower_read(&mut m, &state, ticket.0, (), ticket.1, STATUS_SUCCESS, 0x1_0000_000D),
+        LowerReadOutcome::Handled(LowerReadClass::Oversize)
+    );
+    assert_eq!(timer_starts(&m), 1);
+    assert!(m.uppers[upper].completed.is_none());
 }

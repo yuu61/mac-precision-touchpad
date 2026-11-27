@@ -20,11 +20,13 @@ use core::mem::size_of;
 use core::ptr::null_mut;
 
 use amtptp_hidfilter_core::{
-    FailedAction, FeatureChange, FilterIo, HID_XFER_PACKET_SIZE, LowerReadClass, NtStatus,
-    STATUS_INVALID_DEVICE_REQUEST, STATUS_INVALID_DEVICE_STATE, XferBuffer, XferPacket,
-    XferPacketMut, classify_lower_read, complete_lower_read, decode_set_feature, response_length,
+    FailedAction, FeatureChange, FilterIo, HID_XFER_PACKET_SIZE, LowerReadClass,
+    LowerReadOutcome, NtStatus, ReadTicket, ReadTracker, STATUS_INVALID_DEVICE_REQUEST,
+    STATUS_INVALID_DEVICE_STATE, XferBuffer, XferPacket, XferPacketMut, complete_lower_read,
+    decode_set_feature,
 };
 use ptp_hid::hidport::HID_DEVICE_ATTRIBUTES_LEN;
+use ptp_hid::read_tracker::MAX_IN_FLIGHT_READS;
 use ptp_hid::ioctl::{
     IOCTL_HID_GET_DEVICE_ATTRIBUTES, IOCTL_HID_READ_REPORT, IOCTL_HID_SET_FEATURE,
 };
@@ -46,7 +48,7 @@ use wdk_sys::{
 };
 
 use crate::context::{
-    DeviceContext, WORKER_REQUEST_CONTEXT_TYPE_INFO, WorkerRequestContext,
+    DeviceContext, LowerRead, WORKER_REQUEST_CONTEXT_TYPE_INFO, WorkerRequestContext,
     worker_request_get_context,
 };
 use crate::{KW_DEVICE, KW_HID, KW_INPUT, PROVIDER};
@@ -57,9 +59,9 @@ const _: () = assert!(size_of::<XferBuffer>() == HID_XFER_PACKET_SIZE);
 const _: () = assert!(size_of::<ULONG_PTR>() == size_of::<usize>());
 
 /// The device's framework operations, for one callback invocation. Holds only a shared reference
-/// to the device context (all of its state is atomic) and a tracing flag, so independent instances
-/// can coexist, e.g. when a lower read completes synchronously inside `WdfRequestSend` on the
-/// dispatch path.
+/// to the device context (its state is atomic or behind the read lock) and a tracing flag, so
+/// independent instances can coexist, e.g. when a lower read completes synchronously inside
+/// `WdfRequestSend` on the dispatch path.
 pub(crate) struct Filter<'a> {
     pub(crate) ctx: &'a DeviceContext,
     /// Trace a failed `WdfIoQueueRetrieveNextRequest` as a dropped input packet (Input.c:176-180).
@@ -110,7 +112,7 @@ unsafe fn object_delete<T>(object: *mut T) {
 impl FilterIo for Filter<'_> {
     type Request = WDFREQUEST;
     type Memory = WDFMEMORY;
-    type LowerRead = WDFREQUEST;
+    type LowerRead = LowerRead;
     type LowerMemory = WDFMEMORY;
     type ModeSwitchRequest = WDFREQUEST;
     type ModeSwitchMemory = WDFMEMORY;
@@ -332,7 +334,7 @@ impl FilterIo for Filter<'_> {
 
     // ---- lower reads (Input.c:39-117) ----------------------------------------------------------
 
-    fn create_lower_read(&mut self) -> Result<WDFREQUEST, NtStatus> {
+    fn create_lower_read(&mut self) -> Result<LowerRead, NtStatus> {
         let Some(target) = self.io_target() else {
             return Err(STATUS_INVALID_DEVICE_STATE);
         };
@@ -350,7 +352,7 @@ impl FilterIo for Filter<'_> {
             )
         };
         if NT_SUCCESS(status) {
-            Ok(request)
+            Ok(WdfHandle::new(request))
         } else {
             // "This can fail for Bluetooth devices" (Input.c:59): the core arms the 3 s timer.
             tlg::write_event!(
@@ -364,7 +366,7 @@ impl FilterIo for Filter<'_> {
         }
     }
 
-    fn create_lower_read_memory(&mut self, read: WDFREQUEST) -> Result<WDFMEMORY, NtStatus> {
+    fn create_lower_read_memory(&mut self, read: LowerRead) -> Result<WDFMEMORY, NtStatus> {
         let mut memory: WDFMEMORY = null_mut();
         // SAFETY: the lookaside list was created in AddDevice (parent = device, HF-B15) and lives
         // as long as the device; `memory` is a valid out pointer.
@@ -386,17 +388,19 @@ impl FilterIo for Filter<'_> {
             return Err(status);
         }
         // SAFETY: `read` was just created with WORKER_REQUEST_CONTEXT, so its (zero-filled)
-        // context exists and nothing else references it yet (the request is not sent).
+        // context exists and nothing else references it yet (the request is not sent). The ticket
+        // is written by `send_lower_read`.
         unsafe {
-            worker_request_get_context(read).write(WorkerRequestContext {
+            worker_request_get_context(read.get()).write(WorkerRequestContext {
                 device_context: ContextPtr::new(self.ctx),
                 request_memory: WdfHandle::new(memory),
+                ticket: ReadTicket::default(),
             });
         }
         Ok(memory)
     }
 
-    fn format_lower_read(&mut self, read: WDFREQUEST, memory: WDFMEMORY) -> NtStatus {
+    fn format_lower_read(&mut self, read: LowerRead, memory: WDFMEMORY) -> NtStatus {
         let Some(target) = self.io_target() else {
             return STATUS_INVALID_DEVICE_STATE;
         };
@@ -406,7 +410,7 @@ impl FilterIo for Filter<'_> {
             call_unsafe_wdf_function_binding!(
                 WdfIoTargetFormatRequestForInternalIoctl,
                 target,
-                read,
+                read.get(),
                 IOCTL_HID_READ_REPORT,
                 null_mut(),
                 null_mut(),
@@ -426,7 +430,8 @@ impl FilterIo for Filter<'_> {
         status
     }
 
-    fn set_lower_read_completion(&mut self, read: WDFREQUEST) {
+    fn set_lower_read_completion(&mut self, read: LowerRead) {
+        let read = read.get();
         // SAFETY: `read` is live and carries WORKER_REQUEST_CONTEXT (initialized in
         // `create_lower_read_memory`); its address is the routine's context, as in C.
         unsafe {
@@ -440,10 +445,14 @@ impl FilterIo for Filter<'_> {
         }
     }
 
-    fn send_lower_read(&mut self, read: WDFREQUEST) -> bool {
+    fn send_lower_read(&mut self, read: LowerRead, ticket: ReadTicket) -> bool {
         let Some(target) = self.io_target() else {
             return false;
         };
+        let read = read.get();
+        // SAFETY: the request is not sent yet, so nothing else reads its context; the context was
+        // initialized in `create_lower_read_memory`.
+        unsafe { (*worker_request_get_context(read)).ticket = ticket };
         // SAFETY: `read` is formatted for `target` and has a completion routine; NULL options =
         // asynchronous send (Input.c:102). On TRUE the completion routine owns the request.
         let sent =
@@ -473,15 +482,69 @@ impl FilterIo for Filter<'_> {
         unsafe { core::slice::from_raw_parts(buffer.cast::<u8>(), size) }
     }
 
-    fn delete_lower_read(&mut self, read: WDFREQUEST) {
-        // SAFETY: driver-created request, not pending (never sent, or completed).
-        unsafe { object_delete(read) };
+    fn delete_lower_read(&mut self, read: LowerRead) {
+        // SAFETY: driver-created request, not pending (never sent, or completed), and no longer in
+        // the read tracker (the core unregisters it first).
+        unsafe { object_delete(read.get()) };
     }
 
     fn delete_lower_memory(&mut self, memory: WDFMEMORY) {
         // SAFETY: lookaside memory of a request that is not pending; deleted after the request
         // (HF-B10: its handle was read from the request context before the request was deleted).
         unsafe { object_delete(memory) };
+    }
+
+    fn with_reads<R, F: FnOnce(&mut ReadTracker<LowerRead>) -> R>(&mut self, f: F) -> R {
+        // SAFETY: the lock was created in `create_device` before any callback could run; every
+        // caller runs at <= DISPATCH_LEVEL; `f` only touches the tracker and atomics (the core's
+        // contract), so it neither re-enters the lock nor runs a callback of this driver.
+        unsafe { self.ctx.reads.with(f) }
+    }
+
+    fn cancel_in_flight_reads(&mut self) -> usize {
+        let mut held: [WDFREQUEST; MAX_IN_FLIGHT_READS] = [null_mut(); MAX_IN_FLIGHT_READS];
+        let take = |reads: &mut ReadTracker<LowerRead>| {
+            let suspended = reads.suspend();
+            let mut count = 0_usize;
+            for (slot, read) in held.iter_mut().zip(suspended.iter()) {
+                // SAFETY: a registered lower read is alive: its completion routine unregisters it
+                // under this lock before deleting it. The reference keeps the handle valid after the
+                // lock is released. NULL tag, as WdfObjectReference.
+                unsafe {
+                    call_unsafe_wdf_function_binding!(
+                        WdfObjectReferenceActual,
+                        read.get().cast(),
+                        null_mut(),
+                        0,
+                        core::ptr::null()
+                    );
+                }
+                *slot = read.get();
+                count += 1;
+            }
+            count
+        };
+        // SAFETY: as in `with_reads`; `take` only references objects (no callback can run from it).
+        let count = unsafe { self.ctx.reads.with(take) };
+        for &read in held.iter().take(count) {
+            // SAFETY: referenced above, so the handle is valid even if the read has completed and
+            // been deleted meanwhile; IRQL <= DISPATCH_LEVEL. Cancelling can run the completion
+            // routine synchronously, which takes the read lock: the lock is not held here. A read
+            // that was registered but not sent yet only gets its IRP's cancel flag set; its
+            // completion is stale anyway.
+            unsafe {
+                let _cancelled =
+                    call_unsafe_wdf_function_binding!(WdfRequestCancelSentRequest, read);
+                call_unsafe_wdf_function_binding!(
+                    WdfObjectDereferenceActual,
+                    read.cast(),
+                    null_mut(),
+                    0,
+                    core::ptr::null()
+                );
+            }
+        }
+        count
     }
 
     // ---- device-wide ---------------------------------------------------------------------------
@@ -519,6 +582,22 @@ impl FilterIo for Filter<'_> {
         let _was_queued = unsafe {
             call_unsafe_wdf_function_binding!(WdfTimerStart, self.ctx.recovery_timer(), due_time)
         };
+    }
+
+    fn stop_recovery_timer(&mut self) {
+        // SAFETY: the timer was created in AddDevice (parent = device); Wait = FALSE is allowed at
+        // <= DISPATCH_LEVEL. A callback that is already running is not waited for (its mode switch
+        // can block up to SYNC_IO_TIMEOUT); it finds the device out of D0 and stops.
+        let was_queued = unsafe {
+            call_unsafe_wdf_function_binding!(WdfTimerStop, self.ctx.recovery_timer(), 0)
+        };
+        tlg::write_event!(
+            PROVIDER,
+            "RecoveryTimerStopped",
+            level(Informational),
+            keyword(KW_DEVICE),
+            bool8("WasQueued", &(was_queued != 0))
+        );
     }
 
     fn enqueue_recovery_work_item(&mut self) {
@@ -774,15 +853,16 @@ fn trace_set_feature(report_id: u8, report_buffer: &[u8]) {
 /// `PtpFilterInputRequestCompletionCallback` (Input.c:119-253): completion routine of every lower
 /// `IOCTL_HID_READ_REPORT`, at IRQL <= `DISPATCH_LEVEL`.
 ///
-/// Reads the device-context pointer and `RequestMemory` from the request context **before**
-/// anything is deleted (the C code reads `RequestMemory` after deleting the request: HF-B10, P2),
-/// then hands over to the core, which deletes the request and then the memory on every path. After
-/// that call nothing here touches the request, its context or the memory.
+/// Reads the device-context pointer, `RequestMemory` and the read's ticket from the request context
+/// **before** anything is deleted (the C code reads `RequestMemory` after deleting the request: HF-B10,
+/// P2), and the completion status (C ignored it: HF-B7) and `Information`, then hands over to the
+/// core. The core unregisters the read from the tracker, handles it, and deletes the request and then
+/// the memory on every path. After that call nothing here touches the request, its context or the
+/// memory.
 ///
-/// The packet buffer is read through `RequestMemory`, only on the report path (after the upper read
-/// is retrieved and `KeQueryPerformanceCounter`); C calls `WdfMemoryGetBuffer` at entry on
+/// The packet buffer is read through `RequestMemory`; C calls `WdfMemoryGetBuffer` at entry on
 /// `Params->Parameters.Ioctl.Output.Buffer`, which is the same WDFMEMORY (the one formatted as the
-/// output buffer), with a NULL size. The completion status is ignored, as in C (HF-B7).
+/// output buffer), with a NULL size.
 unsafe extern "C" fn evt_lower_read_completion(
     request: WDFREQUEST,
     _target: WDFIOTARGET,
@@ -792,26 +872,56 @@ unsafe extern "C" fn evt_lower_read_completion(
     let request_context = context.cast::<WorkerRequestContext>();
     // SAFETY: `context` is the WORKER_REQUEST_CONTEXT of `request`, initialized before the send
     // and alive until the request is deleted (below, inside the core).
-    let (device_context, request_memory) = unsafe {
+    let (device_context, request_memory, ticket) = unsafe {
         (
             (*request_context).device_context.get(),
             (*request_context).request_memory.get(),
+            (*request_context).ticket,
         )
     };
     // SAFETY: the completed request is still ours until we delete it.
+    let status = unsafe { call_unsafe_wdf_function_binding!(WdfRequestGetStatus, request) };
+    // SAFETY: as above.
     let information =
         unsafe { call_unsafe_wdf_function_binding!(WdfRequestGetInformation, request) };
-    // ULONG_PTR -> usize: both 64-bit on x64/ARM64 (checked at compile time), lossless. The core
-    // applies C's `(size_t)(LONG)` conversion itself (HF-B29).
+    // ULONG_PTR -> usize: both 64-bit on x64/ARM64 (checked at compile time), lossless.
     let information = information as usize;
     // SAFETY: the request is a child of the device whose context this is, so the device (and its
     // context) outlives this completion.
     let ctx = unsafe { &*device_context };
-    // Trace the C pre-flight outcomes (Input.c:156-173). The core classifies again from the same
-    // atomics; a concurrent change could only make this trace differ, never the behaviour.
-    let vendor_id = ctx.state.vendor_id();
-    match classify_lower_read(vendor_id, &ctx.state.input_layout(), information) {
+    let mut filter = Filter::for_read_completion(ctx);
+    let outcome = complete_lower_read(
+        &mut filter,
+        &ctx.state,
+        WdfHandle::new(request),
+        request_memory,
+        ticket,
+        status,
+        information,
+    );
+    trace_lower_read(ctx, outcome, status, information);
+}
+
+/// Traces the outcomes of a lower read that are not the normal report path.
+fn trace_lower_read(
+    ctx: &DeviceContext,
+    outcome: LowerReadOutcome,
+    status: NtStatus,
+    information: usize,
+) {
+    let LowerReadOutcome::Handled(class) = outcome else {
+        tlg::write_event!(
+            PROVIDER,
+            "StaleLowerReadDropped",
+            level(Verbose),
+            keyword(KW_INPUT),
+            win_ntstatus("Status", &status)
+        );
+        return;
+    };
+    match class {
         LowerReadClass::UnsupportedVendor => {
+            let vendor_id = ctx.state.vendor_id();
             tlg::write_event!(
                 PROVIDER,
                 "UnsupportedDeviceInput",
@@ -820,23 +930,34 @@ unsafe extern "C" fn evt_lower_read_completion(
                 u16_hex("VendorID", &vendor_id)
             );
         }
-        LowerReadClass::Malformed => {
+        LowerReadClass::Failed { status } => {
+            tlg::write_event!(
+                PROVIDER,
+                "LowerReadFailed",
+                level(Warning),
+                keyword(KW_INPUT),
+                win_ntstatus("Status", &status)
+            );
+        }
+        LowerReadClass::Oversize | LowerReadClass::Malformed => {
             tlg::write_event!(
                 PROVIDER,
                 "MalformedInput",
                 level(Informational),
                 keyword(KW_INPUT),
-                usize("Length", &response_length(information))
+                usize("Length", &information)
+            );
+        }
+        LowerReadClass::OtherReport { report_id } => {
+            tlg::write_event!(
+                PROVIDER,
+                "OtherInputReportDropped",
+                level(Verbose),
+                keyword(KW_INPUT),
+                u8_hex("ReportId", &report_id),
+                usize("Length", &information)
             );
         }
         LowerReadClass::Empty | LowerReadClass::Report { .. } => {}
     }
-    let mut filter = Filter::for_read_completion(ctx);
-    complete_lower_read(
-        &mut filter,
-        &ctx.state,
-        request,
-        request_memory,
-        information,
-    );
 }

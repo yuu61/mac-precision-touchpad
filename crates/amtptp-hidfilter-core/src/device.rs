@@ -285,12 +285,12 @@ pub struct RecoveryTicket {
 /// ordering, which is what the plain C loads and stores amount to. Put one `DeviceState` in the WDF
 /// device context (initialize it with [`DeviceState::new`], which equals KMDF's zero-filled context).
 ///
-/// Two fields are not in C. `DeviceConfigured` shares one atomic word with whether the device is in D0
-/// and an epoch that every `D0Exit` advances, so the recovery timer can tell whether the device was
-/// stopped while its mode switch ran. A counter of the lower reads in flight lets a successful
-/// configuration issue one read per parked upper read that no read serves yet.
+/// `DeviceConfigured` shares one atomic word with whether the device is in D0 and an epoch that every
+/// `D0Exit` advances (not in C), so the recovery timer can tell whether the device was stopped while its
+/// mode switch ran.
 ///
-/// The glue keeps the WDF handles (queues, timer, work item, lookaside list, I/O target) itself.
+/// The glue keeps the WDF handles (queues, timer, work item, lookaside list, I/O target) itself, and the
+/// tracker of the lower reads in flight behind its own lock ([`crate::FilterIo::with_reads`]).
 #[derive(Debug)]
 pub struct DeviceState {
     vendor_id: AtomicU16,
@@ -304,7 +304,6 @@ pub struct DeviceState {
     y: AxisState,
     /// `DeviceConfigured` ([`POWER_CONFIGURED`]), in D0 ([`POWER_IN_D0`]) and the epoch.
     power: AtomicU32,
-    in_flight_reads: AtomicUsize,
     detour_completed: AtomicBool,
     io_target_set: AtomicBool,
     ptp_input_on: AtomicBool,
@@ -347,7 +346,7 @@ impl DeviceState {
     }
 
     /// Initializes device state from a snapshot and starts a fresh reporting clock. The device is not in
-    /// D0 (call [`crate::d0_entry`]) and has no lower read in flight.
+    /// D0 (call [`crate::d0_entry`]).
     #[must_use]
     pub const fn with(s: &DeviceSnapshot) -> Self {
         Self {
@@ -365,7 +364,6 @@ impl DeviceState {
             } else {
                 0
             }),
-            in_flight_reads: AtomicUsize::new(0),
             detour_completed: AtomicBool::new(s.detour_completed),
             io_target_set: AtomicBool::new(s.io_target_set),
             ptp_input_on: AtomicBool::new(s.ptp_input_on),
@@ -497,32 +495,6 @@ impl DeviceState {
                 Ordering::SeqCst,
             )
             .is_ok()
-    }
-
-    /// Lower reads sent and not completed yet.
-    pub fn in_flight_reads(&self) -> usize {
-        self.in_flight_reads.load(Ordering::SeqCst)
-    }
-
-    /// A lower read is about to be sent.
-    pub(crate) fn read_sent(&self) {
-        self.in_flight_reads.fetch_add(1, Ordering::SeqCst);
-    }
-
-    /// A lower read completed, or its send failed. Never goes below zero.
-    pub(crate) fn read_done(&self) {
-        let mut reads = self.in_flight_reads.load(Ordering::SeqCst);
-        while reads > 0 {
-            match self.in_flight_reads.compare_exchange_weak(
-                reads,
-                reads - 1,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            ) {
-                Ok(_) => return,
-                Err(actual) => reads = actual,
-            }
-        }
     }
 
     /// `IsHidIoDetourCompleted`.

@@ -34,14 +34,14 @@ The driver has **no device table** and sends **no USB or SPI bytes**. Its only l
 | HF-B4 | FIXED (P2) | The 50-byte report is built zero-initialised (`PtpReport::EMPTY`). Unused contacts and the padding bits are 0 instead of kernel stack bytes. |
 | HF-B5 | PRESERVED (P1) | Lower clamp only, no upper clamp: x up to 7773, y up to 6574. |
 | HF-B6 | PRESERVED (P1) | `FilterIo::query_performance_frequency` returns what `KeQueryPerformanceCounter(&x)` writes, which is the frequency. `scan_time(freq, swap(last, freq))` is therefore 0, or 0xFF on the never-stamped first report. |
-| HF-B7 | PRESERVED (P1) | The lower-read completion status is never read; only `Information` counts. |
-| HF-B8 | PRESERVED (P1) | There is no report-ID filter. Any length `hdr + 9n` is parsed. Any other length starts the 3 s timer and ends that read chain. |
+| HF-B7 | FIXED (P3) | The completion status is read (`WdfRequestGetStatus`). A failed read is `LowerReadClass::Failed`: it arms the 3 s recovery timer while the device is in D0, and never the work item. C took a failed read with `Information == 0` as an empty read, whose work item re-issued the read at once, so a lower driver that failed every read (Bluetooth link down) made a zero-delay loop. |
+| HF-B8 | FIXED (P3) | Byte 0 must be the transport's multitouch report ID (`multitouch_report_id`: USB 0x02, Bluetooth 0x31, as in Linux hid-magicmouse and every C edge packet). Another report is `LowerReadClass::OtherReport`: it is dropped and the work item issues the next read. C parsed it as fingers when its length was `hdr + 9n`, and otherwise stalled input for 3 s as malformed. |
 | HF-B9 | FIXED (P2) | Retrieve-output or copy failure: `WdfDeviceSetFailed(AttemptRestart)` is still issued. Then the upper request is **completed** with that failure status. C leaks it. |
 | HF-B10 | FIXED (P2, glue) | The glue reads `RequestMemory` from the request context before `complete_lower_read`. The core then deletes the request, then the memory. |
 | HF-B11 | PRESERVED (P3) | Restart before the detour returns `STATUS_INVALID_STATE_TRANSITION`, but still stamps `LastReportTime` and sets `DeviceConfigured`. |
 | HF-B12 | PRESERVED (P3) for Init/Restart, FIXED (P3) for the timer | A failed mode switch in Init or Restart returns SUCCESS and arms the 2 s timer. The timer no longer issues a lower read after a failed switch; it retries while the device is in D0. |
 | HF-B13 | FIXED (P3) | The mode switch returns `WdfRequestGetStatus` after every synchronous send, so a lower failure behind a TRUE send is a failure. |
-| HF-B14 | FIXED (P3) by gating | D0Exit still does not stop the timer or flush the work item, but it leaves D0 and advances an epoch (`DeviceState`), so a later timer or work item does nothing and a running timer cannot mark the device configured. |
+| HF-B14 | FIXED (P3) | D0Exit leaves D0 and advances an epoch (`DeviceState`), so a later timer or work item does nothing and a running timer cannot mark the device configured. It also stops the recovery timer (`Wait = FALSE`) and cancels the lower reads in flight: every lower read is registered in a `ptp_hid::read_tracker::ReadTracker` (behind a `WDFSPINLOCK` in the glue) before it is sent, D0Exit suspends the tracker (new epoch) and cancels what it hands out, and a read of an earlier epoch is dropped when it completes (`LowerReadOutcome::Stale`) instead of serving an upper read parked after the resume. A registration after D0Exit is refused. |
 | HF-B15 | FIXED (P2 leak, glue) | The lookaside list is parented to the device (`config::READ_BUFFER_LOOKASIDE_PARENT_IS_DEVICE`); C parents it to the driver. |
 | HF-B16 | FIXED (P2) | The timer and the work item use `AutomaticSerialization = FALSE` (`config`), which has the same effect under sync scope None. AddDevice returns the creation failure of the lookaside list, timer or work item immediately. C continues and would later use a NULL handle. |
 | HF-B17 | FIXED (P2) | A NULL WDM device object makes AddDevice return `STATUS_UNSUCCESSFUL`. C returns SUCCESS with a half-built device. |
@@ -51,12 +51,12 @@ The driver has **no device table** and sends **no USB or SPI bytes**. Its only l
 | HF-B21 | PRESERVED (P1) | GET/SET_FEATURE never set `Information`. |
 | HF-B22 | PRESERVED (P1) | `HID_DEVICE_ATTRIBUTES.Reserved` is not written. |
 | HF-B23 | PRESERVED for `reportBufferLen >= 2`; FIXED (P2/P3) below | SET_FEATURE still ignores `reportBufferLen` otherwise. If byte 1 lies outside the report buffer, 0x04 reads it as 0 (mouse mode, P2) and 0x06 changes nothing (P3). |
-| HF-B24 | PRESERVED (P3) | A zero-length completion enqueues the work item, which re-reads at once (possible hot loop). |
+| HF-B24 | PRESERVED (P3) for successful reads | A successful zero-length completion still enqueues the work item, which re-reads at once. A failed read no longer takes this path (HF-B7), so the loop needs a lower driver that keeps completing reads successfully with no data. |
 | HF-B25 | FIXED (P2, unreachable) | Without an I/O target, GET_STRING completes with `STATUS_INVALID_DEVICE_STATE` and `issue_lower_read` sends nothing. C uses a NULL handle. |
 | HF-B26 | PRESERVED (P1) | The global `MajorFunction[0x0F]` patch is never reverted. The checks, their order and the `strncmp` semantics are in `detour_hid_stack` and `client_id_matches`. |
 | HF-B27 | FIXED (P3) | The synchronous attribute query and mode switch are sent with a timeout (`wdf_support::init::SYNC_IO_TIMEOUT`, 5 s). A timed-out mode switch fails like any other and the 2 s recovery timer retries it; on a timeout the framework cancels the request and waits for it to complete, so the stack transfer buffer stays valid. |
 | HF-B28 | PRESERVED (P1) | The device interface `{FF969022-3111-4441-8F88-875440172C2E}` is registered with no handler (`config::DEVICE_INTERFACE_GUID`). |
-| HF-B29 | PRESERVED (P1) | `response_length(info) = info as u32 as i32 as isize as usize`, the `(size_t)(LONG)` sign extension. |
+| HF-B29 | FIXED (P3) | `Information` is the packet length as is. A value above the 1024-byte buffer is `LowerReadClass::Oversize` and arms the 3 s timer like a malformed packet. C took the low 32 bits sign-extended, so some such values were small valid lengths and others huge ones. |
 | HF-B30 | FIXED (P3) | PrepareHardware keeps VID, PID and version (only SelfManagedIoInit queries them), so the restart after a PnP stop sends the mode switch again. Successful configurations issue the lower reads parked upper reads are missing. |
 
 ### Other P2 items, without a spec bug ID
@@ -77,7 +77,7 @@ Every record is processed, except the 3 named skips in `lifecycle.txt`. Each tes
 | `ioctl.txt` | 519 | 519 | 0 | 28 named or probe codes have full `ev`. The 491 sweep codes complete with `NOT_SUPPORTED` as the only call. |
 | `feature.txt` | 1588 | 1588 | 0 | 1068 are exact. The 516 successful SET 0x06 records with byte 1 assert the P3 bit order (Surface bit 0, Button bit 1: the C switches exchanged). Of the 4 `oob=1` records, the two 0x04 ones assert the HF-B23 fix (byte 1 read as 0) and the two 0x06 ones assert that nothing changes (P3). C read a stale `03` there. |
 | `input_bt.txt` | 1653 | 1653 | 0 | See below. |
-| `input_usb.txt` | 1661 | 1661 | 0 | Same as BT; the act counts are 1384 / 219 / 24 / 23 / 9, plus 1 + 1 HF-B9. 6 records are `ub=int_min_neg`. |
+| `input_usb.txt` | 1661 | 1661 | 0 | Same as BT; the act counts are 1202 / 209 / 24 / 19 / 8, plus 1 + 1 HF-B9, 55 HF-B29 and 142 HF-B8. 6 records are `ub=int_min_neg`. |
 | `wire.txt` | 65 | 65 | 0 | 21 are exact and 22 fault-injected, each with `WdfRequestGetStatus` after a TRUE mode-switch send (HF-B13). 22 assert a P3 fix derived from the record: 6 TRUE sends with a failed lower status, 12 timer records (gated to D0, no read after a failed switch) and 4 PnP restarts (IDs kept, so they equal the matching resume plus both selective-reporting switches on). `lower_reads_pending` is checked cumulatively per configuration. `tests/power.rs` covers the stop/resume sequences the C oracle got wrong. |
 | `lifecycle.txt` | 53 | 50 | 3 | See below. |
 
@@ -89,8 +89,9 @@ Every record is processed, except the 3 named skips in `lifecycle.txt`. Each tes
 
 `input_bt.txt`:
 
-* complete 1342, timer3s 239, setfailed_norestart 30, noupper 26, workitem 14.
+* complete 1197, timer3s 226, setfailed_norestart 30, noupper 26, workitem 13.
 * 1 outmem_fail and 1 copy_fail assert the HF-B9 fix: the upper request is completed with `0xC0000023` and `Information` is untouched.
+* Every record completes successfully (C never read the status). 47 records assert the HF-B29 fix (`Information` above 1024: the 3 s timer instead of the C outcome) and 112 the HF-B8 fix (byte 0 not 0x31: the work item instead). The C act of these 159 records was complete 145, timer3s 13, workitem 1 (`Information` 0x1_0000_0000, an empty read for C).
 * `out` is compared exactly, because the port zero-initialises (HF-B4), and the uninitialised C bits are 0 in `out`.
 * 9 records are `ub=int_min_neg`.
 * `rand` records are checked against the README 3.2 `ev` sequence for their `act`.
@@ -193,7 +194,6 @@ Exactly-once completion:
 ### Preserved driver-side issues (P1/P3)
 
 * **HF-B26.** The global HIDCLASS `MajorFunction[0x0F]` patch is a single unsynchronized pointer store (`write_volatile`) and is never reverted.
-* **HF-B14.** D0Exit stops neither the timer nor the work item; no `WdfTimerStop` was added.
 * **HF-B28.** The device interface is registered with no handler.
 * **`EvtIoStop`** is registered and empty. It neither acknowledges nor completes.
 * **KMDF version.** The C project bound the WDK default, KMDF 1.15. The KM workspace binds KMDF 1.23 for all three KM drivers (packaging decision, see `packaging.md`). The behaviour this driver relies on exists in 1.9 and later.

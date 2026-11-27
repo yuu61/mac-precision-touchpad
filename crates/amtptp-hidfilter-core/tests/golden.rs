@@ -77,7 +77,7 @@ fn d2_whole_bt_packet() {
     let mut buffer = vec![0_u8; REPORT_BUFFER_SIZE];
     buffer[..58].copy_from_slice(&packet);
     assert_eq!(
-        classify_lower_read(0x004C, &BT, 58),
+        classify_lower_read(0x004C, &BT, STATUS_SUCCESS, 58, buffer.first().copied()),
         LowerReadClass::Report { length: 58 }
     );
     assert_eq!(build_report(&BT, 58, &buffer, 0, SelectiveReportBits::POWER_ON).to_vec(), expected);
@@ -118,7 +118,13 @@ fn d3_length_classification() {
         (USB, 21, report(21)),
         (USB, 11, LowerReadClass::Malformed),
     ] {
-        assert_eq!(classify_lower_read(0x004C, &layout, info), class, "{info}");
+        // Each layout with its transport's vendor ID and multitouch report ID.
+        let (vendor, report_id) = if layout == USB { (0x05AC, 0x02) } else { (0x004C, 0x31) };
+        assert_eq!(
+            classify_lower_read(vendor, &layout, STATUS_SUCCESS, info, Some(report_id)),
+            class,
+            "{info}"
+        );
     }
     assert_eq!(contact_count(&BT, 4), 0);
     assert_eq!(contact_count(&BT, 13), 1);

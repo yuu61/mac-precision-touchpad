@@ -7,9 +7,14 @@
 //! later or not at all), so the glue only translates each method into its WDF call. The host tests implement the trait
 //! with the fixture harness's stub model and compare the recorded call sequence with the C oracle.
 //!
-//! Handles are `Copy` associated types (raw WDF handles in the glue). None of the methods may panic.
+//! A few methods have no C counterpart: the read tracker ([`FilterIo::with_reads`]), the cancellation of
+//! the reads in flight and the timer stop at `D0Exit` (P3 fixes of HF-B7/HF-B14). The test model keeps
+//! them out of the recorded C sequence and checks them separately.
+//!
+//! Handles are `Copy` associated types (WDF handles in the glue). None of the methods may panic.
 
 use ptp_hid::hidport::HID_DEVICE_ATTRIBUTES_LEN;
+use ptp_hid::read_tracker::{ReadTicket, ReadTracker};
 
 use crate::device::XferBuffer;
 use crate::status::NtStatus;
@@ -55,8 +60,8 @@ pub trait FilterIo {
     /// The output `WDFMEMORY` of an upper request.
     type Memory: Copy;
     /// A driver-created lower `IOCTL_HID_READ_REPORT` request (`WDFREQUEST` with the
-    /// `WORKER_REQUEST_CONTEXT`).
-    type LowerRead: Copy;
+    /// `WORKER_REQUEST_CONTEXT`), as the read tracker stores it.
+    type LowerRead: Copy + PartialEq;
     /// The lookaside `WDFMEMORY` of a lower read (stored in its request context as `RequestMemory`).
     type LowerMemory: Copy;
     /// The driver-created mode-switch request (`WDFREQUEST`).
@@ -129,19 +134,30 @@ pub trait FilterIo {
     /// memory, NULL)`.
     fn format_lower_read(&mut self, read: Self::LowerRead, memory: Self::LowerMemory) -> NtStatus;
     /// `WdfRequestSetCompletionRoutine(read, <completion routine>, request context)`. The completion
-    /// routine reads `RequestMemory` from the context (before anything is deleted, HF-B10) and calls
+    /// routine reads `RequestMemory` and the ticket from the context (before anything is deleted,
+    /// HF-B10), and `WdfRequestGetStatus` / `WdfRequestGetInformation` from the request, and calls
     /// [`crate::complete_lower_read`].
     fn set_lower_read_completion(&mut self, read: Self::LowerRead);
-    /// `WdfRequestSend(read, HidIoTarget, NULL)` (asynchronous); false if not sent.
-    fn send_lower_read(&mut self, read: Self::LowerRead) -> bool;
+    /// Stores `ticket` in the request context (not in C), then `WdfRequestSend(read, HidIoTarget, NULL)`
+    /// (asynchronous); false if not sent.
+    fn send_lower_read(&mut self, read: Self::LowerRead, ticket: ReadTicket) -> bool;
     /// The lower read's output buffer: `WdfMemoryGetBuffer(memory, &size)`, `size` bytes
-    /// ([`crate::REPORT_BUFFER_SIZE`] for the lookaside buffer). C passes NULL for the size; only
-    /// [`crate::complete_lower_read`]'s report path calls this.
+    /// ([`crate::REPORT_BUFFER_SIZE`] for the lookaside buffer). C passes NULL for the size. Only
+    /// [`crate::complete_lower_read`] calls this, for the report ID and on the report path.
     fn lower_read_buffer(&mut self, memory: Self::LowerMemory) -> &[u8];
     /// `WdfObjectDelete(read)`.
     fn delete_lower_read(&mut self, read: Self::LowerRead);
     /// `WdfObjectDelete(memory)`.
     fn delete_lower_memory(&mut self, memory: Self::LowerMemory);
+    /// Runs `f` on the device's lower-read tracker while holding its lock (not in C). The glue keeps the
+    /// tracker behind a `WDFSPINLOCK`: `f` runs at `DISPATCH_LEVEL` and only touches the tracker (and
+    /// atomics), never a request.
+    fn with_reads<R, F: FnOnce(&mut ReadTracker<Self::LowerRead>) -> R>(&mut self, f: F) -> R;
+    /// `D0Exit` (not in C, P3 fix of HF-B14): under the tracker's lock, [`ReadTracker::suspend`] (a new
+    /// epoch; the completion of every read sent before is stale) and `WdfObjectReference` each read it
+    /// hands out; then, outside the lock, `WdfRequestCancelSentRequest` and `WdfObjectDereference` each
+    /// one. Nothing waits for the cancelled reads. Returns how many reads were cancelled.
+    fn cancel_in_flight_reads(&mut self) -> usize;
 
     // ---- device-wide ---------------------------------------------------------------------------
 
@@ -149,6 +165,10 @@ pub trait FilterIo {
     fn set_failed(&mut self, action: FailedAction);
     /// `WdfTimerStart(HidTransportRecoveryTimer, due_time)` (relative, 100 ns units).
     fn start_recovery_timer(&mut self, due_time: i64);
+    /// `WdfTimerStop(HidTransportRecoveryTimer, Wait = FALSE)` (not in C, P3 fix of HF-B14): a pending
+    /// timer does not fire. A callback that is already running is not waited for (its mode switch can
+    /// take up to the synchronous-I/O timeout); it finds the device out of D0 and stops.
+    fn stop_recovery_timer(&mut self);
     /// `WdfWorkItemEnqueue(HidTransportRecoveryWorkItem)`.
     fn enqueue_recovery_work_item(&mut self);
     /// The current QPC counter in ticks.

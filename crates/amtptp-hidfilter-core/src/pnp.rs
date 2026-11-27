@@ -34,12 +34,20 @@ pub fn d0_entry(state: &DeviceState) -> NtStatus {
     STATUS_SUCCESS
 }
 
-/// `PtpFilterDeviceD0Exit` (Device.c:149-182): clear `DeviceConfigured`, leave D0 (a recovery timer that
-/// fires from now on does nothing, and one whose mode switch is running cannot mark the device
-/// configured), then complete every parked upper read with `STATUS_CANCELLED` until the queue reports an
-/// error. In-flight lower reads are left alone (HF-B14). Returns `STATUS_SUCCESS`.
+/// `PtpFilterDeviceD0Exit` (Device.c:149-182):
+/// 1. clear `DeviceConfigured` and leave D0: a recovery timer or work item that runs from now on does
+///    nothing, one whose mode switch is running cannot mark the device configured, and the read tracker
+///    refuses new reads;
+/// 2. stop the recovery timer without waiting, and cancel the lower reads in flight in a new epoch, so
+///    their completions are dropped (not in C: P3 fix of HF-B14, which left both alive across the power
+///    transition; a read that completed after the resume served an upper read with stale data);
+/// 3. complete every parked upper read with `STATUS_CANCELLED` until the queue reports an error.
+///
+/// Returns `STATUS_SUCCESS`.
 pub fn d0_exit<P: FilterIo>(io: &mut P, state: &DeviceState) -> NtStatus {
     state.leave_d0();
+    io.stop_recovery_timer();
+    let _cancelled = io.cancel_in_flight_reads();
     while let Ok(request) = io.retrieve_next_parked_read() {
         io.complete(request, STATUS_CANCELLED);
     }
