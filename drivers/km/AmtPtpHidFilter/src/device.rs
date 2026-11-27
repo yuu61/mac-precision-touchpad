@@ -7,9 +7,10 @@
 //! work item use `AutomaticSerialization = FALSE` (HF-B16), and every creation failure fails
 //! `AddDevice` (HF-B16, HF-B17).
 //!
-//! Registered PnP/power callbacks, as in C: `PrepareHardware`, `D0Entry`, `D0Exit`, `SelfManagedIoInit`,
-//! `SelfManagedIoRestart`. Nothing else (no `ReleaseHardware`, no SelfManagedIoSuspend/Flush/Cleanup,
-//! no power-policy settings, no file-object configuration, no device cleanup callback).
+//! Registered PnP/power callbacks: `PrepareHardware`, `D0Entry`, `D0Exit`, `SelfManagedIoInit`,
+//! `SelfManagedIoRestart` as in C, plus `SelfManagedIoCleanup`, which closes the data source (not in
+//! C, see [`crate::source`]). Nothing else (no `ReleaseHardware`, no SelfManagedIoSuspend/Flush, no
+//! power-policy settings, no file-object configuration, no device cleanup callback).
 
 use core::ptr::{null, null_mut};
 
@@ -42,7 +43,7 @@ use crate::context::{
     device_get_context, queue_get_context,
 };
 use crate::io::Filter;
-use crate::{KW_DEVICE, KW_DRIVER, PROVIDER, queue};
+use crate::{KW_DEVICE, KW_DRIVER, PROVIDER, queue, source};
 
 /// `GUID_DEVICEINTERFACE_AmtPtpHidFilter` `{FF969022-3111-4441-8F88-875440172C2E}` (Device.h:7-9).
 static GUID_DEVICEINTERFACE_AMTPTP_HID_FILTER: GUID = GUID {
@@ -131,6 +132,7 @@ impl AddDeviceIo for AddDevice {
         callbacks.EvtDeviceD0Exit = Some(evt_device_d0_exit);
         callbacks.EvtDeviceSelfManagedIoInit = Some(evt_device_self_managed_io_init);
         callbacks.EvtDeviceSelfManagedIoRestart = Some(evt_device_self_managed_io_restart);
+        callbacks.EvtDeviceSelfManagedIoCleanup = Some(evt_device_self_managed_io_cleanup);
         // SAFETY: live WDFDEVICE_INIT; `callbacks` is initialized (WDF copies it).
         unsafe {
             call_unsafe_wdf_function_binding!(
@@ -172,6 +174,20 @@ impl AddDeviceIo for AddDevice {
         // SAFETY: PASSIVE_LEVEL; the context was just initialized and no callback can reach it yet;
         // the device outlives its child lock.
         let lock_status = unsafe { (*context).reads.create(device.cast()) };
+        if !NT_SUCCESS(lock_status) {
+            Self::trace_failure("WdfSpinLockCreate", lock_status);
+            return lock_status;
+        }
+        // The data source's locks (not in C), created the same way.
+        // SAFETY: as above.
+        let lock_status = unsafe {
+            let status = (*context).strings.create(device.cast());
+            if NT_SUCCESS(status) {
+                (*context).pending_link.create(device.cast())
+            } else {
+                status
+            }
+        };
         if !NT_SUCCESS(lock_status) {
             Self::trace_failure("WdfSpinLockCreate", lock_status);
             return lock_status;
@@ -435,7 +451,7 @@ fn trace_configuration(event_is_init: bool, ctx: &DeviceContext, status: NtStatu
             u16_hex("ProductID", &s.product_id),
             u16_hex("VersionNumber", &s.version_number),
             bool8("DeviceConfigured", &s.device_configured),
-            bool8("DetourCompleted", &s.detour_completed)
+            bool8("SourceOpen", &s.source_open)
         );
     } else {
         tlg::write_event!(
@@ -451,20 +467,34 @@ fn trace_configuration(event_is_init: bool, ctx: &DeviceContext, status: NtStatu
     }
 }
 
-/// `PtpFilterSelfManagedIoInit` (Device.c:184-245), once at the first start (`PASSIVE_LEVEL)`:
-/// detour, synchronous attributes query, mode switch (failure: 2 s retry timer, SUCCESS), restart the
-/// reporting clock, set `DeviceConfigured` and issue the lower reads parked upper reads are missing.
+/// `PtpFilterSelfManagedIoInit` (Device.c:184-245), once at the first start (`PASSIVE_LEVEL`): the
+/// static identity (the core), then the search for the data source ([`source::start`]), whose opening
+/// sends the mode switch and issues the lower reads parked upper reads are missing. A failure to
+/// start the search fails the start: the device could never deliver input.
 unsafe extern "C" fn evt_device_self_managed_io_init(device: WDFDEVICE) -> NTSTATUS {
     // SAFETY: PnP callback of a live device of this driver.
     let ctx = unsafe { device_context(device) };
-    let status = self_managed_io_init(&mut Filter::new(ctx), &ctx.state);
+    let mut status = self_managed_io_init(&mut Filter::new(ctx), &ctx.state);
+    if NT_SUCCESS(status) {
+        // SAFETY: PASSIVE_LEVEL; our live device and its context.
+        status = unsafe { source::start(device, ctx) };
+    }
     trace_configuration(true, ctx, status);
     status
 }
 
+/// `EvtDeviceSelfManagedIoCleanup` (not in C), at removal (`PASSIVE_LEVEL`): stops the search for
+/// the data source and closes it.
+unsafe extern "C" fn evt_device_self_managed_io_cleanup(device: WDFDEVICE) {
+    // SAFETY: PnP callback of a live device of this driver.
+    let ctx = unsafe { device_context(device) };
+    // SAFETY: PASSIVE_LEVEL; the live device's context.
+    unsafe { source::stop(ctx) };
+}
+
 /// `PtpFilterSelfManagedIoRestart` (Device.c:247-284), on every later return to D0 (`PASSIVE_LEVEL`).
-/// HF-B11/B12 preserved (see the core); a successful mode switch issues the lower reads parked upper
-/// reads are missing.
+/// With the data source open: the mode switch (HF-B12 preserved, see the core); a successful one
+/// issues the lower reads parked upper reads are missing.
 unsafe extern "C" fn evt_device_self_managed_io_restart(device: WDFDEVICE) -> NTSTATUS {
     // SAFETY: power callback of a live device of this driver.
     let ctx = unsafe { device_context(device) };

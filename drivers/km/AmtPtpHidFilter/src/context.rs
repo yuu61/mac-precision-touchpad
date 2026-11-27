@@ -4,6 +4,7 @@
 //! `WORKER_REQUEST_CONTEXT`), so `!wdfkd.wdfobject` shows the same names as for the C driver. The
 //! layouts are private and differ from C (spec 3.1 says so explicitly).
 
+use core::ffi::c_void;
 use core::ptr::null_mut;
 use core::sync::atomic::{AtomicPtr, Ordering};
 
@@ -17,20 +18,69 @@ use wdk_sys::{
     WDFREQUEST__, WDFWORKITEM, WDFWORKITEM__,
 };
 
-/// A lower `IOCTL_HID_READ_REPORT` request as the read tracker stores it.
+/// A lower read (an `IRP_MJ_READ` of the data source) as the read tracker stores it.
 pub(crate) type LowerRead = WdfHandle<WDFREQUEST__>;
+
+/// Longest string kept from the data source, in UTF-16 units (HID strings hold at most 126).
+pub(crate) const MAX_STRING_UNITS: usize = 127;
+
+/// A UTF-16 string read from the data source, without its NUL.
+#[derive(Clone, Copy)]
+pub(crate) struct Utf16 {
+    pub(crate) units: [u16; MAX_STRING_UNITS],
+    pub(crate) len: usize,
+}
+
+impl Utf16 {
+    pub(crate) const EMPTY: Self = Self {
+        units: [0; MAX_STRING_UNITS],
+        len: 0,
+    };
+
+    pub(crate) fn as_slice(&self) -> &[u16] {
+        self.units.get(..self.len).unwrap_or(&[])
+    }
+}
+
+/// The data source's manufacturer, product and serial-number strings (not in C, which forwarded
+/// `IOCTL_HID_GET_STRING` through the detour). `known` is false until the source has been opened.
+pub(crate) struct SourceStrings {
+    pub(crate) known: bool,
+    pub(crate) manufacturer: Utf16,
+    pub(crate) product: Utf16,
+    pub(crate) serial_number: Utf16,
+}
+
+impl SourceStrings {
+    pub(crate) const UNKNOWN: Self = Self {
+        known: false,
+        manufacturer: Utf16::EMPTY,
+        product: Utf16::EMPTY,
+        serial_number: Utf16::EMPTY,
+    };
+}
+
+/// Longest device-interface symbolic link kept, in UTF-16 units.
+pub(crate) const MAX_LINK_UNITS: usize = 260;
+
+/// The symbolic link of a vendor collection that arrived: the PnP notification stores it, the source
+/// work item opens it.
+pub(crate) struct PendingLink {
+    pub(crate) units: [u16; MAX_LINK_UNITS],
+    pub(crate) len: usize,
+}
 
 /// `DEVICE_CONTEXT` (Device.h:26-60).
 ///
 /// The non-handle fields (IDs, transport parameters, `DeviceConfigured`, `LastReportTime`, the
-/// feature-report flags, `IsHidIoDetourCompleted`) are the core's [`DeviceState`] (relaxed atomics:
+/// feature-report flags, whether the data source is open) are the core's [`DeviceState`] (atomics:
 /// the C code reads and writes them without locks from up to five concurrent contexts, port policy P2).
 ///
 /// The handles are atomics too: the context becomes visible to WDF as soon as it is written in the
-/// create path, and `AddDevice` and the detour store handles into it afterwards. No `&mut` to the
-/// context is ever formed after its initializing `ptr.write`. Every handle except the I/O target is
-/// stored once during `AddDevice`, before the device can receive any callback, so `Relaxed` suffices;
-/// the I/O target is stored in `EvtDeviceSelfManagedIoInit` and published with `Release`/`Acquire`.
+/// create path, and `AddDevice` and the data-source code store handles into it afterwards. No `&mut`
+/// to the context is ever formed after its initializing `ptr.write`. The handles stored during
+/// `AddDevice`, before the device can receive any callback, use `Relaxed`; the data source's target,
+/// its work item and the notification entry change later and use `Release`/`Acquire`.
 pub(crate) struct DeviceContext {
     /// `WdmDeviceObject`: our own WDM device object (`WdfDeviceWdmGetDeviceObject`).
     wdm_device_object: AtomicPtr<_DEVICE_OBJECT>,
@@ -40,7 +90,8 @@ pub(crate) struct DeviceContext {
     hid_read_queue: AtomicPtr<WDFQUEUE__>,
     /// `HidReadBufferLookaside`: 1024-byte `NonPagedPoolNx` buffers for lower reads.
     hid_read_buffer_lookaside: AtomicPtr<WDFLOOKASIDE__>,
-    /// `HidIoTarget`: the default (local) I/O target, set by the detour; NULL before it.
+    /// The data source's remote I/O target (the trackpad's vendor collection, `Col03`); NULL while it
+    /// is not open. C's `HidIoTarget` was the default local target, usable after the detour.
     hid_io_target: AtomicPtr<WDFIOTARGET__>,
     /// `HidTransportRecoveryTimer`: one-shot passive-level retry timer.
     hid_transport_recovery_timer: AtomicPtr<WDFTIMER__>,
@@ -49,6 +100,15 @@ pub(crate) struct DeviceContext {
     /// The lower reads in flight and their epoch (not in C, see `amtptp_hidfilter_core::FilterIo::
     /// with_reads`). The spin lock is created in `create_device`, before any callback can run.
     pub(crate) reads: SpinLocked<ReadTracker<LowerRead>>,
+    /// The data source's strings (not in C). The spin lock is created in `create_device`.
+    pub(crate) strings: SpinLocked<SourceStrings>,
+    /// The link the interface notification found, for the source work item (not in C). The spin
+    /// lock is created in `create_device`.
+    pub(crate) pending_link: SpinLocked<PendingLink>,
+    /// `IoRegisterPlugPlayNotification`'s entry for HID interface arrivals; NULL when not registered.
+    notification_entry: AtomicPtr<c_void>,
+    /// The work item that opens the data source (created at the first start).
+    source_work_item: AtomicPtr<WDFWORKITEM__>,
     /// Every other `DEVICE_CONTEXT` member.
     pub(crate) state: DeviceState,
 }
@@ -68,6 +128,13 @@ impl DeviceContext {
             hid_transport_recovery_timer: AtomicPtr::new(null_mut()),
             hid_transport_recovery_work_item: AtomicPtr::new(null_mut()),
             reads: SpinLocked::new(ReadTracker::new()),
+            strings: SpinLocked::new(SourceStrings::UNKNOWN),
+            pending_link: SpinLocked::new(PendingLink {
+                units: [0; MAX_LINK_UNITS],
+                len: 0,
+            }),
+            notification_entry: AtomicPtr::new(null_mut()),
+            source_work_item: AtomicPtr::new(null_mut()),
             state: DeviceState::new(),
         }
     }
@@ -101,9 +168,25 @@ impl DeviceContext {
             .store(lookaside, Ordering::Relaxed);
     }
 
-    /// `HidIoTarget`; NULL until the detour succeeded.
+    /// The data source's target; NULL while it is not open.
     pub(crate) fn hid_io_target(&self) -> WDFIOTARGET {
         self.hid_io_target.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn notification_entry(&self) -> *mut c_void {
+        self.notification_entry.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn set_notification_entry(&self, entry: *mut c_void) {
+        self.notification_entry.store(entry, Ordering::Release);
+    }
+
+    pub(crate) fn source_work_item(&self) -> WDFWORKITEM {
+        self.source_work_item.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn set_source_work_item(&self, work_item: WDFWORKITEM) {
+        self.source_work_item.store(work_item, Ordering::Release);
     }
 
     pub(crate) fn set_hid_io_target(&self, target: WDFIOTARGET) {

@@ -14,7 +14,7 @@
 //! | `Driver.c` (`EvtDeviceAdd`), `Device.c`, `Queue.c` (queue creation) | [`device`] |
 //! | `Queue.c` (dispatch, `EvtIoStop`) | [`queue`] |
 //! | `Input.c`, `Hid.c` and the WDF calls of `Device.c` | [`io`] |
-//! | `Detour.c`, `include/Hac.h` | [`hac`] (the only module that chases undocumented pointers) |
+//! | (not in C) the data source, replacing `Detour.c` and `include/Hac.h` | [`source`] |
 //! | `include/Device.h`, `include/Queue.h` (contexts) | [`context`] |
 //!
 //! Code placement mirrors the C `#pragma alloc_text`: `DriverEntry` in `INIT`; device-add and the
@@ -29,9 +29,9 @@ extern crate wdk_panic; // #[panic_handler]: a panic is a bugcheck (0x52504E43).
 
 mod context;
 mod device;
-mod hac;
 mod io;
 mod queue;
+mod source;
 
 use tracelogging as tlg;
 use wdf_support::init::{driver_config_init, object_attributes_init};

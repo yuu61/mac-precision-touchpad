@@ -15,6 +15,7 @@ members = [
     "AmtPtpDeviceUsbKm",
     "AmtPtpDeviceSpiKm",
     "AmtPtpHidFilter",
+    "AmtPtpBthFilter",
 ]
 
 [workspace.package]

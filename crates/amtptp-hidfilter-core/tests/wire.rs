@@ -8,6 +8,12 @@
 //!   device, and no longer issues a lower read after a failed mode switch (`timer-*`; HF-B12);
 //! - HF-B30: `PrepareHardware` keeps the IDs, so a PnP restart behaves like a resume (`pnp-restart-*`),
 //!   except that it also turns both selective-reporting switches back on.
+//!
+//! The start changed with the data source (the HIDCLASS detour is gone, `amtptp_hidfilter_core::bth`):
+//! `SelfManagedIoInit` sets the static Bluetooth identity, and the mode switch is sent when the source
+//! opens. A Bluetooth start record is replayed as init + `source_opened` and expects the C sequence
+//! without the detour and the attribute query (version 0: nothing reads it); the start records of other
+//! identities are counted as removed, and a restart before the source opened does nothing.
 
 #![cfg(test)]
 
@@ -15,7 +21,7 @@ mod common;
 
 use amtptp_hidfilter_core::{
     DeviceState, NtStatus, configure_multitouch, d0_entry, d0_exit, prepare_hardware,
-    recovery_timer_callback, self_managed_io_init, self_managed_io_restart,
+    recovery_timer_callback, self_managed_io_init, self_managed_io_restart, source_opened,
 };
 use common::*;
 
@@ -25,6 +31,14 @@ const FAULT: &str = "fault-injected sequence (fault = README 5 status)";
 const P3_SEND_STATUS: &str = "P3 HF-B13: TRUE send with a failed lower status";
 const P3_TIMER: &str = "P3: recovery timer gated to D0, no read after a failed switch";
 const P3_PNP_RESTART: &str = "P3 HF-B30: PnP restart keeps the IDs (= resume)";
+const SOURCE_START: &str = "data source: Bluetooth start = init + source opened (no detour, no attribute query)";
+const REMOVED_IDENTITY: &str = "removed: start of a non-Bluetooth identity (the identity is static now)";
+const SOURCE_RESTART: &str = "data source: restart before the source opened does nothing";
+
+/// The Bluetooth start records (VID 0x004C, PID 0x0265), with or without a fault.
+fn is_bluetooth_start(case: &str) -> bool {
+    case == "start-bt" || case.starts_with("start-bt-")
+}
 
 fn apply_fault(m: &mut Mock, fault: &str) {
     match fault {
@@ -186,22 +200,38 @@ fn replay_wire() {
     let mut pending_by_cfg: Vec<(String, i64)> = Vec::new();
     for r in &recs {
         let case = r.case();
-        let want = expected(r, &recs);
+        let op = r.get("op");
+        if op == "PtpFilterSelfManagedIoInit" && !is_bluetooth_start(case) {
+            tally.add(REMOVED_IDENTITY);
+            continue;
+        }
+        let mut want = expected(r, &recs);
+        if op == "PtpFilterSelfManagedIoInit" {
+            // C: IoGetLowerDeviceObject, WdfDeviceGetIoTarget, ObfDereferenceObject, then the attribute
+            // query; the rest (the mode switch and what follows) is unchanged.
+            let attributes = want
+                .events
+                .iter()
+                .position(|e| e.starts_with("WdfIoTargetSendInternalIoctlSynchronously("))
+                .expect("C queried the attributes");
+            want.events.drain(..=attributes);
+            want.st_out = with_state(&want.st_out, "ver", "0x0000");
+            want.bucket = SOURCE_START;
+        }
+        if case == "restart-without-detour" {
+            want = Expected {
+                ret: st(0),
+                events: Vec::new(),
+                st_out: r.get("st_in").to_owned(),
+                sent: 0,
+                new_reads: Some(0),
+                bucket: SOURCE_RESTART,
+                send_record: r,
+            };
+        }
         let snap_in = parse_state(r.get("st_in"));
         let state = DeviceState::with(&snap_in);
         let mut m = Mock::new();
-        m.attr = match r.opt("attr_vid") {
-            Some(v) => (
-                num(v) as u16,
-                r.num("attr_pid") as u16,
-                r.num("attr_ver") as u16,
-            ),
-            // `start-{bt,usb}-<fault>` records carry no attr_* fields; the PDO answered with the
-            // transport's VID, PID 0x0265 and version 0x0100 (their st_out confirms it).
-            None if case.starts_with("start-bt-") => (0x004C, 0x0265, 0x0100),
-            None if case.starts_with("start-usb-") => (0x05AC, 0x0265, 0x0100),
-            None => (0, 0, 0),
-        };
         apply_fault(&mut m, r.opt("fault").unwrap_or("none"));
         let group = ["start-", "resume-", "timer-", "pnp-restart-"]
             .iter()
@@ -214,10 +244,12 @@ fn replay_wire() {
             .map_or(0, |(_, n)| *n);
 
         // Every record but D0Exit-first ones runs on a device in D0 (the C model has no D0 state).
-        let ret = match r.get("op") {
+        let ret = match op {
             "PtpFilterSelfManagedIoInit" => {
                 assert_eq!(d0_entry(&state), 0);
-                Some(self_managed_io_init(&mut m, &state))
+                let ret = self_managed_io_init(&mut m, &state);
+                source_opened(&mut m, &state);
+                Some(ret)
             }
             "PtpFilterSelfManagedIoRestart" => {
                 assert_eq!(d0_entry(&state), 0);
@@ -295,11 +327,14 @@ fn replay_wire() {
         tally.add(want.bucket);
     }
     let total = tally.assert(&[
-        (EXACT, 21),
-        (FAULT, 22),
-        (P3_SEND_STATUS, 6),
+        (EXACT, 16),
+        (FAULT, 16),
+        (P3_SEND_STATUS, 4),
         (P3_TIMER, 12),
         (P3_PNP_RESTART, 4),
+        (SOURCE_START, 5),
+        (REMOVED_IDENTITY, 7),
+        (SOURCE_RESTART, 1),
     ]);
     assert_eq!(total, TOTAL);
 }

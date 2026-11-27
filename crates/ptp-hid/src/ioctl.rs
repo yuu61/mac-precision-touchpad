@@ -110,6 +110,12 @@ pub const IOCTL_HID_GET_FEATURE: u32 = hid_out_ctl_code(100);
 pub const IOCTL_HID_GET_INPUT_REPORT: u32 = hid_out_ctl_code(104);
 /// `IOCTL_HID_GET_INDEXED_STRING` (0x000B01E2, `METHOD_OUT_DIRECT`). No driver handles it.
 pub const IOCTL_HID_GET_INDEXED_STRING: u32 = hid_out_ctl_code(120);
+/// `IOCTL_HID_GET_MANUFACTURER_STRING` (0x000B01BA): a collection's manufacturer string (class IOCTL).
+pub const IOCTL_HID_GET_MANUFACTURER_STRING: u32 = hid_out_ctl_code(110);
+/// `IOCTL_HID_GET_PRODUCT_STRING` (0x000B01BE): a collection's product string (class IOCTL).
+pub const IOCTL_HID_GET_PRODUCT_STRING: u32 = hid_out_ctl_code(111);
+/// `IOCTL_HID_GET_SERIALNUMBER_STRING` (0x000B01C2): a collection's serial-number string (class IOCTL).
+pub const IOCTL_HID_GET_SERIALNUMBER_STRING: u32 = hid_out_ctl_code(112);
 
 // Compile-time cross-check against the values printed by the C compiler from the 10.0.28000.0 headers
 // (windows-drivers-rs spec §2, "IOCTL constants").
@@ -118,6 +124,9 @@ const _: () = assert!(IOCTL_HID_GET_REPORT_DESCRIPTOR == 0x000B_0007);
 const _: () = assert!(IOCTL_HID_READ_REPORT == 0x000B_000B);
 const _: () = assert!(IOCTL_HID_WRITE_REPORT == 0x000B_000F);
 const _: () = assert!(IOCTL_HID_GET_STRING == 0x000B_0013);
+const _: () = assert!(IOCTL_HID_GET_MANUFACTURER_STRING == 0x000B_01BA);
+const _: () = assert!(IOCTL_HID_GET_PRODUCT_STRING == 0x000B_01BE);
+const _: () = assert!(IOCTL_HID_GET_SERIALNUMBER_STRING == 0x000B_01C2);
 const _: () = assert!(IOCTL_HID_ACTIVATE_DEVICE == 0x000B_001F);
 const _: () = assert!(IOCTL_HID_DEACTIVATE_DEVICE == 0x000B_0023);
 const _: () = assert!(IOCTL_HID_GET_DEVICE_ATTRIBUTES == 0x000B_0027);

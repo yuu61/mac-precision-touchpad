@@ -56,6 +56,7 @@ The drivers are written in Rust on top of [windows-drivers-rs](https://github.co
 | `AmtPtpDeviceUsbKm.sys` | USB (T2) | KMDF 1.23 | `drivers/km/AmtPtpDeviceUsbKm`, `crates/amtptp-usbkm-core` |
 | `AmtPtpDeviceSpiKm.sys` | SPI | KMDF 1.23 | `drivers/km/AmtPtpDeviceSpiKm`, `crates/amtptp-spikm-core` |
 | `AmtPtpHidFilter.sys` | Bluetooth (Magic Trackpad 2) | KMDF 1.23 | `drivers/km/AmtPtpHidFilter`, `crates/amtptp-hidfilter-core` |
+| `AmtPtpBthFilter.sys` | Bluetooth (Magic Trackpad 2), below HidBth | KMDF 1.23 | `drivers/km/AmtPtpBthFilter`, `crates/amtptp-hidfilter-core` (`bth`) |
 
 ### Repository layout
 

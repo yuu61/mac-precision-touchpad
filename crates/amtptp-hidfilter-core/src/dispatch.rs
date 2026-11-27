@@ -13,7 +13,7 @@ use crate::feature::{check_xfer_length, decode_set_feature, get_feature_report};
 use crate::io::FilterIo;
 use crate::pipeline::issue_lower_read;
 use crate::status::{
-    NtStatus, STATUS_BUFFER_TOO_SMALL, STATUS_INVALID_DEVICE_REQUEST, STATUS_INVALID_DEVICE_STATE,
+    NtStatus, STATUS_BUFFER_TOO_SMALL, STATUS_INVALID_DEVICE_REQUEST,
     STATUS_NOT_SUPPORTED, STATUS_SUCCESS, nt_success,
 };
 
@@ -28,7 +28,7 @@ pub enum InternalIoctl {
     GetDeviceAttributes,
     /// `IOCTL_HID_GET_REPORT_DESCRIPTOR` (0x000B0007).
     GetReportDescriptor,
-    /// `IOCTL_HID_GET_STRING` (0x000B0013): forwarded to the PDO.
+    /// `IOCTL_HID_GET_STRING` (0x000B0013): answered from the data source's strings.
     GetString,
     /// `IOCTL_HID_READ_REPORT` (0x000B000B): parked in `HidReadQueue`.
     ReadReport,
@@ -79,10 +79,7 @@ pub fn dispatch_internal_ioctl<P: FilterIo>(
             copy_descriptor(io, request, report_descriptor_for(state.product_id()))
         }
         InternalIoctl::GetDeviceAttributes => get_device_attributes(io, state, request),
-        InternalIoctl::GetString => {
-            forward_get_string(io, state, request);
-            return;
-        }
+        InternalIoctl::GetString => get_string(io, request),
         InternalIoctl::ReadReport => {
             process_read_report(io, state, request);
             return;
@@ -138,20 +135,17 @@ fn get_device_attributes<P: FilterIo>(
     STATUS_SUCCESS
 }
 
-/// `PtpFilterGetStrings` (Hid.c:142-174): forward the request unchanged to the PDO with
-/// send-and-forget; if the send fails, complete it with `WdfRequestGetStatus`.
-///
-/// P2 (HF-B25): before the detour has set the I/O target, C would send to a NULL handle; the port
-/// completes the request with `STATUS_INVALID_DEVICE_STATE` instead (unreachable in practice).
-fn forward_get_string<P: FilterIo>(io: &mut P, state: &DeviceState, request: P::Request) {
-    if !state.io_target_set() {
-        io.complete(request, STATUS_INVALID_DEVICE_STATE);
-        return;
-    }
-    io.format_using_current_type(request);
-    if !io.send_and_forget(request) {
-        let status = io.request_status(request);
-        io.complete(request, status);
+/// `PtpFilterGetStrings` (Hid.c:142-174) forwarded the request to the PDO, where the detour delivered
+/// it to `HidBth`. Without the detour the strings come from the data source: the glue reads the
+/// vendor collection's manufacturer, product and serial-number strings when it opens it, and
+/// [`FilterIo::copy_string`] copies the requested one; `Information` is the bytes written.
+fn get_string<P: FilterIo>(io: &mut P, request: P::Request) -> NtStatus {
+    match io.copy_string(request) {
+        Ok(len) => {
+            io.set_information(request, len);
+            STATUS_SUCCESS
+        }
+        Err(status) => status,
     }
 }
 

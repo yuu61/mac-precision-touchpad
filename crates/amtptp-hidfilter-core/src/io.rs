@@ -13,7 +13,6 @@
 //!
 //! Handles are `Copy` associated types (WDF handles in the glue). None of the methods may panic.
 
-use ptp_hid::hidport::HID_DEVICE_ATTRIBUTES_LEN;
 use ptp_hid::read_tracker::{ReadTicket, ReadTracker};
 
 use crate::device::XferBuffer;
@@ -106,13 +105,15 @@ pub trait FilterIo {
     /// `WdfIoQueueGetState(HidReadQueue, &QueueRequests, NULL)`: the number of parked upper reads (not
     /// in C; a pure query).
     fn parked_read_count(&mut self) -> usize;
-    /// `WdfRequestFormatRequestUsingCurrentType(request)`.
-    fn format_using_current_type(&mut self, request: Self::Request);
-    /// `WdfRequestSend(request, HidIoTarget, SEND_AND_FORGET)`; true if sent (the request then belongs
-    /// to the lower driver).
-    fn send_and_forget(&mut self, request: Self::Request) -> bool;
-    /// `WdfRequestGetStatus(request)`.
-    fn request_status(&mut self, request: Self::Request) -> NtStatus;
+    /// Copies the string an `IOCTL_HID_GET_STRING` request asks for (its string ID and language ID
+    /// are in `Type3InputBuffer`) into the request's output buffer, NUL-terminated, from the strings the
+    /// glue read from the data source when it opened it. Returns the bytes written.
+    ///
+    /// # Errors
+    /// `STATUS_INVALID_DEVICE_STATE` before the strings are known, `STATUS_INVALID_PARAMETER` for an
+    /// unknown string ID, `STATUS_BUFFER_TOO_SMALL` for a short output buffer, or the failure status
+    /// of retrieving the buffer.
+    fn copy_string(&mut self, request: Self::Request) -> Result<usize, NtStatus>;
 
     // ---- lower reads (Input.c:39-117) ----------------------------------------------------------
 
@@ -130,8 +131,8 @@ pub trait FilterIo {
         &mut self,
         read: Self::LowerRead,
     ) -> Result<Self::LowerMemory, NtStatus>;
-    /// `WdfIoTargetFormatRequestForInternalIoctl(HidIoTarget, read, IOCTL_HID_READ_REPORT, NULL, NULL,
-    /// memory, NULL)`.
+    /// Formats `read` for the data source: an `IRP_MJ_READ` of one padded report into `memory`
+    /// (C: `IOCTL_HID_READ_REPORT` to the PDO through the detour).
     fn format_lower_read(&mut self, read: Self::LowerRead, memory: Self::LowerMemory) -> NtStatus;
     /// `WdfRequestSetCompletionRoutine(read, <completion routine>, request context)`. The completion
     /// routine reads `RequestMemory` and the ticket from the context (before anything is deleted,
@@ -175,19 +176,16 @@ pub trait FilterIo {
     fn query_performance_counter(&mut self) -> i64;
     /// The QPC frequency in ticks per second.
     fn query_performance_frequency(&mut self) -> i64;
-    /// `WdfIoTargetSendInternalIoctlSynchronously(HidIoTarget, NULL, IOCTL_HID_GET_DEVICE_ATTRIBUTES,
-    /// NULL, &descriptor(output, 32), NULL, NULL)`: no timeout (HF-B27). `output` arrives zeroed.
-    fn query_device_attributes(&mut self, output: &mut [u8; HID_DEVICE_ATTRIBUTES_LEN])
-    -> NtStatus;
 
     // ---- mode switch (Device.c:371-418) --------------------------------------------------------
 
-    /// `WdfRequestCreate(WDF_NO_OBJECT_ATTRIBUTES, HidIoTarget, &request)`.
+    /// `WdfRequestCreate(WDF_NO_OBJECT_ATTRIBUTES, source, &request)`.
     ///
     /// # Errors
     /// Returns the WDF failure status if the request cannot be created.
     fn create_mode_switch_request(&mut self) -> Result<Self::ModeSwitchRequest, NtStatus>;
-    /// `WdfMemoryCreatePreallocated(attributes{ParentObject = request}, packet.as_mut_ptr(), 32)`.
+    /// WDF memory (parent: the request) over the report bytes of `packet` (the report ID first, then
+    /// the report: `F1 02 01` on Bluetooth).
     ///
     /// # Errors
     /// Returns the WDF failure status if the transfer packet cannot be wrapped in WDF memory.
@@ -196,15 +194,15 @@ pub trait FilterIo {
         request: Self::ModeSwitchRequest,
         packet: &mut XferBuffer,
     ) -> Result<Self::ModeSwitchMemory, NtStatus>;
-    /// `WdfIoTargetFormatRequestForInternalIoctl(HidIoTarget, request, IOCTL_HID_SET_FEATURE, memory,
-    /// NULL, NULL, NULL)`.
+    /// Formats `IOCTL_HID_SET_FEATURE` (`IRP_MJ_DEVICE_CONTROL`, input = `memory`) for the data source
+    /// (C: the internal minidriver IOCTL to the PDO through the detour).
     fn format_mode_switch(
         &mut self,
         request: Self::ModeSwitchRequest,
         memory: Self::ModeSwitchMemory,
     ) -> NtStatus;
-    /// `irp = WdfRequestWdmGetIrp(request)`; if NULL return false, else `irp->UserBuffer =
-    /// packet.as_mut_ptr()` and return true.
+    /// Finishes the request before it is sent; false fails the mode switch. (C set
+    /// `irp->UserBuffer = packet` for the minidriver IOCTL; the class IOCTL needs nothing more.)
     fn set_mode_switch_user_buffer(
         &mut self,
         request: Self::ModeSwitchRequest,
