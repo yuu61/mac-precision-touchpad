@@ -60,8 +60,9 @@ pub enum LowerReadClass {
     /// The read failed (P3 fix of HF-B7). C ignored the status, so a failed read with `Information == 0`
     /// took the [`Self::Empty`] path, whose work item issued the next read at once: a lower driver that
     /// fails every read (a Bluetooth link going down, a cancelled read) made a zero-delay loop between
-    /// the work item and the completion. The port starts the 3 s recovery timer instead, and only while
-    /// the device is in D0.
+    /// the work item and the completion. The port still re-issues at once, but only for
+    /// [`crate::config::MAX_IMMEDIATE_READ_RETRIES`] failures in a row; then it waits for the 3 s
+    /// recovery timer, while the device is in D0.
     Failed {
         /// The completion status.
         status: NtStatus,
@@ -74,9 +75,10 @@ pub enum LowerReadClass {
     /// 32 bits sign-extended, which made some of these values small valid lengths and others huge ones).
     Oversize,
     /// The first byte is not the transport's multitouch report ID ([`multitouch_report_id`]): another
-    /// report of the trackpad, e.g. its battery status (P3 fix of HF-B8: C parsed such a packet as
-    /// finger data when its length happened to fit, and otherwise stalled input for 3 s as a malformed
-    /// packet). The packet is dropped and the recovery work item issues the next read.
+    /// report of the trackpad, e.g. a mouse-mode report after the trackpad restarted, or its battery
+    /// status (P3 fix of HF-B8: C parsed such a packet as finger data when its length happened to fit,
+    /// and otherwise stalled input for 3 s as a malformed packet). The packet is dropped; the recovery
+    /// work item sends the mode switch again and issues the next read.
     OtherReport {
         /// The packet's first byte (0 for an empty buffer).
         report_id: u8,

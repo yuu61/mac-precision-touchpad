@@ -764,25 +764,35 @@ impl FilterIo for Filter<'_> {
             // Small non-negative enum constant (0x2).
             _WDF_REQUEST_SEND_OPTIONS_FLAGS::WDF_REQUEST_SEND_OPTION_SYNCHRONOUS as ULONG,
         );
-        // SAFETY: PASSIVE_LEVEL (SelfManagedIoInit/Restart or the passive-level timer); formatted
-        // request for `target`; synchronous, so the mode-switch buffer outlives the request (on a
-        // timeout the framework cancels the request and waits for it to complete).
+        let started = wdf_support::time::query_performance_counter();
+        // SAFETY: PASSIVE_LEVEL (SelfManagedIoInit/Restart, the passive-level timer or the work
+        // item); formatted request for `target`; synchronous, so the mode-switch buffer outlives the
+        // request (on a timeout the framework cancels the request and waits for it to complete).
         let sent = unsafe {
             call_unsafe_wdf_function_binding!(WdfRequestSend, request, target, &raw mut options)
         };
+        let elapsed_ms = elapsed_ms_since(started);
+        // SAFETY: live driver-created request (the send returned).
+        let status = unsafe { call_unsafe_wdf_function_binding!(WdfRequestGetStatus, request) };
+        // The status and the time taken (not in C): after a resume the first switch can be busy or
+        // wait for the whole timeout.
         if sent != 0 {
             tlg::write_event!(
                 PROVIDER,
                 "MultitouchModeSet",
                 level(Informational),
-                keyword(KW_DEVICE)
+                keyword(KW_DEVICE),
+                win_ntstatus("Status", &status),
+                u64("ElapsedMs", &elapsed_ms)
             );
         } else {
             tlg::write_event!(
                 PROVIDER,
                 "MultitouchModeSendFailed",
                 level(Error),
-                keyword(KW_DEVICE)
+                keyword(KW_DEVICE),
+                win_ntstatus("Status", &status),
+                u64("ElapsedMs", &elapsed_ms)
             );
         }
         sent != 0
@@ -900,6 +910,16 @@ unsafe extern "C" fn evt_lower_read_completion(
         information,
     );
     trace_lower_read(ctx, outcome, status, information);
+}
+
+/// Milliseconds since the performance-counter value `since` (0 if the counter is unusable).
+fn elapsed_ms_since(since: i64) -> u64 {
+    let frequency = wdf_support::time::query_performance_frequency();
+    let now = wdf_support::time::query_performance_counter();
+    match (u64::try_from(now - since), u64::try_from(frequency)) {
+        (Ok(ticks), Ok(frequency)) if frequency > 0 => ticks.saturating_mul(1000) / frequency,
+        _ => 0,
+    }
 }
 
 /// Traces the outcomes of a lower read that are not the normal report path.

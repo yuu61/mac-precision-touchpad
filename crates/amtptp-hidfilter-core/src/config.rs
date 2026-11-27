@@ -16,6 +16,17 @@ pub const CONFIGURE_RETRY_DUE_TIME: i64 = rel_timeout_in_sec(2);
 /// (Input.c:63, 107, 171): 3 s.
 pub const TRANSPORT_RETRY_DUE_TIME: i64 = rel_timeout_in_sec(3);
 
+/// Failed lower reads in a row that are re-issued at once by the work item, as C did (not in C: C had
+/// no limit). Past this, a failed read waits for the 3 s recovery timer instead, so a lower driver that
+/// fails every read immediately (a dropped link) cannot keep a worker thread in a zero-delay loop.
+///
+/// `HidBth` fails a read with `STATUS_DEVICE_DATA_ERROR` now and then during normal use. It is the read sent
+/// right after the Bluetooth device's own HIDCLASS took a multi-finger packet (`docs/rust-port/hidfilter.md`,
+/// "Competing reader on Bluetooth"). On hardware these failures came singly or in pairs between
+/// successful reads. Waiting 3 s for each (as the first version of this fix did) left no read in flight
+/// after two of them and froze input for 3 s. The limit is far above such runs.
+pub const MAX_IMMEDIATE_READ_RETRIES: u32 = 8;
+
 /// `GUID_DEVICEINTERFACE_AmtPtpHidFilter` `{FF969022-3111-4441-8F88-875440172C2E}` (Device.h:7-9), as
 /// (Data1, Data2, Data3, Data4). Registered with no reference string; no handler serves it (HF-B28,
 /// preserved).

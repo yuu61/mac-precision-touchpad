@@ -3,7 +3,7 @@
 //!
 //! Triggers of a lower read (spec 6.5): an upper `READ_REPORT` while `DeviceConfigured`, and
 //! [`issue_backlog_reads`] after the device became configured, from the recovery timer, and from the
-//! recovery work item after an empty read or another report. A successful completion does not issue
+//! recovery work item after an empty, failed or other report. A successful completion does not issue
 //! another read; the pipeline is 1:1 with upper reads.
 //!
 //! Every lower read is registered in the device's read tracker ([`FilterIo::with_reads`]) before it is
@@ -16,10 +16,11 @@
 use ptp_hid::input::PTP_REPORT_LEN;
 use ptp_hid::read_tracker::{LowerReadOrigin, ReadTicket};
 
-use crate::config::TRANSPORT_RETRY_DUE_TIME;
+use crate::config::{MAX_IMMEDIATE_READ_RETRIES, TRANSPORT_RETRY_DUE_TIME};
 use crate::device::DeviceState;
 use crate::input::{InputLayout, LowerReadClass, build_report, classify_lower_read};
 use crate::io::{FailedAction, FilterIo};
+use crate::pnp::configure_multitouch;
 use crate::status::{NtStatus, nt_success};
 
 /// `PtpFilterInputIssueTransportRequest` (Input.c:39-117): creates, formats and sends one lower read.
@@ -96,10 +97,24 @@ pub fn issue_backlog_reads<P: FilterIo>(io: &mut P, state: &DeviceState) {
     }
 }
 
-/// `PtpFilterWorkItemCallback` (Input.c:30-37), enqueued after an empty read or another report:
-/// [`issue_backlog_reads`]. C issued one lower read without checking `DeviceConfigured`, so the work
-/// item also sent reads to a stopped or unconfigured device (P3 fix).
+/// `PtpFilterWorkItemCallback` (Input.c:30-37), enqueued after an empty, failed or other report:
+///
+/// 1. if a report other than the multitouch report asked for it, and the device is configured, in D0
+///    and detoured, send the mode switch again ([`configure_multitouch`], `PASSIVE_LEVEL`). Not in C:
+///    when the trackpad restarts (its power switch) while the HID device stays, it comes back in mouse
+///    mode, and nothing else would switch it back (hardware: a stream of 8-byte reports with ID 0x02 and
+///    a dead cursor until the device was re-added). A failure is not retried here; the next such report
+///    asks again;
+/// 2. [`issue_backlog_reads`]. C issued one lower read without checking `DeviceConfigured`, so the work
+///    item also sent reads to a stopped or unconfigured device (P3 fix).
 pub fn work_item_callback<P: FilterIo>(io: &mut P, state: &DeviceState) {
+    if state.take_mode_switch_request()
+        && state.device_configured()
+        && state.in_d0()
+        && state.detour_completed()
+    {
+        let _status = configure_multitouch(io, state);
+    }
     issue_backlog_reads(io, state);
 }
 
@@ -125,11 +140,15 @@ pub enum LowerReadOutcome {
 /// last `D0Exit`) is only deleted. Otherwise, by [`classify_lower_read`] (C order for a successful
 /// multitouch packet):
 /// 1. vendor not Apple: `WdfDeviceSetFailed(NoRestart)`;
-/// 2. failed read: recovery timer 3 s while the device is in D0 (P3 fix of HF-B7, no work item);
-/// 3. empty read, or another report than multitouch (P3 fix of HF-B8): enqueue the recovery work item;
-/// 4. `Information` above the buffer (P3 fix of HF-B29) or malformed length: recovery timer 3 s;
-/// 5. no parked upper read: drop the packet;
-/// 6. otherwise stamp the reporting clock, build the report (honouring the selective-reporting
+/// 2. failed read (P3 fix of HF-B7): enqueue the recovery work item, as C did for its zero-length
+///    result, until [`MAX_IMMEDIATE_READ_RETRIES`] reads have failed in a row; after that the 3 s
+///    recovery timer, while the device is in D0. Any other completion ends the run;
+/// 3. empty read: enqueue the recovery work item;
+/// 4. another report than multitouch (P3 fix of HF-B8): ask for the mode switch again and enqueue the
+///    recovery work item ([`work_item_callback`]);
+/// 5. `Information` above the buffer (P3 fix of HF-B29) or malformed length: recovery timer 3 s;
+/// 6. no parked upper read: drop the packet;
+/// 7. otherwise stamp the reporting clock, build the report (honouring the selective-reporting
 ///    switches), retrieve the upper output memory, copy 50 bytes, `Information = 50`, complete with the
 ///    copy status (SUCCESS). If retrieving or copying fails: `WdfDeviceSetFailed(AttemptRestart)` and,
 ///    unlike C, which leaks the request (HF-B9), complete it with that failure status (port policy P2).
@@ -150,14 +169,23 @@ pub fn complete_lower_read<P: FilterIo>(
             let first_byte = io.lower_read_buffer(memory).first().copied();
             let class =
                 classify_lower_read(state.vendor_id(), &layout, status, information, first_byte);
+            if !matches!(class, LowerReadClass::Failed { .. }) {
+                state.note_read_completion();
+            }
             match class {
                 LowerReadClass::UnsupportedVendor => io.set_failed(FailedAction::NoRestart),
                 LowerReadClass::Failed { .. } => {
-                    if state.in_d0() {
-                        io.start_recovery_timer(TRANSPORT_RETRY_DUE_TIME);
+                    let immediate = state.note_read_failure() <= MAX_IMMEDIATE_READ_RETRIES;
+                    match (immediate, state.in_d0()) {
+                        (true, _) => io.enqueue_recovery_work_item(),
+                        (false, true) => io.start_recovery_timer(TRANSPORT_RETRY_DUE_TIME),
+                        // Out of D0: the restart issues the reads.
+                        (false, false) => {}
                     }
                 }
-                LowerReadClass::Empty | LowerReadClass::OtherReport { .. } => {
+                LowerReadClass::Empty => io.enqueue_recovery_work_item(),
+                LowerReadClass::OtherReport { .. } => {
+                    state.request_mode_switch();
                     io.enqueue_recovery_work_item();
                 }
                 LowerReadClass::Oversize | LowerReadClass::Malformed => {

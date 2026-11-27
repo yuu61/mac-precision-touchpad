@@ -34,13 +34,13 @@ The driver has **no device table** and sends **no USB or SPI bytes**. Its only l
 | HF-B4 | FIXED (P2) | The 50-byte report is built zero-initialised (`PtpReport::EMPTY`). Unused contacts and the padding bits are 0 instead of kernel stack bytes. |
 | HF-B5 | PRESERVED (P1) | Lower clamp only, no upper clamp: x up to 7773, y up to 6574. |
 | HF-B6 | PRESERVED (P1) | `FilterIo::query_performance_frequency` returns what `KeQueryPerformanceCounter(&x)` writes, which is the frequency. `scan_time(freq, swap(last, freq))` is therefore 0, or 0xFF on the never-stamped first report. |
-| HF-B7 | FIXED (P3) | The completion status is read (`WdfRequestGetStatus`). A failed read is `LowerReadClass::Failed`: it arms the 3 s recovery timer while the device is in D0, and never the work item. C took a failed read with `Information == 0` as an empty read, whose work item re-issued the read at once, so a lower driver that failed every read (Bluetooth link down) made a zero-delay loop. |
-| HF-B8 | FIXED (P3) | Byte 0 must be the transport's multitouch report ID (`multitouch_report_id`: USB 0x02, Bluetooth 0x31, as in Linux hid-magicmouse and every C edge packet). Another report is `LowerReadClass::OtherReport`: it is dropped and the work item issues the next read. C parsed it as fingers when its length was `hdr + 9n`, and otherwise stalled input for 3 s as malformed. |
+| HF-B7 | FIXED (P3) | The completion status is read (`WdfRequestGetStatus`). A failed read is `LowerReadClass::Failed`: the work item re-issues it at once, as C did, until `config::MAX_IMMEDIATE_READ_RETRIES` (8) reads have failed in a row; after that the 3 s recovery timer, while the device is in D0. Any other completion resets the count. C took a failed read with `Information == 0` as an empty read with no limit, so a lower driver that failed every read (Bluetooth link down) made a zero-delay loop. The first version of this fix sent every failed read to the timer. On hardware, HidBth fails a read with `STATUS_DEVICE_DATA_ERROR` now and then during normal use (see "Competing reader on Bluetooth" below). Two such failures in a row left no read in flight and froze input for 3 s. |
+| HF-B8 | FIXED (P3) | Byte 0 must be the transport's multitouch report ID (`multitouch_report_id`: USB 0x02, Bluetooth 0x31, as in Linux hid-magicmouse and every C edge packet). Another report is `LowerReadClass::OtherReport`: it is dropped, and the work item sends the mode switch again (if the device is configured, in D0 and detoured) and issues the next read. C parsed it as fingers when its length was `hdr + 9n`, and otherwise stalled input for 3 s as malformed. The mode switch is new: when the trackpad's power switch restarts it while the HID device stays (no PnP events), it comes back in mouse mode (hardware: 8-byte reports with ID 0x02), and C never switched it back, so the cursor stayed dead until the device was re-added. Once on hardware, a 4-byte packet starting with 0x8C also triggered the switch; it was probably the tail of a report split by the competing reader below. The extra switch is harmless (SUCCESS, 23 ms). |
 | HF-B9 | FIXED (P2) | Retrieve-output or copy failure: `WdfDeviceSetFailed(AttemptRestart)` is still issued. Then the upper request is **completed** with that failure status. C leaks it. |
 | HF-B10 | FIXED (P2, glue) | The glue reads `RequestMemory` from the request context before `complete_lower_read`. The core then deletes the request, then the memory. |
 | HF-B11 | PRESERVED (P3) | Restart before the detour returns `STATUS_INVALID_STATE_TRANSITION`, but still stamps `LastReportTime` and sets `DeviceConfigured`. |
 | HF-B12 | PRESERVED (P3) for Init/Restart, FIXED (P3) for the timer | A failed mode switch in Init or Restart returns SUCCESS and arms the 2 s timer. The timer no longer issues a lower read after a failed switch; it retries while the device is in D0. |
-| HF-B13 | FIXED (P3) | The mode switch returns `WdfRequestGetStatus` after every synchronous send, so a lower failure behind a TRUE send is a failure. |
+| HF-B13 | FIXED (P3) | The mode switch returns `WdfRequestGetStatus` after every synchronous send, so a lower failure behind a TRUE send is a failure. Seen on hardware (Bluetooth): the synchronous send returned TRUE for switches that completed with `STATUS_CANCELLED`, `STATUS_DEVICE_BUSY` and `STATUS_DEVICE_NOT_CONNECTED`. |
 | HF-B14 | FIXED (P3) | D0Exit leaves D0 and advances an epoch (`DeviceState`), so a later timer or work item does nothing and a running timer cannot mark the device configured. It also stops the recovery timer (`Wait = FALSE`) and cancels the lower reads in flight: every lower read is registered in a `ptp_hid::read_tracker::ReadTracker` (behind a `WDFSPINLOCK` in the glue) before it is sent, D0Exit suspends the tracker (new epoch) and cancels what it hands out, and a read of an earlier epoch is dropped when it completes (`LowerReadOutcome::Stale`) instead of serving an upper read parked after the resume. A registration after D0Exit is refused. |
 | HF-B15 | FIXED (P2 leak, glue) | The lookaside list is parented to the device (`config::READ_BUFFER_LOOKASIDE_PARENT_IS_DEVICE`); C parents it to the driver. |
 | HF-B16 | FIXED (P2) | The timer and the work item use `AutomaticSerialization = FALSE` (`config`), which has the same effect under sync scope None. AddDevice returns the creation failure of the lookaside list, timer or work item immediately. C continues and would later use a NULL handle. |
@@ -51,7 +51,7 @@ The driver has **no device table** and sends **no USB or SPI bytes**. Its only l
 | HF-B21 | PRESERVED (P1) | GET/SET_FEATURE never set `Information`. |
 | HF-B22 | PRESERVED (P1) | `HID_DEVICE_ATTRIBUTES.Reserved` is not written. |
 | HF-B23 | PRESERVED for `reportBufferLen >= 2`; FIXED (P2/P3) below | SET_FEATURE still ignores `reportBufferLen` otherwise. If byte 1 lies outside the report buffer, 0x04 reads it as 0 (mouse mode, P2) and 0x06 changes nothing (P3). |
-| HF-B24 | PRESERVED (P3) for successful reads | A successful zero-length completion still enqueues the work item, which re-reads at once. A failed read no longer takes this path (HF-B7), so the loop needs a lower driver that keeps completing reads successfully with no data. |
+| HF-B24 | PRESERVED (P3) for successful reads | A successful zero-length completion still enqueues the work item, which re-reads at once. Failed reads are limited separately (HF-B7), so the loop needs a lower driver that keeps completing reads successfully with no data. |
 | HF-B25 | FIXED (P2, unreachable) | Without an I/O target, GET_STRING completes with `STATUS_INVALID_DEVICE_STATE` and `issue_lower_read` sends nothing. C uses a NULL handle. |
 | HF-B26 | PRESERVED (P1) | The global `MajorFunction[0x0F]` patch is never reverted. The checks, their order and the `strncmp` semantics are in `detour_hid_stack` and `client_id_matches`. |
 | HF-B27 | FIXED (P3) | The synchronous attribute query and mode switch are sent with a timeout (`wdf_support::init::SYNC_IO_TIMEOUT`, 5 s). A timed-out mode switch fails like any other and the 2 s recovery timer retries it; on a timeout the framework cancels the request and waits for it to complete, so the stack transfer buffer stays valid. |
@@ -198,10 +198,27 @@ Exactly-once completion:
 * **`EvtIoStop`** is registered and empty. It neither acknowledges nor completes.
 * **KMDF version.** The C project bound the WDK default, KMDF 1.15. The KM workspace binds KMDF 1.23 for all three KM drivers (packaging decision, see `packaging.md`). The behaviour this driver relies on exists in 1.9 and later.
 
+### Competing reader on Bluetooth (found on hardware, not fixed)
+
+The Bluetooth HID device itself (`BTHENUM\{00001124-...}`, HidBth under HIDCLASS) has its own HIDCLASS, and that HIDCLASS keeps its own reads pending at HidBth. The filter reads HidBth through the detour at the same time. HidBth gives each input packet to one pending read. A packet that lands in HIDCLASS's read never reaches the filter, and HIDCLASS drops it, because report 0x31 is not in the SDP descriptor. C uses the same detour, so it is probably affected too; this has not been measured.
+
+Measured with a Magic Trackpad 2 during multi-finger gestures (2026-11-27):
+
+* 74 of 2125 interrupt-channel packets (3.5%) did not reach the filter, although two filter reads were pending each time.
+* The radio delivered every packet complete (BTHPORT HCI trace).
+* In the same window, the `NumReadReports` of that HIDCLASS rose by 151, about two per lost packet.
+* Its `LastReadReportSuccessTime` fell within 0.2 ms of a lost packet, and none of the 64 later packets was lost.
+* The losses come in pairs, then a gap of 0.5–1.5 s.
+
+The read issued right after a lost multi-finger packet fails at once with `STATUS_DEVICE_DATA_ERROR`; this is the failure HF-B7 re-issues at once. A lost one-finger packet causes no error. Why HidBth fails that read is not known.
+
+The trace used: `logman` with the filter provider, BTHPORT `{8a1f9517-3a8c-4a9e-a018-4f17a200f277}` level 5 (event 402 carries the HCI packet heads), and HIDCLASS `{6465DA78-E7A0-4F39-B084-8F53C7C30DC6}`. Enabling HIDCLASS writes event 3 per HID device, with the read counters above.
+
+A fix needs a design change: HIDCLASS's reads must stop reaching HidBth. Each lost packet is one 11 ms frame. A lost lift frame could leave a contact down until the next report (not observed).
+
 ### Not verified (no device test on this machine)
 
 * That the framework statuses KMDF 1.23 produces on the `wdf=`/stub-model paths match KMDF 1.15, for example `STATUS_BUFFER_TOO_SMALL` for a short output buffer. The glue makes the same calls, so they should match.
-* HF-B13: whether a synchronous `WdfRequestSend` returns TRUE when the request completes with an error status.
 * That a passive-level timer with `AutomaticSerialization = FALSE` creates under a Dispatch-level parent. The WDF documentation says it should, but this was not run on a device.
 * The detour offsets against the running Windows build. The port uses the same hard-coded LP64 offsets as C.
 
@@ -210,7 +227,7 @@ Exactly-once completion:
 * Provider `AmtPtpHidFilterTraceProvider`, id `eeb34803-f3ec-4bb1-97ce-b42405d7f3c2` (the C WPP control GUID).
 * Keywords: 0x01 driver, 0x02 device, 0x04 queue, 0x08 HID, 0x10 input. These are the WPP flag bits.
 * Events:
-  * Informational: driver init and cleanup; DeviceAdd with its status; PrepareHardware; D0Entry/D0Exit with the power state; SelfManagedIoInit/Restart with status, IDs and `DeviceConfigured`; DetourPatched; MultitouchModeSet; RecoveryTimerStarted (due time) and RecoveryTimerFired; MalformedInput (response length, Input.c:170); GetFeature and SetFeature (report ID and `reportBufferLen`); SetInputMode (`PtpInputOn`) and SelectiveReporting (button and surface bits as the core decodes them; nothing reads them, HF-B20) for SET_FEATURE 0x04/0x06; SetFeatureNotSupported (report ID and status). The completion routine classifies the read with `core::classify_lower_read` before calling the core, only to trace it.
+  * Informational: driver init and cleanup; DeviceAdd with its status; PrepareHardware; D0Entry/D0Exit with the power state; SelfManagedIoInit/Restart with status, IDs and `DeviceConfigured`; DetourPatched; MultitouchModeSet (status and milliseconds taken; a TRUE send can still carry a failure, HF-B13); RecoveryTimerStarted (due time) and RecoveryTimerFired; MalformedInput (response length, Input.c:170); GetFeature and SetFeature (report ID and `reportBufferLen`); SetInputMode (`PtpInputOn`) and SelectiveReporting (button and surface bits as the core decodes them; nothing reads them, HF-B20) for SET_FEATURE 0x04/0x06; SetFeatureNotSupported (report ID and status). The completion routine classifies the read with `core::classify_lower_read` before calling the core, only to trace it.
   * Error: each failed AddDevice step; each NULL in the detour chain; the attribute query and mode-switch send failures; lower-read create/memory/format/send failures; DeviceSetFailed; UnsupportedDeviceInput (VendorID, Input.c:157); InputDroppedNoParkedRead (status, Input.c:178; only from the completion routine, not from the D0Exit drain); RetrieveOutputMemoryFailed and CopyToOutputMemoryFailed (status, Input.c:228/236, also on the descriptor IOCTLs). Together these name the cause of each DeviceSetFailed(AttemptRestart).
   * Warning: unsupported IOCTLs (code and name).
   * Verbose: every request completion (handle and status).
