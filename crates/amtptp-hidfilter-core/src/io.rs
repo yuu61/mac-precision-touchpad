@@ -98,6 +98,9 @@ pub trait FilterIo {
     /// # Errors
     /// Returns the WDF failure status if the queue is empty or cannot supply a request.
     fn retrieve_next_parked_read(&mut self) -> Result<Self::Request, NtStatus>;
+    /// `WdfIoQueueGetState(HidReadQueue, &QueueRequests, NULL)`: the number of parked upper reads (not
+    /// in C; a pure query).
+    fn parked_read_count(&mut self) -> usize;
     /// `WdfRequestFormatRequestUsingCurrentType(request)`.
     fn format_using_current_type(&mut self, request: Self::Request);
     /// `WdfRequestSend(request, HidIoTarget, SEND_AND_FORGET)`; true if sent (the request then belongs
@@ -189,7 +192,8 @@ pub trait FilterIo {
     ) -> bool;
     /// `WdfRequestSend(request, HidIoTarget, SYNCHRONOUS)` with no timeout (HF-B27); its BOOLEAN.
     fn send_mode_switch_synchronously(&mut self, request: Self::ModeSwitchRequest) -> bool;
-    /// `WdfRequestGetStatus(request)`.
+    /// `WdfRequestGetStatus(request)`, after every send: the completion status when the send returned
+    /// TRUE, the failure when it returned FALSE.
     fn mode_switch_status(&mut self, request: Self::ModeSwitchRequest) -> NtStatus;
     /// `WdfObjectDelete(request)` (also deletes the memory, its child).
     fn delete_mode_switch_request(&mut self, request: Self::ModeSwitchRequest);

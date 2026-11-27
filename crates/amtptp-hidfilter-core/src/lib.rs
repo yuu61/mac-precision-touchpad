@@ -6,7 +6,10 @@
 //! mode with a vendor `SET_FEATURE`, and turns each raw Apple report into one 50-byte PTP input report.
 //!
 //! This crate holds all of that logic with the C driver's exact observable behaviour, plus the port policy
-//! P2 safety fixes. It has no WDK dependency: framework calls go through the [`FilterIo`],
+//! P2 safety fixes and the P3 fixes of its PnP/power handling: the IDs survive a PnP restart (HF-B30), a
+//! mode switch whose lower request failed is a failure (HF-B13), the recovery timer and work item only
+//! act on a running device, and a successful configuration issues the lower reads that parked upper
+//! reads are missing. It has no WDK dependency: framework calls go through the [`FilterIo`],
 //! [`DetourIo`] and [`AddDeviceIo`] traits, which the driver crate implements with one WDF call per
 //! method. The host tests implement the same traits with the C oracle's stub model and replay the
 //! fixtures recorded from the real C code.
@@ -80,7 +83,7 @@ pub use descriptor::{
 };
 pub use detour::{DetourIo, client_id_matches, detour_hid_stack};
 pub use device::{
-    Bcm5974Param, DEVICE_VERSION, DeviceSnapshot, DeviceState, HID_PID_MAGIC_TRACKPAD_2,
+    Bcm5974Param, DEVICE_VERSION, DeviceSnapshot, DeviceState, HID_PID_MAGIC_TRACKPAD_2, RecoveryTicket,
     HID_VID_APPLE_BT, HID_VID_APPLE_USB, HID_XFER_PACKET_LEN, HID_XFER_PACKET_SIZE, ModeSwitch,
     Transport, TransportParams, XFER_REPORT_BUFFER_LEN_OFFSET, XFER_REPORT_BUFFER_OFFSET,
     XFER_REPORT_ID_OFFSET, XferBuffer, is_apple_vendor,
@@ -92,7 +95,7 @@ pub use input::{
     classify_lower_read, contact_count, parse_finger, response_length,
 };
 pub use io::{FailedAction, FilterIo, XferPacket, XferPacketMut};
-pub use pipeline::{complete_lower_read, issue_lower_read, work_item_callback};
+pub use pipeline::{complete_lower_read, issue_backlog_reads, issue_lower_read, work_item_callback};
 pub use pnp::{
     configure_multitouch, d0_entry, d0_exit, prepare_hardware, recovery_timer_callback,
     self_managed_io_init, self_managed_io_restart,

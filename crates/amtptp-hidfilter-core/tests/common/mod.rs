@@ -499,6 +499,11 @@ impl FilterIo for Mock {
         }
     }
 
+    fn parked_read_count(&mut self) -> usize {
+        // A pure query: the C oracle logs no getters.
+        self.read_queue.len()
+    }
+
     fn format_using_current_type(&mut self, request: usize) {
         self.rec(format!(
             "WdfRequestFormatRequestUsingCurrentType(req={})",

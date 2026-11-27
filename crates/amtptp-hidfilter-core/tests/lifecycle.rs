@@ -18,6 +18,29 @@ const TOTAL: usize = 53;
 const SKIP_DRIVER_ENTRY: &str = "skipped: DriverEntry/driver cleanup are glue-only (WdfDriverCreate status passthrough, no core logic)";
 const ADD_EXACT: &str = "AddDevice exact";
 const ADD_P2: &str = "AddDevice P2-fixed (HF-B16/HF-B17)";
+const P3: &str = "P3-fixed (HF-B30 IDs kept; work item and timer gated)";
+
+/// The corrected expectation of the records whose C behaviour is fixed: (events, `st_out`,
+/// `lower_reads_pending`).
+fn p3_expectation(case: &str, r: &Rec) -> Option<(Vec<String>, DeviceSnapshot, Option<i128>)> {
+    match case {
+        // HF-B30: PrepareHardware no longer zeroes the IDs.
+        "prepare-hardware-after-start" => {
+            let st_in = parse_state(r.get("st_in"));
+            let mut out = parse_state(r.get("st_out"));
+            out.vendor_id = st_in.vendor_id;
+            out.product_id = st_in.product_id;
+            out.version_number = st_in.version_number;
+            Some((events(r), out, None))
+        }
+        // C issued a read for an unconfigured device, and the timer marked a device without the detour
+        // configured; both now do nothing.
+        "workitem-run-unconfigured" | "timer-without-detour" => {
+            Some((Vec::new(), parse_state(r.get("st_in")), Some(0)))
+        }
+        _ => None,
+    }
+}
 
 fn state_in(r: &Rec) -> DeviceSnapshot {
     match r.opt("st_in") {
@@ -230,7 +253,7 @@ fn replay_lifecycle() {
         let mut ret = None;
         match op {
             "PtpFilterPrepareHardware" => ret = Some(prepare_hardware(&state)),
-            "PtpFilterDeviceD0Entry" => ret = Some(d0_entry()),
+            "PtpFilterDeviceD0Entry" => ret = Some(d0_entry(&state)),
             "PtpFilterDeviceD0Exit" => {
                 let parked: usize = case
                     .strip_prefix("d0-exit-parked")
@@ -269,8 +292,14 @@ fn replay_lifecycle() {
                 }
                 issue_lower_read(&mut m, &state);
             }
-            "PtpFilterWorkItemCallback" => work_item_callback(&mut m, &state),
-            "PtpFilterRecoveryTimerCallback" => recovery_timer_callback(&mut m, &state),
+            "PtpFilterWorkItemCallback" => {
+                assert_eq!(d0_entry(&state), 0);
+                work_item_callback(&mut m, &state);
+            }
+            "PtpFilterRecoveryTimerCallback" => {
+                assert_eq!(d0_entry(&state), 0);
+                recovery_timer_callback(&mut m, &state);
+            }
             "FilterEvtIoIntDeviceControl" => {
                 let code = if case.starts_with("get-string") {
                     if case == "get-string-send-fails" {
@@ -307,28 +336,37 @@ fn replay_lifecycle() {
             (Some(s), want) => assert_eq!(st(s), want, "{case}"),
             (None, want) => assert_eq!(want, "-", "{case}"),
         }
-        let mut expected_events = events(r);
+        let p3 = p3_expectation(case, r);
+        let (mut expected_events, expected_state, expected_pending) = match p3.clone() {
+            Some(expected) => expected,
+            None => (
+                events(r),
+                parse_state(r.get("st_out")),
+                r.opt("lower_reads_pending").map(num),
+            ),
+        };
         if op == "FilterEvtIoIntDeviceControl*2+PtpFilterInputRequestCompletionCallback" {
             for event in &mut expected_events {
                 *event = event.replace("freq_ptr=nonnull", "freq_ptr=null");
             }
         }
         assert_eq!(m.ev, expected_events, "{case}");
-        assert_eq!(state.snapshot(), parse_state(r.get("st_out")), "{case}");
+        assert_eq!(state.snapshot(), expected_state, "{case}");
         check_detour_extras(r, &m);
         if let Some(d) = r.opt("readq_depth") {
             assert_eq!(m.read_queue.len() as i128, num(d), "{case}");
         }
-        if let Some(p) = r.opt("lower_reads_pending") {
-            assert_eq!(i128::from(m.lower_reads_pending), num(p), "{case}");
+        if let Some(p) = expected_pending {
+            assert_eq!(i128::from(m.lower_reads_pending), p, "{case}");
         }
-        tally.add("exact");
+        tally.add(if p3.is_some() { P3 } else { "exact" });
     }
     let total = tally.assert(&[
         (SKIP_DRIVER_ENTRY, 3),
         (ADD_EXACT, 5),
         (ADD_P2, 4),
-        ("exact", 41),
+        (P3, 3),
+        ("exact", 38),
     ]);
     assert_eq!(total, TOTAL);
 }

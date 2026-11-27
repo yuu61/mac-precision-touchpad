@@ -352,9 +352,9 @@ impl AddDeviceIo for AddDevice {
     }
 }
 
-/// `PtpFilterPrepareHardware` (Device.c:104-130): zeroes VID/PID/version and clears
-/// `DeviceConfigured`; the resource lists are ignored. HF-B30 (IDs stay 0 after a PnP stop/start)
-/// is preserved.
+/// `PtpFilterPrepareHardware` (Device.c:104-130): clears `DeviceConfigured`; the resource lists are
+/// ignored. VID/PID/version are kept, so the restart after a PnP stop sends the mode switch again (P3
+/// fix of HF-B30: C zeroed them).
 unsafe extern "C" fn evt_device_prepare_hardware(
     device: WDFDEVICE,
     _resources_raw: WDFCMRESLIST,
@@ -372,9 +372,10 @@ unsafe extern "C" fn evt_device_prepare_hardware(
     status
 }
 
-/// `PtpFilterDeviceD0Entry` (Device.c:132-147): no-op.
+/// `PtpFilterDeviceD0Entry` (Device.c:132-147): marks the device as in D0 (C did nothing), so the
+/// recovery timer works on it again.
 unsafe extern "C" fn evt_device_d0_entry(
-    _device: WDFDEVICE,
+    device: WDFDEVICE,
     previous_state: WDF_POWER_DEVICE_STATE,
 ) -> NTSTATUS {
     tlg::write_event!(
@@ -384,12 +385,14 @@ unsafe extern "C" fn evt_device_d0_entry(
         keyword(KW_DEVICE),
         i32("PreviousState", &previous_state)
     );
-    d0_entry()
+    // SAFETY: power callback of a live device of this driver.
+    let ctx = unsafe { device_context(device) };
+    d0_entry(&ctx.state)
 }
 
-/// `PtpFilterDeviceD0Exit` (Device.c:149-182): clears `DeviceConfigured` and completes every parked
-/// upper read with `STATUS_CANCELLED`. The timer, work item and in-flight lower reads are left
-/// alone (HF-B14, preserved).
+/// `PtpFilterDeviceD0Exit` (Device.c:149-182): clears `DeviceConfigured`, leaves D0 (a recovery timer
+/// or work item that runs afterwards does nothing) and completes every parked upper read with
+/// `STATUS_CANCELLED`. In-flight lower reads are left alone (HF-B14, preserved).
 unsafe extern "C" fn evt_device_d0_exit(
     device: WDFDEVICE,
     target_state: WDF_POWER_DEVICE_STATE,
@@ -438,8 +441,8 @@ fn trace_configuration(event_is_init: bool, ctx: &DeviceContext, status: NtStatu
 }
 
 /// `PtpFilterSelfManagedIoInit` (Device.c:184-245), once at the first start (`PASSIVE_LEVEL)`:
-/// detour, synchronous attributes query, mode switch (failure: 2 s retry timer, SUCCESS), stamp
-/// `LastReportTime` and set `DeviceConfigured`.
+/// detour, synchronous attributes query, mode switch (failure: 2 s retry timer, SUCCESS), restart the
+/// reporting clock, set `DeviceConfigured` and issue the lower reads parked upper reads are missing.
 unsafe extern "C" fn evt_device_self_managed_io_init(device: WDFDEVICE) -> NTSTATUS {
     // SAFETY: PnP callback of a live device of this driver.
     let ctx = unsafe { device_context(device) };
@@ -449,7 +452,8 @@ unsafe extern "C" fn evt_device_self_managed_io_init(device: WDFDEVICE) -> NTSTA
 }
 
 /// `PtpFilterSelfManagedIoRestart` (Device.c:247-284), on every later return to D0 (`PASSIVE_LEVEL`).
-/// HF-B11/B12 preserved (see the core).
+/// HF-B11/B12 preserved (see the core); a successful mode switch issues the lower reads parked upper
+/// reads are missing.
 unsafe extern "C" fn evt_device_self_managed_io_restart(device: WDFDEVICE) -> NTSTATUS {
     // SAFETY: power callback of a live device of this driver.
     let ctx = unsafe { device_context(device) };
@@ -460,7 +464,7 @@ unsafe extern "C" fn evt_device_self_managed_io_restart(device: WDFDEVICE) -> NT
 
 /// `PtpFilterRecoveryTimerCallback` (Device.c:424-443): passive-level one-shot timer (its
 /// `ExecutionLevel` is `WdfExecutionLevelPassive`), so the synchronous mode switch it triggers runs
-/// at `PASSIVE_LEVEL` as in C.
+/// at `PASSIVE_LEVEL` as in C. It does nothing unless the device is in D0 (see the core).
 unsafe extern "C" fn evt_recovery_timer(timer: WDFTIMER) {
     // SAFETY: live timer of this driver, parented to the device.
     let device = unsafe { call_unsafe_wdf_function_binding!(WdfTimerGetParentObject, timer) };
@@ -475,8 +479,8 @@ unsafe extern "C" fn evt_recovery_timer(timer: WDFTIMER) {
     recovery_timer_callback(&mut Filter::new(ctx), &ctx.state);
 }
 
-/// `PtpFilterWorkItemCallback` (Input.c:30-37): issues one lower read (`PASSIVE_LEVEL`), without
-/// checking `DeviceConfigured`.
+/// `PtpFilterWorkItemCallback` (Input.c:30-37), `PASSIVE_LEVEL`: while the device is configured, issues
+/// the lower reads parked upper reads are missing (C issued one read without checking).
 unsafe extern "C" fn evt_recovery_work_item(work_item: WDFWORKITEM) {
     // SAFETY: live work item of this driver, parented to the device.
     let device =
