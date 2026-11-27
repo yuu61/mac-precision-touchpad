@@ -67,6 +67,7 @@
 )]
 
 mod add_device;
+pub mod bth;
 pub mod config;
 mod descriptor;
 pub mod detour;
