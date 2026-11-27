@@ -225,8 +225,9 @@ unsafe extern "C" fn evt_device_d0_entry(
 
 /// `AmtPtpEvtDeviceD0Exit` (Device.c:361-416). `PASSIVE_LEVEL`, non-paged as in C.
 ///
-/// Stop the interrupt pipe target (cancelling the reader's reads), wellspring mode off, and return the
-/// mode-switch status (spec B10, preserved).
+/// Stop the interrupt pipe target (cancelling the reader's reads) and switch wellspring mode off, best
+/// effort: a failed transfer is traced, and the callback returns `STATUS_SUCCESS` (P3 fix of B10: on a
+/// surprise removal the transfer always fails, and a failed `D0Exit` is a failed power-down).
 unsafe extern "C" fn evt_device_d0_exit(
     device: WDFDEVICE,
     target_state: WDF_POWER_DEVICE_STATE,
@@ -244,15 +245,17 @@ unsafe extern "C" fn evt_device_d0_exit(
     };
     // SAFETY: `device` owns `context`; D0Exit runs at PASSIVE_LEVEL.
     let mut io = unsafe { UsbIo::new(device, context) };
-    let status = lifecycle::d0_exit(&context.state, &mut io);
-    if !NT_SUCCESS(status) {
+    let outcome = lifecycle::d0_exit(&context.state, &mut io);
+    let mode_switch_status = outcome.mode_switch_status;
+    if !NT_SUCCESS(mode_switch_status) {
         tlg::write_event!(
             PROVIDER,
             "CancelWellspringModeFailed",
             level(Warning),
             keyword(KW_DRIVER),
-            win_ntstatus("Status", &status)
+            str8("TargetState", power_state_name(target_state)),
+            win_ntstatus("Status", &mode_switch_status)
         );
     }
-    status
+    outcome.status
 }

@@ -21,6 +21,10 @@ use amtptp_usbkm_core::status::STATUS_INVALID_DEVICE_STATE;
 use common::fake::{FakeHw, normalize_ops};
 use common::{Record, Tally, hex, load, num, status, status_str, to_hex};
 
+/// P3 fix of B10: the `D0Exit` wellspring-OFF transfer failed, which C returned from the callback; the port
+/// returns `STATUS_SUCCESS` (the transfer status itself still matches the C return value).
+const P3_D0_EXIT_BEST_EFFORT: &str = "p3_fixed/d0_exit_best_effort_B10";
+
 struct Scenario {
     state: Option<DeviceState>,
     hw: FakeHw,
@@ -241,10 +245,15 @@ fn step(s: &mut Scenario, r: &Record) -> &'static str {
         }
         "d0_entry" | "d0_exit" => {
             let state = s.state.as_ref().expect("context");
-            let st = if call == "d0_entry" {
-                lifecycle::d0_entry(state, &mut s.hw)
+            // D0Exit: C returned the mode-switch status (B10); the port returns SUCCESS and reports that
+            // status separately. Compare it with the C return value.
+            let (st, d0_exit_failed_in_c) = if call == "d0_entry" {
+                (lifecycle::d0_entry(state, &mut s.hw), false)
             } else {
-                lifecycle::d0_exit(state, &mut s.hw)
+                let outcome = lifecycle::d0_exit(state, &mut s.hw);
+                assert_eq!(outcome.status, 0, "{id}: D0Exit always succeeds");
+                let failed = outcome.mode_switch_status != 0;
+                (outcome.mode_switch_status, failed)
             };
             let (ops, wire) = s.hw.take_logs();
             assert_eq!(status_str(st), expected_status, "{id}");
@@ -254,6 +263,8 @@ fn step(s: &mut Scenario, r: &Record) -> &'static str {
                 // C called WdfObjectDelete(NULL) after the failed WdfMemoryCreate (B4); the port does
                 // not. Everything else is identical.
                 "p2_fixed/c_bugcheck_B4"
+            } else if d0_exit_failed_in_c {
+                P3_D0_EXIT_BEST_EFFORT
             } else if call == "d0_entry" {
                 "driver/d0_entry"
             } else {
@@ -317,7 +328,7 @@ fn wire_fixture() {
         &[
             ("driver/cleanup_noop", 7),
             ("driver/d0_entry", 45),
-            ("driver/d0_exit", 26),
+            ("driver/d0_exit", 24),
             ("driver/prepare_hardware", 37),
             ("framework/device_add", 41),
             ("framework/driver_entry", 42),
@@ -325,6 +336,7 @@ fn wire_fixture() {
             ("harness_note", 5),
             ("p2_fixed/c_bugcheck_B4", 2),
             ("p2_fixed/c_stale_handle_B20", 1),
+            (P3_D0_EXIT_BEST_EFFORT, 2),
             ("p3_fixed/interrupt_in_pipe", 1),
             ("p3_fixed/reader_error_returned", 1),
         ],

@@ -41,7 +41,7 @@
 //! | `EvtDriverDeviceAdd` | `WdfFdoInitSetFilter`, device + context, `SurpriseRemovalOK`, interface [`pnp::GUID_DEVINTERFACE_AMTPTP_DEVICE`], default parallel queue (not power-managed as a filter) + manual `InputQueue` (`PowerManaged = WdfFalse`) |
 //! | `EvtDevicePrepareHardware` | [`pnp::prepare_hardware`]; write `outcome.event` if any; return `outcome.status` |
 //! | `EvtDeviceD0Entry` | [`pnp::d0_entry`] with `QueryPerformanceFrequency`; return `outcome.status` |
-//! | `EvtDeviceD0Exit` | return [`pnp::d0_exit`] |
+//! | `EvtDeviceD0Exit` | [`pnp::d0_exit`]; trace `outcome.mode_switch_status` if it failed; return `outcome.status` |
 //! | `EvtIoDeviceControl` | [`hid::route_ioctl`], then the handler below; complete with `(status, information)` unless READ_REPORT was forwarded |
 //! | GET_DEVICE_DESCRIPTOR | [`hid::get_hid_descriptor`] (write `outcome.event` if any) |
 //! | GET_REPORT_DESCRIPTOR | [`hid::get_report_descriptor`] |

@@ -31,7 +31,7 @@ use amtptp_usbum_core::pnp::{
     d0_entry, d0_exit, prepare_hardware,
 };
 use amtptp_usbum_core::state::{DeviceState, StateSnapshot, UsbDeviceDescriptor};
-use amtptp_usbum_core::status::{STATUS_INVALID_DEVICE_STATE, STATUS_SUCCESS};
+use amtptp_usbum_core::status::{STATUS_INVALID_DEVICE_STATE, STATUS_SUCCESS, nt_success};
 use common::{
     FAKE_DECIDED, FakeQueue, FakeReq, FakeStrings, FakeUsb, Rec, check_dev2, fake_decided, fixture,
     hex, normalize_wire, records, status_hex, to_hex,
@@ -45,6 +45,8 @@ const B21_INTERRUPT_IN: &str = "B21 the reader goes on the first interrupt IN pi
 const B10_GATE: &str = "B10 D0Entry switches the mode on whatever the button switch (= the wsm1 record)";
 const B10_SEQUENCES: &str =
     "B10 sequences recorded the mode-switch gate; see d0_entry_switches_the_mode_after_selective_reporting_off";
+const B9_D0_EXIT: &str =
+    "B9 D0Exit returns SUCCESS when SetWellspringMode(FALSE) fails (= the C return value)";
 const GLUE_ONLY: &str = "glue-only (WDF driver object / tracing / no-op EvtIoStop)";
 
 /// Per-file bookkeeping: total records, records that assert P2-fixed behavior (by reason), records
@@ -762,7 +764,13 @@ fn sequences() {
                 );
             }
             "D0Exit" => {
-                let status = d0_exit(state, usb);
+                let outcome = d0_exit(state, usb);
+                assert_eq!(outcome.status, STATUS_SUCCESS, "{case}: D0Exit always succeeds");
+                // C returned the mode-switch status (UM-B9); compare it with that.
+                let status = outcome.mode_switch_status;
+                if !nt_success(status) {
+                    tally.p2(B9_D0_EXIT);
+                }
                 assert_eq!(
                     status_hex(status),
                     status_hex(rec.status("status")),
@@ -977,7 +985,13 @@ fn lifecycle() {
                     })
                     .status
                 } else {
-                    d0_exit(&state, &mut usb)
+                    let outcome = d0_exit(&state, &mut usb);
+                    assert_eq!(outcome.status, STATUS_SUCCESS, "{case}: D0Exit always succeeds");
+                    // C returned the mode-switch status (UM-B9); compare it with that.
+                    if !nt_success(outcome.mode_switch_status) {
+                        tally.p2(B9_D0_EXIT);
+                    }
+                    outcome.mode_switch_status
                 };
                 assert_eq!(
                     status_hex(status),
@@ -1017,6 +1031,7 @@ fn lifecycle() {
             (B10_GATE, 5),
             (B16_RESTART, 16),
             (B21_INTERRUPT_IN, 1),
+            (B9_D0_EXIT, 18),
         ],
         &[(GLUE_ONLY, 5)],
         20,

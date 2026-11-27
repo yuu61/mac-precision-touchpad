@@ -232,7 +232,7 @@ fn d0_entry_switches_the_mode_after_selective_reporting_off() {
             report_button: false,
         }
     );
-    assert_eq!(lifecycle::d0_exit(&state, &mut hw), 0);
+    assert_eq!(lifecycle::d0_exit(&state, &mut hw).status, 0);
     assert!(!state.wellspring_mode_on());
     let _before = hw.take_logs();
     assert_eq!(lifecycle::d0_entry(&state, &mut hw), 0);
@@ -266,7 +266,7 @@ fn input_scan_time_restarts_on_d0_entry() {
     assert_eq!(process_packet(&state, &[], 0), PacketAction::Discard);
     assert_eq!(scan_time(200_000), 0);
     assert_eq!(scan_time(204_800), 2);
-    assert_eq!(lifecycle::d0_exit(&state, &mut hw), 0);
+    assert_eq!(lifecycle::d0_exit(&state, &mut hw).status, 0);
     assert_eq!(lifecycle::d0_entry(&state, &mut hw), 0);
     assert_eq!(scan_time(900_000), 0);
     assert_eq!(scan_time(902_400), 1);

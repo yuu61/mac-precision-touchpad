@@ -351,7 +351,8 @@ unsafe extern "C" fn evt_device_d0_entry(
 }
 
 /// `AmtPtpEvtDeviceD0Exit` (Device.c:587-642) → `pnp::d0_exit`: stop the interrupt pipe's I/O target
-/// (cancel sent I/O), disable Wellspring mode and **return that switch's status** (UM-B9, preserved).
+/// (cancel sent I/O) and disable Wellspring mode, best effort: a failed switch is traced and the callback
+/// returns `STATUS_SUCCESS` (P3 fix of UM-B9).
 ///
 /// # Safety
 /// Framework callback for a device created by [`create_device`].
@@ -365,11 +366,11 @@ unsafe extern "C" fn evt_device_d0_exit(
     };
     let before = context.state.snapshot();
     let mut io = DeviceIo::new(context);
-    let status = pnp::d0_exit(&context.state, &mut io);
-    if !NT_SUCCESS(status) {
-        trace::mode_switch_failed("AmtPtpEvtDeviceD0Exit", false, status);
+    let outcome = pnp::d0_exit(&context.state, &mut io);
+    if !NT_SUCCESS(outcome.mode_switch_status) {
+        trace::mode_switch_failed("AmtPtpEvtDeviceD0Exit", false, outcome.mode_switch_status);
     }
     trace::state_changed("AmtPtpEvtDeviceD0Exit", &before, &context.state.snapshot());
-    trace::power_transition("AmtPtpEvtDeviceD0Exit", target_state, status);
-    status
+    trace::power_transition("AmtPtpEvtDeviceD0Exit", target_state, outcome.status);
+    outcome.status
 }
