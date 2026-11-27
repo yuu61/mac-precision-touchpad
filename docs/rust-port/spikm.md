@@ -16,24 +16,24 @@ The policy terms come from the [behavior policy](README.md#behavior-policy):
 | ID | Decision | What the Rust code does |
 |---|---|---|
 | SPI-B1 | PRESERVED (P3) | GET_FEATURE 0x08 writes only `08 FC` (`feature::HQA_REPORT_AS_C`). `reportBuffer[2..]` is left untouched and Information is 0. |
-| SPI-B2 | FIXED (P2), offset preserved | SET_FEATURE 0x06 still reads byte **2**, like the 3-byte C struct. When byte 2 lies at or past `reportBufferLen` (the real 2-byte report), it reads as 0, so both flags become FALSE. This matches the fixture records `oob=1`. |
-| SPI-B3 | PRESERVED (P3) | `PtpInputOn`, `PtpReportButton` and `PtpReportTouch` are kept as write-only atomics (`feature::PtpSettings`). Nothing reads them, so input mode and selective reporting have no effect. |
+| SPI-B2 | FIXED (P3) | SET_FEATURE 0x06 reads byte **1**, the descriptor's 2-byte layout (`ptp_hid::feature::SelectiveReportBits`). A report without byte 1 changes nothing. C read byte 2, past the real report. |
+| SPI-B3 | FIXED (P3) for selective reporting | `PtpReportTouch` (Surface Switch, bit 0) and `PtpReportButton` (Button Switch, bit 1) start on, are restored by every PrepareHardware, and gate the contacts and the button of the input report (`input::build_report`). `PtpInputOn` is still write-only. |
 | SPI-B4 | PRESERVED (P1/P3) | GET/SET_FEATURE never set Information, so it stays 0 (`feature::FEATURE_INFORMATION`). SET does not validate `reportBufferLen`. Bytes past it read as 0 (see the P2 extras). |
 | SPI-B5 | FIXED (P2) | The input report is zero-initialized (`SpiPtpReport::EMPTY`). Unused contacts and the padding bits 5-7 are 0 and no longer carry stack bytes. |
-| SPI-B6 | PRESERVED (P1) | `ContactCount` is the raw `NumOfFingers` (0..255). At most 5 contacts are filled. |
-| SPI-B7 | PRESERVED (P1) | ContactID is the slot index 0..4. ID 4 exceeds the descriptor's logical maximum of 3. |
+| SPI-B6 | FIXED (P3) | `ContactCount` is `min(NumOfFingers, 5)`. A lower read that does not hold every finger record `NumOfFingers` declares (`46 + 30 * n` bytes) completes the upstream read with `STATUS_DEVICE_DATA_ERROR` (`input::check_declared_fingers`). |
+| SPI-B7 | PRESERVED (P1), descriptor FIXED (P3) | ContactID is the slot index 0..4. The SPI descriptors declare a contact-ID logical maximum of 4 (`ptp_hid::descriptor::SPI_CONTACT_ID_LOGICAL_MAX`); C declared 3. |
 | SPI-B8 | PRESERVED (P1) | ScanTime is computed exactly as C does: `delta = (cur - LastReportTime) / 100`, then `delta >= 0xFF ? 0xFF : (u16)delta`. `cur` and every `LastReportTime` write are the QPC **frequency**, which is what `KeQueryPerformanceCounter(&x)` writes to `x`. So ScanTime is always 0 in practice (`input::scan_time`, `runtime::DeviceRuntime`). |
 | SPI-B9a | PRESERVED (P3) | The lower `IoStatus.Status` is ignored. Only `(LONG)Information >= 46` is checked (`input::lower_read_length`). |
 | SPI-B9b | PRESERVED (P3) | When the length is below 46, the request completes with `STATUS_DEVICE_DATA_ERROR`. The "re-enable" that C traces is never performed. |
 | SPI-B9c | FIXED (P2) | Packet bytes at or past `min((LONG)Information, 1024)` read as 0 (`input::SpiPacket`). C read stale or uninitialized lookaside bytes there. The fixtures compare `out_tail0` on `b9=1` records. |
 | SPI-B10 | FIXED (P2), required of the glue (stage 2) | The use-after-free is removed. In the completion routine the glue reads the memory handle first, then deletes the lower request, then the memory. |
 | SPI-B11 | PRESERVED (P1) | A lower completion that finds `HidQueue` empty drops the data. No QPC call, no `LastReportTime` write and no new read follow. |
-| SPI-B12 | PRESERVED (P1) | Recovery is unchanged (`runtime::DeviceRuntime::on_recovery_timer`): one retry after 5 s, then exactly one lower read, then Configured. The timer is not stopped on D0Exit, may fire in D3, and a stale timer still fires after a successful restart. |
-| SPI-B13 | PRESERVED (P1) | A successful SelfManagedIoInit/Restart issues no lower read for requests that are already queued. |
-| SPI-B14 | PRESERVED (P1) | D0Exit does not send `SetState(FALSE)` and does not cancel in-flight lower reads. |
+| SPI-B12 | FIXED (P3) | `SelfManagedIoSuspend` stops the recovery timer. The timer callback works only on a device in D0 that still waits for the mode switch (`runtime::DeviceRuntime::begin_recovery`), and only marks it configured if no suspend happened meanwhile (`finish_recovery`). Success issues one lower read per queued request. |
+| SPI-B13 | FIXED (P3) | Every transition to configured (SelfManagedIoInit/Restart or the timer) issues a lower read for each upstream read already in `HidQueue` (`runtime::DeviceRuntime::backlog_reads`). |
+| SPI-B14 | FIXED (P3) for reads, PRESERVED for the mode | `SelfManagedIoSuspend` starts a new epoch and cancels the lower reads in flight (`runtime::ReadTracker`, behind a spin lock in the glue). A read from an earlier epoch is dropped when it completes and never consumes a request queued after the resume. D0Exit still does not send `SetState(FALSE)`. |
 | SPI-B15 | FIXED (P2) | `DeviceStatus`, `LastReportTime` and the PTP flags are atomics (`runtime::DeviceRuntime`, `feature::PtpSettings`). Their single-variable semantics are the same as before. In the completion routine `LastReportTime` is updated with one `swap`. |
 | SPI-B16 | PRESERVED (P1) | Unknown internal IOCTLs complete with `STATUS_NOT_SUPPORTED` and are not forwarded (`ioctl::classify_internal_ioctl`). |
-| SPI-B17 | PRESERVED (P1) | PID 0x0280 stays bound in the INF but is missing from the table, so PrepareHardware returns `STATUS_NOT_FOUND`. |
+| SPI-B17 | RESOLVED | The INF no longer binds 0x0280 to this driver (it is a USB KMDF binding). `device::SPI_MODELS` is the only PID list; the `xtask` INF test checks that every SPI binding resolves to it. |
 | SPI-B18 | PRESERVED (P1) | The Family 1 Y logical maximum stays 7855, although the table's span is 6217 (`descriptors::AXES_F1`). |
 | SPI-B19 | PRESERVED (P1) | X and Y have no upper clamp. Values beyond the descriptor's logical maximum are emitted as they are. |
 | SPI-B20 | FIXED, required of the glue (stage 2) | `WdfPdoInitAllowForwardingRequestToParent`, a PDO-only DDI called on an FDO init, is dropped. It had no functional effect. |
@@ -83,22 +83,22 @@ Some records have a result decided by the stub KMDF (a `wdf=` entry). For those,
 
 | File | Records | Buckets (count) |
 |---|---|---|
-| `input_f1.txt` | 1242 | report delivered 1136; length gate `c000009c` 103; framework `RetrieveOutputMemory` (outlen 0) 1; framework `MemoryCopyFromBuffer` (outlen < 30) 2. Of these, 94 are `b9=1` and are compared with `out_tail0` (P2). |
-| `input_f2.txt` | 1174 | 1082 / 89 / 1 / 2; `b9=1` 97 |
-| `input_f3a.txt` | 1174 | 1079 / 92 / 1 / 2; `b9=1` 101 |
-| `input_f3b.txt` | 1140 | 1037 / 100 / 1 / 2; `b9=1` 92 |
-| `feature.txt` | 572 | GET 278: success 12, driver error 266. SET 294: success 32, driver error 260, `oob=1` 2 (P2 byte 2 reads as 0). None has `wdf`. |
+| `input_f1.txt` | 1242 | report delivered 834; length gate `c000009c` 103; frame shorter than its declared fingers `c000009c` 302 (P3, includes the 94 `b9=1` records); framework `RetrieveOutputMemory` (outlen 0) 1; framework `MemoryCopyFromBuffer` (outlen < 30) 2. Delivered reports are compared with `ContactCount` clamped to 5 (P3). |
+| `input_f2.txt` | 1174 | 756 / 89 / 326 / 1 / 2; `b9=1` 97 |
+| `input_f3a.txt` | 1174 | 778 / 92 / 301 / 1 / 2; `b9=1` 101 |
+| `input_f3b.txt` | 1140 | 701 / 100 / 336 / 1 / 2; `b9=1` 92 |
+| `feature.txt` | 572 | GET 278: success 12, driver error 266. SET 294: success 21, driver error 260, SET 0x06 decoded from byte 1 13 (P3, includes the 2 `oob=1` records). None has `wdf`. |
 | `descriptors.txt` | 85 | driver success 63; `STATUS_NOT_FOUND` from injected states 10; framework output retrieval (outlen 0 or < 32) 7; framework copy too small 5 |
 | `ioctl.txt` | 76 | not supported 64; GET_STRING forwarded 2; framework GET_STRING send failure 4; READ_REPORT queued 4; framework forward-to-queue failure 2 |
 | `wire.txt` | 46 | PrepareHardware 28; PrepareHardware twice 10; mode switch + SMIO/timer 3; lower read issued 1; framework lower-read creation/format/send failure 4 |
-| `power.txt` | 100 | 12 sequences: D0Entry 15, SMIO init/restart 15, timer 5, READ_REPORT 31, lower completion 22, D0Exit 11, framework cancellation 1 |
+| `power.txt` | 100 | 12 sequences: D0Entry 15, SMIO init/restart 15, timer 5, READ_REPORT 31, lower completion 22, D0Exit 11, framework cancellation 1. 7 sequences (56 records) are replayed with `SelfManagedIoSuspend` before each D0Exit; the 5 that recorded SPI-B12/B13 (44 records) are rewritten as tests of the fixed behavior in `fixture_power.rs`. |
 | `setup.txt` | 12 | success with constants asserted 2; driver status no-I/O-target `c0000184` 1; framework-injected failures 7 (AddDevice/DriverEntry sequence; the WDF call order is checked in stage 2); no driver logic (cleanup, empty `EvtIoStop`) 2 |
 
 Records that differ from the raw C output because of a P2 fix, and how the tests handle them:
 
 - **`undef`** (SPI-B5): the test compares with `out`, which is the zero-painted run and equals a zero-initialized report. It also asserts that every bit flagged in `undef` is 0, and that `undef` follows the README rule on all edge records.
 - **`b9=1`** (SPI-B9c): the test compares with `out_tail0`. As a cross-check, parsing the whole 1024-byte buffer the way C does reproduces `out`.
-- **`oob=1`** (SPI-B2): byte 2 lies past `reportBufferLen` and reads as 0. This matches the fixture.
+- **`oob=1`** (SPI-B2): C read byte 2, past `reportBufferLen`. The port reads byte 1 (P3), so these records are checked against the byte-1 rule instead of the C flags.
 
 The README's excluded inputs are covered by unit tests instead:
 
@@ -135,12 +135,13 @@ The calls, their arguments and their order are the same, apart from the differen
 | `AmtPtpDeviceSpiKmCreateDevice` (Device.c) | `device.rs`: `create_device` + `initialize_device` (PAGE) | `wire` constants |
 | `AmtPtpEvtDevicePrepareHardware` | `device.rs`: `evt_device_prepare_hardware`, `query_desired_report_type` | `DeviceConfig::identify`, `desired_report_type_value`, `apply_desired_report_type`, `SharedDeviceConfig` |
 | `AmtPtpEvtDeviceD0Entry` / `D0Exit` | `device.rs`: `evt_device_d0_entry` / `evt_device_d0_exit` | `on_d0_entry` / `on_d0_exit` |
-| `AmtPtpEvtDeviceSelfManagedIoInitOrRestart` | `device.rs`: `evt_device_self_managed_io_init_or_restart` | `on_self_managed_io_init_or_restart` |
+| (not in C) `EvtDeviceSelfManagedIoSuspend` | `device.rs`: `evt_device_self_managed_io_suspend`, `cancel_in_flight_reads` | `suspend` |
+| `AmtPtpEvtDeviceSelfManagedIoInitOrRestart` | `device.rs`: `evt_device_self_managed_io_init_or_restart` | `on_self_managed_io_init_or_restart`, `backlog_reads` |
 | `AmtPtpSpiSetState` | `device.rs`: `spi_set_state` | `SetStatePacket::fill` |
-| `AmtPtpPowerRecoveryTimerCallback` | `device.rs`: `power_recovery_timer_callback` | `on_recovery_timer` |
+| `AmtPtpPowerRecoveryTimerCallback` | `device.rs`: `power_recovery_timer_callback` | `begin_recovery`, `finish_recovery`, `backlog_reads` |
 | `AmtPtpDeviceSpiKmQueueInitialize`, `...EvtIoInternalDeviceControl` (Queue.c) | `queue.rs`: `queue_initialize` (PAGE), `evt_io_internal_device_control` | `classify_internal_ioctl` |
 | `AmtPtpGetHidDescriptor`, `...GetReportDescriptor`, `...GetDeviceAttribs`, `...GetStrings`, `...ReportFeatures`, `...SetFeatures` (Hid.c) | `hid.rs`: `get_hid_descriptor` and `get_report_descriptor` (both through `copy_descriptor`), `get_device_attribs`, `get_strings`, `report_features`, `set_features` | `hid_descriptor_for`, `report_descriptor_for`, `device_attributes`, `check_xfer_packet`, `get_feature`, `DeviceRuntime::set_feature` |
-| `AmtPtpSpiInputRoutineWorker`, `...InputIssueRequest`, `AmtPtpRequestCompletionRoutine` (Input.c) | `input.rs`: `spi_input_routine_worker`, `spi_input_issue_request`, `request_completion_routine` (with `serve_oldest_read` and `copy_report`) | `should_issue_lower_read`, `complete_lower_read` |
+| `AmtPtpSpiInputRoutineWorker`, `...InputIssueRequest`, `AmtPtpRequestCompletionRoutine` (Input.c) | `input.rs`: `spi_input_routine_worker`, `spi_input_issue_request`, `issue_backlog_reads`, `request_completion_routine` (with `serve_oldest_read` and `copy_report`) | `should_issue_lower_read`, `claim_lower_read`, `finish_lower_read`, `complete_lower_read` |
 | `AmtPtpDeviceSpiKmEvtIoStop`, `DbgDevicePowerString`, `DbgIoControlGetString` | not ported (dead or trace-only) | - |
 
 The two contexts keep their C names for `!wdfkd`:
@@ -189,9 +190,9 @@ Lower reads that the driver creates itself are never wrapped in `Request`. They 
 
   If the lower driver never completes them, device start or resume hangs (on the PnP/power thread), or the timer's work item does. The hang originates in the lower driver. Any timeout value would be invented, and a timeout could turn today's slow but successful S3 wake into a failure (that slow wake is why commit e92581b added the 5 s retry). Both sends run at PASSIVE_LEVEL, as in C. There is no synchronous send at raised IRQL.
 - **SPI-B12/B13/B14 in the glue**:
-  - D0Exit does not stop the timer, does not cancel in-flight lower reads and does not send `SetState(FALSE)`.
-  - The timer callback runs the mode switch and one lower read whatever the power state is.
-  - A successful SelfManagedIo init/restart issues no read for requests that are already queued.
+  - `SelfManagedIoSuspend` suspends the read tracker under its `WDFSPINLOCK`, references the reads it hands out, stops the timer with `Wait = FALSE`, then cancels and dereferences each read. Nothing waits for the cancelled reads; their completions are stale and are dropped. D0Exit does not send `SetState(FALSE)`.
+  - The timer callback takes a recovery ticket first and does nothing (not even the mode switch) unless the device is in D0 and unconfigured.
+  - Every transition to configured reads the `HidQueue` depth (`WdfIoQueueGetState`) and issues the missing lower reads.
 - **SPI-B16**: unknown internal IOCTLs complete with `STATUS_NOT_SUPPORTED` and are not forwarded. Non-internal request types have no queue callback, so the framework forwards them down (filter rule), as in C.
 - **Identity and inheritance**: the PnP/power callback setter is the only `WdfDeviceInitSet*` call. The filter therefore inherits these from the lower device:
   - the I/O type;

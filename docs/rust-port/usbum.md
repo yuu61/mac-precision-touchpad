@@ -24,18 +24,18 @@ The policy terms come from the [behavior policy](README.md#behavior-policy):
 | UM-B7 | FIXED (P2) | GET_STRING copies the `wcharCount*2` UTF-16LE bytes to the start of the caller's output buffer (`hid::get_string`); C copied them into its own stack variable. The rest of the buffer is untouched. Information stays the full output buffer length and the status stays SUCCESS (P1). An unknown string ID still returns SUCCESS with Information 0. The glue must delete the string memory (`io::UsbStringSource::String` drop), which ends the leak. |
 | UM-B8 | PRESERVED (P3) status, FIXED (P2) reads | SET_FEATURE always completes with `STATUS_SUCCESS`, including on retrieval failures, unsupported IDs and failed transfers (`hid::set_feature`). Report bytes 1..3 that lie past the input length read as 0 (the port policy rule "treat as 0"). So a 1-byte 0x04 report means mode 0, a 1-byte 0x06 report clears both flags, and a short 0x09 report zero-fills the missing levels. |
 | UM-B9 | PRESERVED (P3) | `pnp::d0_exit` returns the status of `SetWellspringMode(FALSE)`. On surprise removal it can therefore fail D0Exit. |
-| UM-B10 | PRESERVED (P3) | `pnp::d0_entry` switches the mode on only if `IsButtonReportOn \|\| IsWellspringModeOn`. A failure there is ignored and reported in `D0EntryOutcome::mode_switch_status`. |
+| UM-B10 | FIXED (P3) | `pnp::d0_entry` always switches the mode on. C did so only if `IsButtonReportOn \|\| IsWellspringModeOn`; D0Exit turns the mode off, so with the button switch off a resume left the trackpad in mouse mode. A failure is ignored and reported in `D0EntryOutcome::mode_switch_status`. The `*-d0entry-gate-btn0-wsm0` records are checked against their `wsm1` twin, and the two `b10` sequences of `sequences.txt` are replaced by the test `d0_entry_switches_the_mode_after_selective_reporting_off`. |
 | UM-B11 | PRESERVED (P3) | A packet with a bad length runs `usb::emergency_reset` (Set FALSE, then Set TRUE) synchronously inside the read completion, even in mouse mode and even for TYPE3 (flag only). It is not moved to a work item. |
 | UM-B12 | PRESERVED (P1/P3) | `input::scan_time` is `min((qpc - PerfCounter)/100, 0xFF) as u16`, with truncating division, no lower clamp and 16-bit truncation of negative deltas. `PerfCounter` is set only in D0Entry. The subtraction wraps, giving the MSVC result instead of signed-overflow UB. |
 | UM-B13 | FIXED (P2) | The input report is zero-initialized (`input::build_report` starts from `PtpReport::EMPTY`). Unused slots, padding bits and, with the surface off, ContactCount and every contact are 0. The fixtures' `out` is the run with the stack poisoned to `0x00`, so the records compare directly. |
-| UM-B14 | PRESERVED (P3) | SET_FEATURE 0x06 sets bit 0 → `IsButtonReportOn` and bit 1 → `IsSurfaceReportOn`, so the HID usages are swapped. |
+| UM-B14 | FIXED (P3) | SET_FEATURE 0x06 sets bit 0 (Surface Switch, usage 0x57) → `IsSurfaceReportOn` and bit 1 (Button Switch, 0x58) → `IsButtonReportOn`. A report without byte 1 changes nothing. |
 | UM-B15 | PRESERVED (P3) | The qualification levels are stored and echoed back (GET/SET 0x09) but never applied. They live in `DeviceState` and are not reset at PrepareHardware or D0. |
 | UM-B16 | FIXED (P2) | The continuous reader is configured once. `DeviceState::reader_configured` is set after the first success, and later PrepareHardware calls still select the pipe but skip `WdfUsbTargetPipeConfigContinuousReader`. A PnP stop/start now succeeds (16 fixture records `*-prep2`); C failed with `STATUS_INVALID_DEVICE_STATE`. |
 | UM-B17 | PRESERVED (P3) | MT2 Confidence = `TouchMinor*2 < 345`. The duplicated C term has no effect, so it is written once. |
 | UM-B18 | PRESERVED (P3) | WS5A uses the WS5 descriptor and WS9 the WS8 one (`descriptors::HidRegistry::for_pid`). X/Y have no upper clamp. |
 | UM-B19 | FIXED (N/A) | There is no counterpart to the undeclared `Driver` in WPP_CLEANUP. The glue only unregisters the TraceLogging provider. |
 | UM-B20 | PRESERVED (P3) | VendorID stays 0x8910 (`descriptors::device_attributes`). The duplicate INF hardware IDs and the resource names are packaging matters, outside the core. |
-| UM-B21 | PRESERVED (P3) | `pnp::prepare_hardware` takes the first interrupt pipe of interface 0 whatever its direction (fixture `prep-intout-then-intin` selects pipe 0). `tp_ep` is unused. The spec's suggested IN assertion was not added, because it would change behavior. |
+| UM-B21 | FIXED (P3) | `pnp::prepare_hardware` takes the first interrupt **IN** pipe of interface 0 (fixture `prep-intout-then-intin` now selects pipe 1). No interrupt IN pipe fails PrepareHardware with `STATUS_INVALID_DEVICE_STATE`. |
 | UM-B22 | FIXED (P2) | All per-device fields are atomics (`state::DeviceState`), accessed with `Relaxed` ordering. They are updated field by field as in C, so no update is lost. Mode switches are **not** serialized (see the open questions). |
 | UM-B23 | PRESERVED (P3) | Lookup matches on PID only; the vendor ID is never compared (fixture `variant=vid*`). |
 | UM-B24 | PRESERVED (P3) | Well-formed TYPE1 packets are dropped (`ReadCompleteOutcome::DroppedUnsupported`) and reads stay pending. TYPE1 rows have no descriptor. |
@@ -60,9 +60,9 @@ The "fake-decided" column counts records whose final failing status was produced
 | devices.txt | 44 | 44 | - | 0 | - |
 | descriptors.txt | 898 | 898 | 35 B7 (string copied to the caller); the 24 `inj=1` records run unchanged | 372 | - |
 | ioctl.txt | 24 | 24 | - | 3 | - |
-| feature.txt | 1050 | 1050 | 8 B1 (`umask` payload bytes are `00`) | 20 | - |
-| sequences.txt (7 sequences) | 48 | 48 | - | 1 | - |
-| wire.txt | 259 | 254 | 16 B16 (restart succeeds), 16 B1 (`umask`) | 20 | 5 glue-only: `driverentry-fail`, `driverentry-ok`, `driver-cleanup`, `deviceadd-devif-fail`, `iostop` |
+| feature.txt | 1050 | 1050 | 8 B1 (`umask` payload bytes are `00`); 258 SET 0x06 replayed with bits 0 and 1 of the switch byte exchanged (UM-B14, P3: the C state is reached from the exchanged byte) | 20 | - |
+| sequences.txt (7 sequences) | 48 | 36 | - | 0 | 12: the two `b10` sequences, which recorded the UM-B10 gate (P3); a test replaces them |
+| wire.txt | 259 | 254 | 16 B16 (restart succeeds), 16 B1 (`umask`), 1 B21 (`prep-intout-then-intin` takes the IN pipe, P3), 5 B10 (`*-d0entry-gate-btn0-wsm0` switch the mode, P3) | 20 | 5 glue-only: `driverentry-fail`, `driverentry-ok`, `driver-cleanup`, `deviceadd-devif-fail`, `iostop` |
 | input_ws1/ws2 | 340/70 | all | - | 0 | - |
 | input_ws3/ws4/ws4a/ws5/ws5a | 1128/287/287/287/287 | all | B6: 14/5/5/5/5 | = B6 | - |
 | input_ws6/ws6a/ws7/ws7a/t2 | 120/120/120/120/121 | all | B6: 1 each | = B6 | - |

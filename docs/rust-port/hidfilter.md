@@ -39,25 +39,25 @@ The driver has **no device table** and sends **no USB or SPI bytes**. Its only l
 | HF-B9 | FIXED (P2) | Retrieve-output or copy failure: `WdfDeviceSetFailed(AttemptRestart)` is still issued. Then the upper request is **completed** with that failure status. C leaks it. |
 | HF-B10 | FIXED (P2, glue) | The glue reads `RequestMemory` from the request context before `complete_lower_read`. The core then deletes the request, then the memory. |
 | HF-B11 | PRESERVED (P3) | Restart before the detour returns `STATUS_INVALID_STATE_TRANSITION`, but still stamps `LastReportTime` and sets `DeviceConfigured`. |
-| HF-B12 | PRESERVED (P3) | A failed mode switch in Init or Restart returns SUCCESS and arms the 2 s timer. The timer then still issues a lower read. |
-| HF-B13 | PRESERVED (P3) | Mode-switch `WdfRequestSend` returning TRUE means SUCCESS; the request status is not checked. |
-| HF-B14 | PRESERVED (P3) | D0Exit does not stop the timer or flush the work item. |
+| HF-B12 | PRESERVED (P3) for Init/Restart, FIXED (P3) for the timer | A failed mode switch in Init or Restart returns SUCCESS and arms the 2 s timer. The timer no longer issues a lower read after a failed switch; it retries while the device is in D0. |
+| HF-B13 | FIXED (P3) | The mode switch returns `WdfRequestGetStatus` after every synchronous send, so a lower failure behind a TRUE send is a failure. |
+| HF-B14 | FIXED (P3) by gating | D0Exit still does not stop the timer or flush the work item, but it leaves D0 and advances an epoch (`DeviceState`), so a later timer or work item does nothing and a running timer cannot mark the device configured. |
 | HF-B15 | FIXED (P2 leak, glue) | The lookaside list is parented to the device (`config::READ_BUFFER_LOOKASIDE_PARENT_IS_DEVICE`); C parents it to the driver. |
 | HF-B16 | FIXED (P2) | The timer and the work item use `AutomaticSerialization = FALSE` (`config`), which has the same effect under sync scope None. AddDevice returns the creation failure of the lookaside list, timer or work item immediately. C continues and would later use a NULL handle. |
 | HF-B17 | FIXED (P2) | A NULL WDM device object makes AddDevice return `STATUS_UNSUCCESSFUL`. C returns SUCCESS with a half-built device. |
 | HF-B18 | FIXED (P2) | `InputFingerSize == 0` (Apple VID with a PID other than 0x0265, read issued by the timer) is classified Malformed, which starts the 3 s timer. C divides by zero. |
 | HF-B19 | FIXED (dead field) | `QUEUE_CONTEXT.DeviceIoTarget` (always NULL) is dropped. |
-| HF-B20 | PRESERVED (P3) | SET_FEATURE 0x04 and 0x06 update `PtpInputOn`, `PtpReportTouch` and `PtpReportButton` in `DeviceState`. Nothing reads them. |
+| HF-B20 | FIXED (P3) for selective reporting | `PtpReportTouch` (Surface Switch, bit 0) and `PtpReportButton` (Button Switch, bit 1) start on, are restored by PrepareHardware, and gate the input report. `PtpInputOn` is still write-only. |
 | HF-B21 | PRESERVED (P1) | GET/SET_FEATURE never set `Information`. |
 | HF-B22 | PRESERVED (P1) | `HID_DEVICE_ATTRIBUTES.Reserved` is not written. |
-| HF-B23 | PRESERVED for `reportBufferLen >= 2`; FIXED (P2) below | SET_FEATURE still ignores `reportBufferLen` otherwise. If byte 1 lies outside the report buffer it reads as 0. That means mouse mode for 0x04 and both switches off for 0x06. |
+| HF-B23 | PRESERVED for `reportBufferLen >= 2`; FIXED (P2/P3) below | SET_FEATURE still ignores `reportBufferLen` otherwise. If byte 1 lies outside the report buffer, 0x04 reads it as 0 (mouse mode, P2) and 0x06 changes nothing (P3). |
 | HF-B24 | PRESERVED (P3) | A zero-length completion enqueues the work item, which re-reads at once (possible hot loop). |
 | HF-B25 | FIXED (P2, unreachable) | Without an I/O target, GET_STRING completes with `STATUS_INVALID_DEVICE_STATE` and `issue_lower_read` sends nothing. C uses a NULL handle. |
 | HF-B26 | PRESERVED (P1) | The global `MajorFunction[0x0F]` patch is never reverted. The checks, their order and the `strncmp` semantics are in `detour_hid_stack` and `client_id_matches`. |
 | HF-B27 | PRESERVED (P1) | Synchronous attribute query and mode switch without timeout. |
 | HF-B28 | PRESERVED (P1) | The device interface `{FF969022-3111-4441-8F88-875440172C2E}` is registered with no handler (`config::DEVICE_INTERFACE_GUID`). |
 | HF-B29 | PRESERVED (P1) | `response_length(info) = info as u32 as i32 as isize as usize`, the `(size_t)(LONG)` sign extension. |
-| HF-B30 | PRESERVED (P3) | PrepareHardware zeroes VID, PID and version. After a PnP stop/start the mode switch fails forever, and the first timer-issued read calls `SetFailed(NoRestart)`. This is a logic bug, not UB or a leak. |
+| HF-B30 | FIXED (P3) | PrepareHardware keeps VID, PID and version (only SelfManagedIoInit queries them), so the restart after a PnP stop sends the mode switch again. Successful configurations issue the lower reads parked upper reads are missing. |
 
 ### Other P2 items, without a spec bug ID
 
@@ -75,10 +75,10 @@ Every record is processed, except the 3 named skips in `lifecycle.txt`. Each tes
 |---|---:|---:|---:|---|
 | `descriptors.txt` | 99 | 99 | 0 | See below. |
 | `ioctl.txt` | 519 | 519 | 0 | 28 named or probe codes have full `ev`. The 491 sweep codes complete with `NOT_SUPPORTED` as the only call. |
-| `feature.txt` | 1588 | 1588 | 0 | 1584 are exact. The 4 `oob=1` records assert the HF-B23 fix (byte 1 read as 0). C read a stale `03` there. |
+| `feature.txt` | 1588 | 1588 | 0 | 1068 are exact. The 516 successful SET 0x06 records with byte 1 assert the P3 bit order (Surface bit 0, Button bit 1: the C switches exchanged). Of the 4 `oob=1` records, the two 0x04 ones assert the HF-B23 fix (byte 1 read as 0) and the two 0x06 ones assert that nothing changes (P3). C read a stale `03` there. |
 | `input_bt.txt` | 1653 | 1653 | 0 | See below. |
 | `input_usb.txt` | 1661 | 1661 | 0 | Same as BT; the act counts are 1384 / 219 / 24 / 23 / 9, plus 1 + 1 HF-B9. 6 records are `ub=int_min_neg`. |
-| `wire.txt` | 65 | 65 | 0 | 29 are exact and 36 are fault-injected. `lower_reads_pending` is checked cumulatively per configuration. |
+| `wire.txt` | 65 | 65 | 0 | 21 are exact and 22 fault-injected, each with `WdfRequestGetStatus` after a TRUE mode-switch send (HF-B13). 22 assert a P3 fix derived from the record: 6 TRUE sends with a failed lower status, 12 timer records (gated to D0, no read after a failed switch) and 4 PnP restarts (IDs kept, so they equal the matching resume plus both selective-reporting switches on). `lower_reads_pending` is checked cumulatively per configuration. `tests/power.rs` covers the stop/resume sequences the C oracle got wrong. |
 | `lifecycle.txt` | 53 | 50 | 3 | See below. |
 
 `descriptors.txt`:
@@ -98,7 +98,8 @@ Every record is processed, except the 3 named skips in `lifecycle.txt`. Each tes
 `lifecycle.txt`:
 
 * 50 records are processed:
-  * 41 are exact;
+  * 38 are exact;
+  * 3 assert P3 fixes: `prepare-hardware-after-start` keeps the IDs (HF-B30), and `workitem-run-unconfigured` and `timer-without-detour` do nothing;
   * 5 AddDevice records are exact;
   * 4 AddDevice records assert the HF-B16/HF-B17 fixes: an early failure return, or `STATUS_UNSUCCESSFUL`.
 * The object-creation arguments of `device-add-ok` are checked against `config`, with the HF-B15 and HF-B16 deltas.
