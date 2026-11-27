@@ -1,5 +1,5 @@
 //! `AmtPtpHidFilter`: KMDF 1.23 HID lower filter that turns the Magic Trackpad 2 HID collection
-//! (Bluetooth; USB through the standalone INF) into a Windows Precision Touchpad.
+//! (Bluetooth; the USB transport is supported but no INF binds it) into a Windows Precision Touchpad.
 //! Port of the C driver `src/AmtPtpHidFilter` (spec `hidfilter.md`).
 //!
 //! All hardware-independent logic (IOCTL routing, feature reports, descriptors, the read pipeline,

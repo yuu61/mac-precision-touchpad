@@ -1,21 +1,19 @@
 //! `cargo xtask package`: assemble, stamp, verify, catalog and (optionally)
-//! sign the driver packages.
+//! sign the driver package.
 //!
-//! Layout (under the host workspace's target dir):
+//! There is one package, built from `packaging/AmtPtpDevice.inx`, which
+//! installs all four drivers (as the signed C release did). Layout (under the
+//! host workspace's target dir):
 //! ```text
 //! target/package/<arch>/AmtPtpDevice/            AmtPtpDevice.inf + .cat, AmtPtpDeviceUsbKm.sys,
 //!                                                AmtPtpDeviceUsbUm.dll, AmtPtpDeviceSpiKm.sys,
 //!                                                AmtPtpHidFilter.sys
 //! target/package/<arch>/AmtPtpDevice.symbols/    the matching .pdb files of that package
-//! target/package/<arch>/AmtPtpHidFilter/         AmtPtpHidFilter.inf + .cat, AmtPtpHidFilter.sys
-//! target/package/<arch>/AmtPtpHidFilter.symbols/ AmtPtpHidFilter.pdb
 //! ```
 //!
-//! The `.symbols` directories sit outside the package directories so `Inf2Cat`
-//! does not see them. Each is emptied together with its package, so its PDBs
-//! always match that package's binaries. Both hold an `AmtPtpHidFilter.pdb`,
-//! because both packages ship `AmtPtpHidFilter.sys` and may be built at
-//! different times.
+//! The `.symbols` directory sits outside the package directory so `Inf2Cat`
+//! does not see it. It is emptied together with the package, so its PDBs
+//! always match the package's binaries.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -61,49 +59,20 @@ const HID_FILTER: Binary = Binary {
     name: "AmtPtpHidFilter",
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum InfKind {
-    /// `packaging/AmtPtpDevice.inx`: all four drivers.
-    Universal,
-    /// `packaging/AmtPtpHidFilter.inx`: the standalone Magic Trackpad 2 filter package.
-    HidFilter,
-}
+/// INF/CAT base name and package directory name of the driver package.
+const PACKAGE: &str = "AmtPtpDevice";
 
-impl InfKind {
-    pub const ALL: [Self; 2] = [Self::Universal, Self::HidFilter];
+/// Package directories of the standalone `AmtPtpHidFilter.inx` that older xtask versions built. That
+/// INF claimed the USB Magic Trackpad 2 against the universal one and only matched one hardware
+/// revision; the universal package installs the filter for the Bluetooth trackpad.
+const OBSOLETE_PACKAGES: [&str; 2] = ["AmtPtpHidFilter", "AmtPtpHidFilter.symbols"];
 
-    /// INF/CAT base name and package directory name.
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::Universal => "AmtPtpDevice",
-            Self::HidFilter => "AmtPtpHidFilter",
-        }
-    }
+/// The driver binaries of the package. Must match the INF's `[SourceDisksFiles]`.
+const BINARIES: [Binary; 4] = [USB_KM, USB_UM, SPI_KM, HID_FILTER];
 
-    fn inx(self) -> PathBuf {
-        repo_root()
-            .join("packaging")
-            .join(format!("{}.inx", self.name()))
-    }
-
-    /// Must match the INF's `[SourceDisksFiles]`.
-    const fn binaries(self) -> &'static [Binary] {
-        match self {
-            Self::Universal => &[USB_KM, USB_UM, SPI_KM, HID_FILTER],
-            Self::HidFilter => &[HID_FILTER],
-        }
-    }
-}
-
-/// The workspaces needed for `infs`, in build order.
-fn needed_workspaces(infs: &[InfKind]) -> Vec<Workspace> {
-    Workspace::ALL
-        .into_iter()
-        .filter(|ws| {
-            infs.iter()
-                .any(|i| i.binaries().iter().any(|b| b.ws == *ws))
-        })
-        .collect()
+/// `packaging/AmtPtpDevice.inx`.
+fn inx() -> PathBuf {
+    repo_root().join("packaging").join(format!("{PACKAGE}.inx"))
 }
 
 struct Context<'a> {
@@ -122,9 +91,7 @@ pub fn package(opts: &PackageOpts) -> Result<(), String> {
         Some(_) => Some(wdk.signtool()?),
         None => None,
     };
-    for inf in &opts.infs {
-        process::require_file(&inf.inx(), " (the INF source of this package)")?;
-    }
+    process::require_file(&inx(), " (the INF source of the package)")?;
     let kmdf = Workspace::Km.framework_version()?;
     let umdf = Workspace::Um.framework_version()?;
     println!(
@@ -139,7 +106,7 @@ pub fn package(opts: &PackageOpts) -> Result<(), String> {
         println!("xtask: signtool: {}", s.display());
     }
 
-    drivers::build_drivers(&opts.arches, opts.release, &needed_workspaces(&opts.infs))?;
+    drivers::build_drivers(&opts.arches, opts.release, &Workspace::ALL)?;
 
     let cx = Context {
         opts,
@@ -149,10 +116,7 @@ pub fn package(opts: &PackageOpts) -> Result<(), String> {
         umdf,
     };
     for &arch in &opts.arches {
-        for &inf in &opts.infs {
-            package_one(&cx, arch, inf)
-                .map_err(|e| format!("[{} {}] {e}", arch.name(), inf.name()))?;
-        }
+        package_one(&cx, arch).map_err(|e| format!("[{} {PACKAGE}] {e}", arch.name()))?;
     }
 
     println!();
@@ -171,21 +135,27 @@ pub fn package(opts: &PackageOpts) -> Result<(), String> {
     Ok(())
 }
 
-fn package_one(cx: &Context<'_>, arch: Arch, inf: InfKind) -> Result<(), String> {
+fn package_one(cx: &Context<'_>, arch: Arch) -> Result<(), String> {
     let opts = cx.opts;
     let arch_dir = package_arch_dir(arch);
-    let pkg = arch_dir.join(inf.name());
-    // Per-package symbols: both INFs ship AmtPtpHidFilter.sys, so a shared
-    // directory would let one package's run replace the other's PDB.
-    let symbols = arch_dir.join(format!("{}.symbols", inf.name()));
-    let inf_file = format!("{}.inf", inf.name());
-    let cat_file = format!("{}.cat", inf.name());
-    println!(
-        "xtask: === [{}] {} -> {}",
-        arch.name(),
-        inf.name(),
-        pkg.display()
-    );
+    let pkg = arch_dir.join(PACKAGE);
+    let symbols = arch_dir.join(format!("{PACKAGE}.symbols"));
+    let inf_file = format!("{PACKAGE}.inf");
+    let cat_file = format!("{PACKAGE}.cat");
+    println!("xtask: === [{}] {PACKAGE} -> {}", arch.name(), pkg.display());
+
+    // The standalone HidFilter package of older xtask versions must not be
+    // mistaken for a current one.
+    for obsolete in OBSOLETE_PACKAGES {
+        let dir = arch_dir.join(obsolete);
+        if dir.is_dir() {
+            println!(
+                "xtask: removing obsolete {} (the HidFilter is part of {PACKAGE})",
+                dir.display()
+            );
+            remove_dir(&dir)?;
+        }
+    }
 
     // The shared `symbols/` directory of older xtask versions holds PDBs that
     // may match neither package; remove it so it cannot be mistaken for them.
@@ -210,7 +180,7 @@ fn package_one(cx: &Context<'_>, arch: Arch, inf: InfKind) -> Result<(), String>
 
     // 1. Binaries (KMDF .dll -> .sys) and their PDBs.
     let mut payload = Vec::new();
-    for b in inf.binaries() {
+    for b in &BINARIES {
         let out = b.ws.output_dir(arch, opts.release);
         let dll = out.join(format!("{}.dll", b.name));
         process::require_file(
@@ -233,7 +203,7 @@ fn package_one(cx: &Context<'_>, arch: Arch, inf: InfKind) -> Result<(), String>
     }
 
     // 2. INX -> INF (CRLF, the canonical INF line ending; the .inx is LF in git).
-    let inx = inf.inx();
+    let inx = inx();
     let text =
         fs::read_to_string(&inx).map_err(|e| format!("cannot read {}: {e}", inx.display()))?;
     write(&pkg.join(&inf_file), &to_crlf(&text))?;
@@ -536,29 +506,40 @@ mod tests {
 
     #[test]
     fn binaries_match_inx_source_disks_files() {
-        for inf in InfKind::ALL {
-            let text = fs::read_to_string(inf.inx()).unwrap();
-            let section = text
-                .split("[SourceDisksFiles]")
-                .nth(1)
-                .and_then(|s| s.split("\n[").next())
-                .unwrap();
-            let mut listed: Vec<String> = section
-                .lines()
-                .filter_map(|l| l.split('=').next())
-                .map(|f| f.trim().to_owned())
-                .filter(|f| !f.is_empty() && !f.starts_with(';'))
-                .collect();
-            let mut ours: Vec<String> = inf.binaries().iter().map(Binary::packaged_name).collect();
-            listed.sort();
-            ours.sort();
-            assert_eq!(listed, ours, "{}", inf.name());
-        }
+        let text = fs::read_to_string(inx()).unwrap();
+        let section = text
+            .split("[SourceDisksFiles]")
+            .nth(1)
+            .and_then(|s| s.split("\n[").next())
+            .unwrap();
+        let mut listed: Vec<String> = section
+            .lines()
+            .filter_map(|l| l.split('=').next())
+            .map(|f| f.trim().to_owned())
+            .filter(|f| !f.is_empty() && !f.starts_with(';'))
+            .collect();
+        let mut ours: Vec<String> = BINARIES.iter().map(Binary::packaged_name).collect();
+        listed.sort();
+        ours.sort();
+        assert_eq!(listed, ours);
+    }
+
+    /// The INF sources in `packaging/`: only the universal one.
+    #[test]
+    fn one_inf_template() {
+        let mut inx_files: Vec<String> = fs::read_dir(repo_root().join("packaging"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.to_ascii_lowercase().ends_with(".inx"))
+            .collect();
+        inx_files.sort();
+        assert_eq!(inx_files, [format!("{PACKAGE}.inx")]);
     }
 
     #[test]
     fn universal_models_have_unique_supported_hardware_ids() {
-        let text = fs::read_to_string(InfKind::Universal.inx()).unwrap();
+        let text = fs::read_to_string(inx()).unwrap();
         for (build, usb_section) in [
             ("16299", "amtptpdeviceusbkm_device"),
             ("17134", "amtptpdeviceusbum_install"),
@@ -614,9 +595,9 @@ mod tests {
         (vid, pid)
     }
 
-    /// Every `(install section, hardware ID)` of every decorated models section of `inf`.
-    fn model_bindings(inf: InfKind) -> Vec<(String, String, String)> {
-        let text = fs::read_to_string(inf.inx()).unwrap();
+    /// Every `(install section, hardware ID)` of every decorated models section of the INF.
+    fn model_bindings() -> Vec<(String, String, String)> {
+        let text = fs::read_to_string(inx()).unwrap();
         let mut bindings = Vec::new();
         let mut section: Option<String> = None;
         for line in text.lines() {
@@ -637,65 +618,63 @@ mod tests {
                 id.trim().to_owned(),
             ));
         }
-        assert!(!bindings.is_empty(), "{}: no models", inf.name());
+        assert!(!bindings.is_empty(), "{PACKAGE}: no models");
         bindings
     }
 
-    /// Every binding of both INF templates resolves to a model definition of the driver it installs:
+    /// Every binding of the INF template resolves to a model definition of the driver it installs:
     /// SPI and UMDF to a table entry that also selects a report descriptor, the USB KMDF driver to a table
     /// row or a listed fallback PID, and the filter to a supported Magic Trackpad 2 transport.
     #[test]
     fn model_bindings_resolve_to_model_definitions() {
         let mut kmdf_fallbacks = std::collections::BTreeSet::new();
-        for inf in InfKind::ALL {
-            for (section, install, id) in model_bindings(inf) {
-                let ctx = format!("{} [{section}] {install}, {id}", inf.name());
-                match install.as_str() {
-                    "amtptpdevicespikm_device" => {
-                        let (vid, pid) = vid_pid(&id);
-                        assert!(id.to_ascii_lowercase().starts_with("spi\\"), "{ctx}");
-                        let trackpad = amtptp_spikm_core::device::lookup_trackpad(vid, pid);
-                        assert!(trackpad.is_some(), "{ctx}: no SPI model");
-                        assert!(
-                            amtptp_spikm_core::device::family_for_product(pid).is_some(),
-                            "{ctx}: no SPI descriptor family"
-                        );
-                    }
-                    "amtptpdeviceusbum_install" => {
-                        let (vid, pid) = vid_pid(&id);
-                        assert_eq!(vid, 0x05AC, "{ctx}");
-                        assert!(
-                            amtptp_usbum_core::config::lookup_config(pid).is_some(),
-                            "{ctx}: no UMDF config row"
-                        );
-                        assert!(
-                            amtptp_usbum_core::descriptors::HidRegistry::for_pid(pid).is_some(),
-                            "{ctx}: no UMDF report descriptor"
-                        );
-                    }
-                    "amtptpdeviceusbkm_device" => {
-                        let (vid, pid) = vid_pid(&id);
-                        assert_eq!(vid, 0x05AC, "{ctx}");
-                        let config = amtptp_usbkm_core::config::config_for_pid(pid);
-                        if config.identification != pid {
-                            assert!(
-                                amtptp_usbkm_core::config::uses_listed_fallback(pid),
-                                "{ctx}: falls back to the generic profile without being listed"
-                            );
-                            kmdf_fallbacks.insert(pid);
-                        }
-                    }
-                    "amtptphidfilter_miniportdevice" => {
-                        let (vid, pid) = vid_pid(&id);
-                        assert!(
-                            amtptp_hidfilter_core::Transport::from_ids(vid, pid).is_ok(),
-                            "{ctx}: no Magic Trackpad 2 transport"
-                        );
-                    }
-                    // Collections the filter disables, and the inbox HID driver for the old USB install.
-                    "amtptphidfilter_nulldevice" | "standardusbhid_device" => {}
-                    other => panic!("{ctx}: unknown install section {other}"),
+        for (section, install, id) in model_bindings() {
+            let ctx = format!("{PACKAGE} [{section}] {install}, {id}");
+            match install.as_str() {
+                "amtptpdevicespikm_device" => {
+                    let (vid, pid) = vid_pid(&id);
+                    assert!(id.to_ascii_lowercase().starts_with("spi\\"), "{ctx}");
+                    let trackpad = amtptp_spikm_core::device::lookup_trackpad(vid, pid);
+                    assert!(trackpad.is_some(), "{ctx}: no SPI model");
+                    assert!(
+                        amtptp_spikm_core::device::family_for_product(pid).is_some(),
+                        "{ctx}: no SPI descriptor family"
+                    );
                 }
+                "amtptpdeviceusbum_install" => {
+                    let (vid, pid) = vid_pid(&id);
+                    assert_eq!(vid, 0x05AC, "{ctx}");
+                    assert!(
+                        amtptp_usbum_core::config::lookup_config(pid).is_some(),
+                        "{ctx}: no UMDF config row"
+                    );
+                    assert!(
+                        amtptp_usbum_core::descriptors::HidRegistry::for_pid(pid).is_some(),
+                        "{ctx}: no UMDF report descriptor"
+                    );
+                }
+                "amtptpdeviceusbkm_device" => {
+                    let (vid, pid) = vid_pid(&id);
+                    assert_eq!(vid, 0x05AC, "{ctx}");
+                    let config = amtptp_usbkm_core::config::config_for_pid(pid);
+                    if config.identification != pid {
+                        assert!(
+                            amtptp_usbkm_core::config::uses_listed_fallback(pid),
+                            "{ctx}: falls back to the generic profile without being listed"
+                        );
+                        kmdf_fallbacks.insert(pid);
+                    }
+                }
+                "amtptphidfilter_miniportdevice" => {
+                    let (vid, pid) = vid_pid(&id);
+                    assert!(
+                        amtptp_hidfilter_core::Transport::from_ids(vid, pid).is_ok(),
+                        "{ctx}: no Magic Trackpad 2 transport"
+                    );
+                }
+                // The collections the filter disables.
+                "amtptphidfilter_nulldevice" => {}
+                other => panic!("{ctx}: unknown install section {other}"),
             }
         }
         // No listed fallback PID is stale.
@@ -769,17 +748,5 @@ mod tests {
         let mut bad_lfanew = pe32plus(0x01E0, 0);
         bad_lfanew[0x3C..0x40].copy_from_slice(&u32::MAX.to_le_bytes());
         assert!(clear_force_integrity_bytes(&mut bad_lfanew).is_err());
-    }
-
-    #[test]
-    fn workspaces_per_inf() {
-        assert_eq!(
-            needed_workspaces(&[InfKind::HidFilter]),
-            vec![Workspace::Km]
-        );
-        assert_eq!(
-            needed_workspaces(&InfKind::ALL),
-            vec![Workspace::Km, Workspace::Um]
-        );
     }
 }

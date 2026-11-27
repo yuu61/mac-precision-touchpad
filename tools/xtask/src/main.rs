@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! cargo xtask build   [--arch x64|arm64|all] [--release]
-//! cargo xtask package [--arch x64|arm64|all] [--release] [--inf universal|hidfilter|all]
+//! cargo xtask package [--arch x64|arm64|all] [--release]
 //!                     [--driver-version a.b.c.d] [--sign <signtool sign args...>]
 //! cargo xtask test
 //! ```

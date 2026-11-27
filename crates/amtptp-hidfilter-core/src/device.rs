@@ -51,7 +51,8 @@ pub struct TransportParams {
 /// The Magic Trackpad 2 transport, chosen by vendor ID (Device.c:322 / 343).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Transport {
-    /// VID 0x05AC (only bindable through the standalone INF).
+    /// VID 0x05AC. No INF binds the filter to the USB trackpad (the USB Magic Trackpad 2 has its own
+    /// driver, `AmtPtpDeviceUsbUm`); the transport is kept for the C behaviour.
     Usb,
     /// VID 0x004C (the shipping configuration).
     Bluetooth,
