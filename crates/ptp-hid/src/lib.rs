@@ -13,6 +13,7 @@
 //!   and the user-mode-app configuration report 0x09.
 //! - [`input`]: input report 0x05 in its two wire shapes: 9-byte contacts (50 bytes) and SPI 5-byte
 //!   contacts (30 bytes).
+//! - [`contact_tracker`]: persistent `ContactID` tracking and single-frame liftoff synthesis.
 //! - [`read_tracker`]: the lower reads a driver has in flight, and the epoch that makes a read issued
 //!   before a suspend stale.
 //! - [`scan_time`]: the per-session Scan Time clock.
@@ -61,6 +62,7 @@
 
 mod bytes;
 pub mod common;
+pub mod contact_tracker;
 pub mod descriptor;
 pub mod feature;
 pub mod hidport;
