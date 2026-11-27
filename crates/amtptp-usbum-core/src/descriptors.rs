@@ -4,11 +4,14 @@
 //! this driver's per-family axis values (spec 5.1; byte-identical to the C arrays, verified against the
 //! oracle fixtures). All six HID descriptors are the same 9 bytes `09 21 00 01 00 01 22 04 02`.
 //!
-//! The PID-to-descriptor switch (Hid.c:42-137 and :280-339) is **not** the config table: WS1/WS2/WS4/WS4A
-//! and T2 have config rows but no descriptor, and WS5A uses the WS5 descriptor and WS9 the WS8 one
-//! (UM-B18, P3 PRESERVED).
+//! The C PID-to-descriptor switch (Hid.c:42-137 and :280-339) listed the PIDs a second time. Here the
+//! descriptor is chosen by the config row's family ([`HidRegistry::for_family`]), so every PID is listed
+//! once, in the config table: WS1/WS2/WS4/WS4A and T2 have config rows but no descriptor, and WS5A uses
+//! the WS5 descriptor and WS9 the WS8 one (UM-B18, P3 PRESERVED).
 
 use ptp_hid::common::DEVICE_VID;
+
+use crate::config::{Family, lookup_config};
 use ptp_hid::descriptor::{
     Axes, REPORT_DESCRIPTOR_U32_ID_UMAPP_LEN, report_descriptor_u32_id_umapp,
 };
@@ -104,19 +107,27 @@ pub enum HidRegistry {
 }
 
 impl HidRegistry {
-    /// The PID switch of `AmtPtpGetHidDescriptor` / `AmtPtpGetReportDescriptor` (both identical; spec 8.3).
-    /// `None` for every other PID (the C handlers then return `STATUS_INVALID_DEVICE_STATE`).
+    /// The descriptor of a config-table family, or `None` for the families the driver has no descriptor
+    /// for (WS1, WS2, WS4, WS4A, T2).
     #[must_use]
-    pub const fn for_pid(pid: u16) -> Option<Self> {
-        match pid {
-            0x0236..=0x0238 => Some(Self::Ws3),
-            0x0245..=0x0247 | 0x0252..=0x0254 => Some(Self::Ws5),
-            0x0249..=0x024e => Some(Self::Ws6),
-            0x0262..=0x0264 | 0x0259..=0x025b => Some(Self::Ws7a),
-            0x0290..=0x0292 | 0x0272..=0x0274 => Some(Self::Ws8),
-            0x0265 => Some(Self::Mt2),
-            _ => None,
+    pub const fn for_family(family: Family) -> Option<Self> {
+        match family {
+            Family::Ws3 => Some(Self::Ws3),
+            Family::Ws5 | Family::Ws5a => Some(Self::Ws5),
+            Family::Ws6 | Family::Ws6a => Some(Self::Ws6),
+            Family::Ws7 | Family::Ws7a => Some(Self::Ws7a),
+            Family::Ws8 | Family::Ws9 => Some(Self::Ws8),
+            Family::Mt2 => Some(Self::Mt2),
+            Family::Ws1 | Family::Ws2 | Family::Ws4 | Family::Ws4a | Family::T2 => None,
         }
+    }
+
+    /// The descriptor `AmtPtpGetHidDescriptor` / `AmtPtpGetReportDescriptor` answer for `pid`: the family
+    /// of its config row ([`lookup_config`]), then [`Self::for_family`]. `None` for every other PID (the
+    /// handlers then return `STATUS_INVALID_DEVICE_STATE`). Equals the C PID switch for every PID.
+    #[must_use]
+    pub fn for_pid(pid: u16) -> Option<Self> {
+        Self::for_family(lookup_config(pid)?.family)
     }
 
     /// The 516-byte report descriptor.

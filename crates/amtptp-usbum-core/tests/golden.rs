@@ -250,7 +250,7 @@ fn ws3_report_descriptor_dump() {
 
 #[test]
 fn pid_to_descriptor_switch() {
-    // Spec 8.3: the descriptor switch is not the config table.
+    // Spec 8.3: not every config row has a descriptor.
     for pid in [0x0223_u16, 0x0230, 0x023f, 0x0242, 0x027d, 0x0000, 0x0266] {
         assert_eq!(HidRegistry::for_pid(pid), None, "{pid:04x}");
     }
@@ -260,6 +260,27 @@ fn pid_to_descriptor_switch() {
     assert_eq!(HidRegistry::for_pid(0x024b), Some(HidRegistry::Ws6)); // WS6A
     assert_eq!(HidRegistry::for_pid(0x025b), Some(HidRegistry::Ws7a)); // WS7A
     assert_eq!(HidRegistry::for_pid(0x0265), Some(HidRegistry::Mt2));
+}
+
+/// The C PID switch of `AmtPtpGetHidDescriptor` / `AmtPtpGetReportDescriptor`, kept as the oracle of the
+/// family-based selection.
+const fn c_descriptor_switch(pid: u16) -> Option<HidRegistry> {
+    match pid {
+        0x0236..=0x0238 => Some(HidRegistry::Ws3),
+        0x0245..=0x0247 | 0x0252..=0x0254 => Some(HidRegistry::Ws5),
+        0x0249..=0x024e => Some(HidRegistry::Ws6),
+        0x0262..=0x0264 | 0x0259..=0x025b => Some(HidRegistry::Ws7a),
+        0x0290..=0x0292 | 0x0272..=0x0274 => Some(HidRegistry::Ws8),
+        0x0265 => Some(HidRegistry::Mt2),
+        _ => None,
+    }
+}
+
+#[test]
+fn family_based_descriptor_selection_equals_the_c_switch() {
+    for pid in 0..=u16::MAX {
+        assert_eq!(HidRegistry::for_pid(pid), c_descriptor_switch(pid), "{pid:04x}");
+    }
 }
 
 // ------------------------------------------------------------------------------------------------

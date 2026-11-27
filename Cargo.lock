@@ -47,3 +47,9 @@ version = "0.1.0"
 [[package]]
 name = "xtask"
 version = "0.1.0"
+dependencies = [
+ "amtptp-hidfilter-core",
+ "amtptp-spikm-core",
+ "amtptp-usbkm-core",
+ "amtptp-usbum-core",
+]

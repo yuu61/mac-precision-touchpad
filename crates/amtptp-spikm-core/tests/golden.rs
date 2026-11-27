@@ -277,7 +277,7 @@ fn table_and_families_spec_8() {
     assert_eq!(family_for_product(0x0277), Some(Family::F3a));
     assert!(
         lookup_trackpad(APPLE_VENDOR_ID, 0x0280).is_none(),
-        "INF-only PID (SPI-B17)"
+        "0x0280 is a USB KMDF binding, not an SPI model"
     );
     assert!(Family::F1.report_descriptor(ReportType::INVALID).is_none());
 }

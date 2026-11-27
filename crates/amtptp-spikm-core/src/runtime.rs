@@ -577,13 +577,13 @@ mod tests {
     /// buffer are NULL (unreachable). It holds no header, so the frame is a data error.
     #[test]
     fn empty_lower_buffer_reads_as_zero_packet() {
-        use crate::device::SPI_TRACKPAD_CONFIG_TABLE;
+        use crate::device::SPI_MODELS;
         use crate::status::STATUS_DEVICE_DATA_ERROR;
         use ptp_hid::common::REPORTID_MULTITOUCH;
         use ptp_hid::input::SpiPtpReport;
 
         let rt = DeviceRuntime::new();
-        let tp = SPI_TRACKPAD_CONFIG_TABLE[0];
+        let tp = SPI_MODELS[0].trackpad;
 
         // Below 46: STATUS_DEVICE_DATA_ERROR, reporting clock not sampled.
         let mut queried = false;
