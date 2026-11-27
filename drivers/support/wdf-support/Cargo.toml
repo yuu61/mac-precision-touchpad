@@ -1,5 +1,5 @@
 # Shared WDF glue for the AmtPtp drivers. Used as a path dependency by BOTH
-# driver workspaces (../km = KMDF 1.23, ../um = UMDF 2.15) and a member of
+# driver workspaces (../../km = KMDF 1.23, ../../um = UMDF 2.15) and a member of
 # neither, so it is compiled once per workspace against that workspace's
 # wdk-sys bindings. Its build script reads the workspace's
 # [workspace.metadata.wdk.driver-model] (via wdk-build) and emits

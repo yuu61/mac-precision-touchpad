@@ -19,8 +19,8 @@ Options (build, package):
 
 Options (package only):
   --inf universal|hidfilter|all
-                              Which INF to package. universal = package/AmtPtpDevice.inx
-                              (all four drivers), hidfilter = package/AmtPtpHidFilter.inx
+                              Which INF to package. universal = packaging/AmtPtpDevice.inx
+                              (all four drivers), hidfilter = packaging/AmtPtpHidFilter.inx
                               (AmtPtpHidFilter only). Default: all.
   --driver-version a.b.c.d    DriverVer version (each part 0-65535). Default: stampinf's
                               '*' (current time h.m.s.ms).

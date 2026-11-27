@@ -57,12 +57,20 @@ The drivers are written in Rust on top of [windows-drivers-rs](https://github.co
 | `AmtPtpDeviceSpiKm.sys` | SPI | KMDF 1.23 | `drivers/km/AmtPtpDeviceSpiKm`, `crates/amtptp-spikm-core` |
 | `AmtPtpHidFilter.sys` | Bluetooth (Magic Trackpad 2) | KMDF 1.23 | `drivers/km/AmtPtpHidFilter`, `crates/amtptp-hidfilter-core` |
 
-- `crates/` is a host workspace of `no_std` crates holding all hardware-independent logic (device tables, report descriptors, packet parsing, feature reports). They are unit-tested on the host against fixtures recorded from the original C drivers. `crates/ptp-hid` holds the Precision Touchpad HID building blocks shared by all drivers.
-- `drivers/km` (KMDF) and `drivers/um` (UMDF) are separate Cargo workspaces, because wdk-build allows only one driver model per workspace. `drivers/wdf-support` holds the shared WDF glue.
-- `package/` holds the INF templates; `xtask/` builds the drivers and assembles the driver package (stampinf, Inf2Cat, InfVerif, optional signing).
-- The minimum OS is Windows 10 1709 (KMDF 1.23 / UMDF 2.15). Both x64 and ARM64 are built.
-- `docs/rust-port/` records, per driver, which behaviors of the C implementation were preserved and which defects were fixed during the port, and how packaging works.
-- `drivers/AmtPtpDevice.wprp` is a WPR profile that captures the TraceLogging events of all four drivers.
+### Repository layout
+
+| Directory | Contents |
+|---|---|
+| [`apps/settings/`](apps/settings/) | UWP settings app and its [Visual Studio solution](apps/settings/AmtPtpDevice.Settings.sln). |
+| [`crates/`](crates/) | Hardware-independent `no_std` driver logic, shared Precision Touchpad HID code, and host tests with fixtures recorded from the C drivers. |
+| [`drivers/`](drivers/) | WDK driver code. `km/` and `um/` are separate Cargo workspaces because wdk-build supports one driver model per workspace. `support/` contains shared WDF glue and the Windows resource compiler helper. |
+| [`packaging/`](packaging/) | INF templates and the PowerShell helper for creating CAB files. |
+| [`tools/`](tools/) | The `xtask` build and packaging utility and the WPR profile in `tracing/` for all four drivers. |
+| [`docs/rust-port/`](docs/rust-port/) | Rust port records and the driver packaging guide. |
+
+### Driver build and tests
+
+The minimum OS is Windows 10 1709 (KMDF 1.23 / UMDF 2.15). The drivers target x64 and ARM64.
 
 Requirements: Rust (stable, with the `aarch64-pc-windows-msvc` target for ARM64), Visual Studio with the C++ build tools (x64 and ARM64), the Windows Driver Kit, and LLVM (`winget install LLVM.LLVM`, used by bindgen).
 
@@ -119,7 +127,7 @@ I would like to thank projects like [magictrackpad2-dkms](https://github.com/rob
 
 - USB drivers are licensed under [GPLv2](LICENSE-GPL.md).
 - SPI driver is licensed under [MIT](LICENSE-MIT.md).
-- The shared building blocks (`crates/ptp-hid`, `drivers/wdf-support`, `drivers/rc-embed`) are licensed under [MIT](LICENSE-MIT.md).
+- The shared building blocks (`crates/ptp-hid`, `drivers/support/wdf-support`, `drivers/support/rc-embed`) are licensed under [MIT](LICENSE-MIT.md).
 
 See [LICENSE.md](LICENSE.md) for the mapping of source directories to licenses.
 

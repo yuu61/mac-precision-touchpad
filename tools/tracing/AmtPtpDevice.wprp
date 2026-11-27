@@ -6,7 +6,7 @@
     AmtPtpDeviceUsbKmTraceProvider  B409CF52-F41A-4193-98C2-BAD95204203B  AmtPtpDeviceUsbKm.sys
     AmtPtpDeviceSpiKmTraceProvider  9B319D80-FE25-41E4-80EF-7D8528F7F1B5  AmtPtpDeviceSpiKm.sys
     AmtPtpHidFilterTraceProvider    EEB34803-F3EC-4BB1-97CE-B42405D7F3C2  AmtPtpHidFilter.sys
-  Usage: wpr -start drivers\AmtPtpDevice.wprp -filemode ... wpr -stop trace.etl
+  Usage: wpr -start tools\tracing\AmtPtpDevice.wprp -filemode ... wpr -stop trace.etl
 -->
 <WindowsPerformanceRecorder Version="1.0" Author="AmtPtpDevice Authors" Copyright="AmtPtpDevice Authors" Company="AmtPtpDevice Authors">
   <Profiles>

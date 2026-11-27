@@ -6,9 +6,9 @@
 # this manifest by walking up from OUT_DIR to the first Cargo.lock).
 #
 # Shared crates outside this workspace, used as path dependencies:
-#   ../wdf-support   WDF glue (INIT helpers, context macro, request guard, IRP helpers)
-#   ../rc-embed      build-dependency that compiles and links a VERSIONINFO .rc
-#   ../../crates/*   hardware-independent core logic (host-tested)
+#   ../support/wdf-support  WDF glue (INIT helpers, context macro, request guard, IRP helpers)
+#   ../support/rc-embed     build-dependency that compiles and links a VERSIONINFO .rc
+#   ../../crates/*          hardware-independent core logic (host-tested)
 [workspace]
 resolver = "3"
 members = [
@@ -38,8 +38,8 @@ wdk-sys = { version = "=0.5.2", features = ["hid", "usb", "spb"] }
 wdk-panic = "=0.5.0"
 wdk-build = "=0.6.0"
 tracelogging = { version = "=1.2.4", default-features = false, features = ["etw", "macros", "kernel_mode"] }
-wdf-support = { path = "../wdf-support" }
-rc-embed = { path = "../rc-embed" }
+wdf-support = { path = "../support/wdf-support" }
+rc-embed = { path = "../support/rc-embed" }
 ptp-hid = { path = "../../crates/ptp-hid" }
 amtptp-usbkm-core = { path = "../../crates/amtptp-usbkm-core" }
 amtptp-spikm-core = { path = "../../crates/amtptp-spikm-core" }
