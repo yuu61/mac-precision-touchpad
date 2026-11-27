@@ -19,6 +19,7 @@ $ZeroSha = '0000000000000000000000000000000000000000'
 
 $AllHostPackages = @(
     'ptp-hid',
+    'bcm5974',
     'amtptp-usbum-core',
     'amtptp-usbkm-core',
     'amtptp-spikm-core',
@@ -27,6 +28,7 @@ $AllHostPackages = @(
 )
 $CoreHostPackages = @(
     'ptp-hid',
+    'bcm5974',
     'amtptp-usbum-core',
     'amtptp-usbkm-core',
     'amtptp-spikm-core',
@@ -172,6 +174,12 @@ else {
             Add-All $umSet $AllUmPackages
             continue
         }
+        if ($path -like 'crates/bcm5974/*') {
+            Add-All $hostSet @('bcm5974', 'amtptp-usbum-core', 'amtptp-usbkm-core', 'amtptp-hidfilter-core')
+            Add-All $kmSet @('amtptp-device-usb-km', 'amtptp-hid-filter')
+            Add-All $umSet $AllUmPackages
+            continue
+        }
         if ($path -like 'crates/amtptp-usbum-core/tests/*') {
             [void]$hostSet.Add('amtptp-usbum-core')
             continue
@@ -230,8 +238,8 @@ else {
             continue
         }
         if ($path -like 'drivers/support/rc-embed/*') {
-            [void]$kmSet.Add('amtptp-device-usb-km')
-            [void]$umSet.Add('amtptp-device-usb-um')
+            Add-All $kmSet $AllKmPackages
+            Add-All $umSet $AllUmPackages
             $kmLintSupport = $true
             $umLintSupport = $true
             continue

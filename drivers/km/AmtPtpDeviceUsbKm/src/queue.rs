@@ -17,21 +17,17 @@ use core::slice;
 
 use amtptp_usbkm_core::feature::{self, GetFeaturePacket, HID_XFER_PACKET_LEN, SetFeaturePacket};
 use amtptp_usbkm_core::hid::{self, HID_DEVICE_ATTRIBUTES_LEN, InternalIoctl};
-use amtptp_usbkm_core::lifecycle::{
-    DEFAULT_QUEUE, INPUT_QUEUE, IoStopAction, PowerManaged, QueueDispatch, QueueSpec,
-};
+use amtptp_usbkm_core::lifecycle::IoStopAction;
 use amtptp_usbkm_core::output::OutputMemory;
 use amtptp_usbkm_core::status::{Completion, NtStatus};
 use ptp_hid::common::{REPORTID_FUNCSWITCH, REPORTID_REPORTMODE};
 use tracelogging as tlg;
-use wdf_support::init::{io_queue_config_init, io_queue_config_init_default_queue};
+use wdf_support::hid as wdf_hid;
 use wdf_support::ntstatus::{NT_SUCCESS, STATUS_INVALID_DEVICE_STATE, STATUS_NOT_SUPPORTED};
 use wdf_support::request::Request;
-use wdf_support::wdm::request_user_buffer;
 use wdk_sys::{
-    _WDF_IO_QUEUE_DISPATCH_TYPE, _WDF_TRI_STATE, HID_XFER_PACKET, NTSTATUS, PVOID, ULONG,
-    ULONG_PTR, WDF_IO_QUEUE_CONFIG, WDF_NO_OBJECT_ATTRIBUTES, WDFDEVICE, WDFMEMORY, WDFQUEUE,
-    WDFREQUEST, call_unsafe_wdf_function_binding,
+    HID_XFER_PACKET, NTSTATUS, ULONG, ULONG_PTR, WDF_NO_OBJECT_ATTRIBUTES, WDFDEVICE, WDFMEMORY,
+    WDFQUEUE, WDFREQUEST, call_unsafe_wdf_function_binding,
 };
 
 use crate::PROVIDER;
@@ -40,30 +36,6 @@ use crate::trace::KW_QUEUE;
 use crate::usb::UsbIo;
 
 const _: () = assert!(size_of::<HID_XFER_PACKET>() == HID_XFER_PACKET_LEN);
-
-/// The `WDF_IO_QUEUE_CONFIG` of a core [`QueueSpec`], with the callbacks the spec registers.
-fn queue_config(spec: &QueueSpec) -> WDF_IO_QUEUE_CONFIG {
-    let dispatch = match spec.dispatch {
-        QueueDispatch::Parallel => _WDF_IO_QUEUE_DISPATCH_TYPE::WdfIoQueueDispatchParallel,
-        QueueDispatch::Manual => _WDF_IO_QUEUE_DISPATCH_TYPE::WdfIoQueueDispatchManual,
-    };
-    let mut config = if spec.default_queue {
-        io_queue_config_init_default_queue(dispatch)
-    } else {
-        io_queue_config_init(dispatch)
-    };
-    config.PowerManaged = match spec.power_managed {
-        PowerManaged::False => _WDF_TRI_STATE::WdfFalse,
-        PowerManaged::UseDefault => _WDF_TRI_STATE::WdfUseDefault,
-    };
-    if spec.internal_device_control {
-        config.EvtIoInternalDeviceControl = Some(evt_io_internal_device_control);
-    }
-    if spec.io_stop {
-        config.EvtIoStop = Some(evt_io_stop);
-    }
-    config
-}
 
 /// `AmtPtpDeviceUsbKmQueueInitialize` (Queue.c:24-103): the default queue, then the `InputQueue`. Returns
 /// the first failure. `PASSIVE_LEVEL`, `PAGE` as in C.
@@ -74,16 +46,16 @@ fn queue_config(spec: &QueueSpec) -> WDF_IO_QUEUE_CONFIG {
 pub(crate) unsafe fn queue_initialize(device: WDFDEVICE, context: &DeviceContext) -> NTSTATUS {
     wdk::paged_code!();
 
-    let mut config = queue_config(&DEFAULT_QUEUE);
+    let mut config =
+        wdf_hid::default_queue_config(Some(evt_io_internal_device_control), Some(evt_io_stop));
     let mut queue: WDFQUEUE = ptr::null_mut();
     // SAFETY: live device; `config` initialized; WDF_NO_OBJECT_ATTRIBUTES (parent = device) as in C.
     let status = unsafe {
-        call_unsafe_wdf_function_binding!(
-            WdfIoQueueCreate,
+        wdf_hid::create_queue(
             device,
-            &raw mut config,
+            &mut config,
             WDF_NO_OBJECT_ATTRIBUTES,
-            &raw mut queue
+            &raw mut queue,
         )
     };
     if !NT_SUCCESS(status) {
@@ -97,16 +69,15 @@ pub(crate) unsafe fn queue_initialize(device: WDFDEVICE, context: &DeviceContext
         return status;
     }
 
-    let mut config = queue_config(&INPUT_QUEUE);
+    let mut config = wdf_hid::read_queue_config();
     let mut input_queue: WDFQUEUE = ptr::null_mut();
     // SAFETY: as above.
     let status = unsafe {
-        call_unsafe_wdf_function_binding!(
-            WdfIoQueueCreate,
+        wdf_hid::create_queue(
             device,
-            &raw mut config,
+            &mut config,
             WDF_NO_OBJECT_ATTRIBUTES,
-            &raw mut input_queue
+            &raw mut input_queue,
         )
     };
     // The C passes &pDeviceContext->InputQueue directly.
@@ -147,15 +118,7 @@ impl OutputMemory for RequestOutputMemory<'_> {
         // SAFETY: `memory` is the output memory of a request that is still owned (borrowed for 'r, so not
         // completed); `src` is valid for `src.len()` bytes. The destination is hidclass's non-paged buffer,
         // so any IRQL <= DISPATCH_LEVEL is fine.
-        unsafe {
-            call_unsafe_wdf_function_binding!(
-                WdfMemoryCopyFromBuffer,
-                self.memory,
-                0,
-                src.as_ptr().cast_mut().cast(),
-                src.len()
-            )
-        }
+        unsafe { wdf_hid::copy_to_output_memory(self.memory, src) }
     }
 }
 
@@ -163,18 +126,8 @@ impl OutputMemory for RequestOutputMemory<'_> {
 pub(crate) fn retrieve_output_memory(
     request: &Request,
 ) -> Result<RequestOutputMemory<'_>, NtStatus> {
-    let mut memory: WDFMEMORY = ptr::null_mut();
-    // SAFETY: owned request (Request contract); valid out-pointer.
-    let status = unsafe {
-        call_unsafe_wdf_function_binding!(
-            WdfRequestRetrieveOutputMemory,
-            request.as_raw(),
-            &raw mut memory
-        )
-    };
-    if !NT_SUCCESS(status) {
-        return Err(status);
-    }
+    // SAFETY: the borrowed request remains live for the memory object's lifetime.
+    let memory = unsafe { wdf_hid::retrieve_output_memory(request.as_raw()) }?;
     if memory.is_null() {
         // Impossible (success always returns a memory object); never complete as success without data.
         return Err(STATUS_INVALID_DEVICE_STATE);
@@ -197,64 +150,31 @@ pub(crate) const fn as_output<'m, 'r>(
 
 /// `WdfRequestRetrieveOutputBuffer(Request, sizeof(HID_DEVICE_ATTRIBUTES), &buffer, ..)` as a slice.
 fn retrieve_attributes_buffer(request: &mut Request) -> Result<&mut [u8], NtStatus> {
-    let mut buffer: PVOID = ptr::null_mut();
-    let mut length: usize = 0;
-    // SAFETY: owned request; valid out-pointers (the C passes NULL for the length; asking for it changes
-    // nothing in WDF).
-    let status = unsafe {
-        call_unsafe_wdf_function_binding!(
-            WdfRequestRetrieveOutputBuffer,
-            request.as_raw(),
-            HID_DEVICE_ATTRIBUTES_LEN,
-            &raw mut buffer,
-            &raw mut length
-        )
-    };
-    if !NT_SUCCESS(status) {
-        return Err(status);
-    }
+    // SAFETY: this exclusively borrowed request is live and stays pending while the buffer is used.
+    let (buffer, length) =
+        unsafe { wdf_hid::retrieve_output_buffer(request.as_raw(), HID_DEVICE_ATTRIBUTES_LEN) }?;
     if buffer.is_null() {
         return Ok(&mut []);
     }
     // SAFETY: WDF returned the request's output buffer of `length` (>= 32) bytes, valid and exclusively
     // ours until the request is completed, which the exclusive borrow of `request` rules out while the
     // slice lives.
-    Ok(unsafe { slice::from_raw_parts_mut(buffer.cast::<u8>(), length) })
-}
-
-/// The `HID_XFER_PACKET` at `WdfRequestWdmGetIrp(Request)->UserBuffer`: `(reportBuffer, reportBufferLen,
-/// reportId)`, or `None` for a NULL `UserBuffer`.
-///
-/// # Safety
-/// The request is an `IOCTL_HID_GET_FEATURE` / `IOCTL_HID_SET_FEATURE` from hidclass whose buffer length
-/// was checked to be at least `sizeof(HID_XFER_PACKET)`: a non-NULL `UserBuffer` then points at a valid
-/// `HID_XFER_PACKET` (hidclass is trusted, spec B24).
-unsafe fn xfer_packet(request: &Request) -> Option<(*mut u8, usize, u8)> {
-    // SAFETY: owned request (not completed); KMDF.
-    let packet = unsafe { request_user_buffer(request.as_raw()) }.cast::<HID_XFER_PACKET>();
-    if packet.is_null() {
-        return None;
-    }
-    // SAFETY: valid HID_XFER_PACKET (caller contract); field reads by value, unaligned-tolerant.
-    let (buffer, length, report_id) = unsafe {
-        (
-            ptr::addr_of!((*packet).reportBuffer).read_unaligned(),
-            ptr::addr_of!((*packet).reportBufferLen).read_unaligned(),
-            ptr::addr_of!((*packet).reportId).read_unaligned(),
-        )
-    };
-    // ULONG -> usize is lossless on the 64-bit targets.
-    Some((buffer, length as usize, report_id))
+    Ok(unsafe { slice::from_raw_parts_mut(buffer, length) })
 }
 
 /// `GET_FEATURE` packet: the caller's report buffer as `&mut [u8]`; a NULL `reportBuffer` becomes an empty
 /// slice (spec B16, P2: the C would write through NULL).
 ///
 /// # Safety
-/// As [`xfer_packet`]; `reportBuffer` points at `reportBufferLen` writable bytes (hidclass's buffer).
+/// As [`wdf_hid::read_xfer_packet`]; `reportBuffer` points at `reportBufferLen` writable bytes (hidclass's buffer).
 unsafe fn get_feature_packet(request: &mut Request) -> Option<GetFeaturePacket<'_>> {
     // SAFETY: forwarded caller contract.
-    let (buffer, length, report_id) = unsafe { xfer_packet(request) }?;
+    let packet = unsafe { wdf_hid::read_xfer_packet(request.as_raw()) }?;
+    let (buffer, length, report_id) = (
+        packet.reportBuffer,
+        packet.reportBufferLen as usize,
+        packet.reportId,
+    );
     let report_buffer: &mut [u8] = if buffer.is_null() {
         &mut []
     } else {
@@ -279,10 +199,15 @@ unsafe fn get_feature_packet(request: &mut Request) -> Option<GetFeaturePacket<'
 /// `SET_FEATURE` packet: the report as `&[u8]` (NULL `reportBuffer` → empty, spec B16).
 ///
 /// # Safety
-/// As [`xfer_packet`]; `reportBuffer` points at `reportBufferLen` readable bytes.
+/// As [`wdf_hid::read_xfer_packet`]; `reportBuffer` points at `reportBufferLen` readable bytes.
 unsafe fn set_feature_packet(request: &Request) -> Option<SetFeaturePacket<'_>> {
     // SAFETY: forwarded caller contract.
-    let (buffer, length, report_id) = unsafe { xfer_packet(request) }?;
+    let packet = unsafe { wdf_hid::read_xfer_packet(request.as_raw()) }?;
+    let (buffer, length, report_id) = (
+        packet.reportBuffer,
+        packet.reportBufferLen as usize,
+        packet.reportId,
+    );
     let report_buffer: &[u8] = if buffer.is_null() {
         &[]
     } else {

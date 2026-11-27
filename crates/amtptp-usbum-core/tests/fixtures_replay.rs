@@ -208,44 +208,33 @@ fn devices() {
                 rec.i(k)
             }
         };
+        let (ansi, iso, jis) = cfg.product_ids;
+        let format = cfg.profile.tp_type;
+        let read = amtptp_usbum_core::usb::wellspring_mode_read_setup(cfg);
         for (key, value) in [
-            ("ansi", cfg.ansi),
-            ("iso", cfg.iso),
-            ("jis", cfg.jis),
-            ("caps", cfg.caps),
-            ("bt_ep", cfg.bt_ep),
-            ("bt_datalen", cfg.bt_datalen),
-            ("tp_ep", cfg.tp_ep),
-            ("header", cfg.tp_header),
-            ("datalen", cfg.tp_datalen),
-            ("button", cfg.tp_button),
-            ("fsize", cfg.tp_fsize),
-            ("delta", cfg.tp_delta),
-            ("um_size", cfg.um.um_size),
-            ("um_req_val", cfg.um.um_req_val),
-            ("um_req_idx", cfg.um.um_req_idx),
-            ("um_switch_idx", cfg.um.um_switch_idx),
-            ("um_switch_on", cfg.um.um_switch_on),
-            ("um_switch_off", cfg.um.um_switch_off),
+            ("ansi", i32::from(ansi)),
+            ("iso", i32::from(iso)),
+            ("jis", i32::from(jis)),
+            ("header", format.header()),
+            ("button", format.button()),
+            ("fsize", format.finger_size()),
+            ("delta", format.delta()),
+            ("um_req_val", i32::from(read.w_value)),
+            ("um_req_idx", i32::from(read.w_index)),
         ] {
             assert_eq!(int(key), i64::from(value), "{case}: {key}");
         }
-        assert_eq!(cfg.tp_type.name(), rec.s("type"), "{case}: type");
-        for (key, p) in [
-            ("p", cfg.p),
-            ("w", cfg.w),
-            ("x", cfg.x),
-            ("y", cfg.y),
-            ("o", cfg.o),
-        ] {
+        assert_eq!(format.name(), rec.s("type"), "{case}: type");
+        for (key, axis) in [("x", cfg.profile.x), ("y", cfg.profile.y)] {
+            let (_, bounds) = rec.s(key).split_once(',').expect("axis limits");
             assert_eq!(
-                rec.s(key),
-                format!("{},{},{}", p.snratio, p.min, p.max),
+                bounds,
+                format!("{},{}", axis.min, axis.max),
                 "{case}: {key}"
             );
         }
         assert_eq!(
-            cfg.tp_type.reader_transfer_length() as u64,
+            format.reader_transfer_length() as u64,
             rec.u("reader_len"),
             "{case}: reader length"
         );
@@ -283,7 +272,7 @@ fn devices() {
         assert_eq!(state.config_row(), Some(row), "{case}: DeviceInfo");
         assert_eq!(
             usb.reader_len,
-            Some(cfg.tp_type.reader_transfer_length()),
+            Some(cfg.profile.tp_type.reader_transfer_length()),
             "{case}"
         );
         assert_eq!(state.snapshot(), rec.state_after(), "{case}: state after");

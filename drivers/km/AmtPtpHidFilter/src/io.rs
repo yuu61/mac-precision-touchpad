@@ -17,7 +17,7 @@
 
 use core::ffi::c_void;
 use core::mem::size_of;
-use core::ptr::{addr_of, null_mut};
+use core::ptr::null_mut;
 
 use amtptp_hidfilter_core::{
     FailedAction, FeatureChange, FilterIo, HID_XFER_PACKET_SIZE, LowerReadClass, NtStatus,
@@ -29,16 +29,17 @@ use ptp_hid::ioctl::{
     IOCTL_HID_GET_DEVICE_ATTRIBUTES, IOCTL_HID_READ_REPORT, IOCTL_HID_SET_FEATURE,
 };
 use tracelogging as tlg;
+use wdf_support::hid as wdf_hid;
 use wdf_support::init::{
     memory_descriptor_init_buffer, object_attributes_init, object_attributes_init_context_type,
     request_send_options_init,
 };
 use wdf_support::ntstatus::NT_SUCCESS;
 use wdf_support::request::Request;
-use wdf_support::wdm::{request_user_buffer, request_wdm_get_irp, set_irp_user_buffer};
+use wdf_support::wdm::{request_wdm_get_irp, set_irp_user_buffer};
 use wdk_sys::{
     _WDF_DEVICE_FAILED_ACTION, _WDF_REQUEST_SEND_OPTIONS_FLAGS, HID_DEVICE_ATTRIBUTES,
-    HID_XFER_PACKET, LARGE_INTEGER, PVOID, PWDF_REQUEST_COMPLETION_PARAMS, ULONG, ULONG_PTR,
+    HID_XFER_PACKET, LARGE_INTEGER, PWDF_REQUEST_COMPLETION_PARAMS, ULONG, ULONG_PTR,
     WDF_NO_OBJECT_ATTRIBUTES, WDFCONTEXT, WDFIOTARGET, WDFMEMORY, WDFREQUEST,
     call_unsafe_wdf_function_binding,
 };
@@ -141,18 +142,9 @@ impl FilterIo for Filter<'_> {
     }
 
     fn retrieve_output_memory(&mut self, request: WDFREQUEST) -> Result<WDFMEMORY, NtStatus> {
-        let mut memory: WDFMEMORY = null_mut();
-        // SAFETY: live owned request; `memory` is a valid out pointer.
-        let status = unsafe {
-            call_unsafe_wdf_function_binding!(
-                WdfRequestRetrieveOutputMemory,
-                request,
-                &raw mut memory
-            )
-        };
-        if NT_SUCCESS(status) {
-            Ok(memory)
-        } else {
+        // SAFETY: the dispatcher owns the live request; its output memory is used before completion.
+        let output = unsafe { wdf_hid::retrieve_output_memory(request) };
+        if let Err(status) = output {
             // Input.c:228 (also reached from the descriptor IOCTLs, where it is an error too).
             tlg::write_event!(
                 PROVIDER,
@@ -161,23 +153,14 @@ impl FilterIo for Filter<'_> {
                 keyword(KW_INPUT),
                 win_ntstatus("Status", &status)
             );
-            Err(status)
         }
+        output
     }
 
     fn copy_to_memory(&mut self, memory: WDFMEMORY, source: &[u8]) -> NtStatus {
-        // SAFETY: `memory` is the output memory of a live request; `source` is valid for
-        // `source.len()` bytes and only read (the C prototype's PVOID is not written through).
-        // WdfMemoryCopyFromBuffer does its own bounds check (STATUS_BUFFER_TOO_SMALL).
-        let status = unsafe {
-            call_unsafe_wdf_function_binding!(
-                WdfMemoryCopyFromBuffer,
-                memory,
-                0,
-                source.as_ptr().cast::<c_void>().cast_mut(),
-                source.len()
-            )
-        };
+        // SAFETY: the memory belongs to the pending request and is writable. The source is
+        // a descriptor or a locally produced report that cannot overlap it.
+        let status = unsafe { wdf_hid::copy_to_output_memory(memory, source) };
         if !NT_SUCCESS(status) {
             // Input.c:236 (also reached from the descriptor IOCTLs, where it is an error too).
             tlg::write_event!(
@@ -196,20 +179,8 @@ impl FilterIo for Filter<'_> {
         request: WDFREQUEST,
         minimum_length: usize,
     ) -> Result<&mut [u8], NtStatus> {
-        let mut buffer: PVOID = null_mut();
-        // SAFETY: live owned request; `buffer` is a valid out pointer; Length is NULL as in C.
-        let status = unsafe {
-            call_unsafe_wdf_function_binding!(
-                WdfRequestRetrieveOutputBuffer,
-                request,
-                minimum_length,
-                &raw mut buffer,
-                null_mut()
-            )
-        };
-        if !NT_SUCCESS(status) {
-            return Err(status);
-        }
+        // SAFETY: the dispatcher owns this live request and keeps it pending while the output is used.
+        let (buffer, _) = unsafe { wdf_hid::retrieve_output_buffer(request, minimum_length) }?;
         if buffer.is_null() {
             // Defensive (P2): KMDF does not return success with a NULL buffer for a non-zero
             // minimum length; C would write through it.
@@ -218,25 +189,14 @@ impl FilterIo for Filter<'_> {
         // SAFETY: on success WDF guarantees an output buffer of at least `minimum_length` bytes
         // that belongs to the request until it is completed; the slice is used before completion
         // (it borrows `self`) and nothing else references that memory meanwhile.
-        Ok(unsafe { core::slice::from_raw_parts_mut(buffer.cast::<u8>(), minimum_length) })
+        Ok(unsafe { core::slice::from_raw_parts_mut(buffer, minimum_length) })
     }
 
     fn get_feature_packet(&mut self, request: WDFREQUEST) -> Option<XferPacketMut<'_>> {
-        // SAFETY: live owned request of IRP_MJ_INTERNAL_DEVICE_CONTROL; `request_user_buffer` is
-        // `WdfRequestWdmGetIrp(Request)->UserBuffer` (NULL if there is no IRP).
-        let packet = unsafe { request_user_buffer(request) }.cast::<HID_XFER_PACKET>();
-        if packet.is_null() {
-            return None;
-        }
-        // SAFETY: HIDCLASS's `HID_XFER_PACKET` (kernel memory, valid while the request is pending).
-        // Fields are read unaligned so that a misaligned packet cannot be UB.
-        let (report_id, buffer, length) = unsafe {
-            (
-                addr_of!((*packet).reportId).read_unaligned(),
-                addr_of!((*packet).reportBuffer).read_unaligned(),
-                addr_of!((*packet).reportBufferLen).read_unaligned(),
-            )
-        };
+        // SAFETY: the core checks the IOCTL buffer size before requesting the live HIDCLASS packet.
+        let packet = unsafe { wdf_hid::read_xfer_packet(request) }?;
+        let (buffer, length, report_id) =
+            (packet.reportBuffer, packet.reportBufferLen, packet.reportId);
         let report_buffer: &mut [u8] = if buffer.is_null() {
             &mut []
         } else {
@@ -263,19 +223,10 @@ impl FilterIo for Filter<'_> {
     }
 
     fn set_feature_packet(&mut self, request: WDFREQUEST) -> Option<XferPacket<'_>> {
-        // SAFETY: as in `get_feature_packet`.
-        let packet = unsafe { request_user_buffer(request) }.cast::<HID_XFER_PACKET>();
-        if packet.is_null() {
-            return None;
-        }
-        // SAFETY: as in `get_feature_packet`.
-        let (report_id, buffer, length) = unsafe {
-            (
-                addr_of!((*packet).reportId).read_unaligned(),
-                addr_of!((*packet).reportBuffer).read_unaligned(),
-                addr_of!((*packet).reportBufferLen).read_unaligned(),
-            )
-        };
+        // SAFETY: the core checks the IOCTL buffer size before requesting the live HIDCLASS packet.
+        let packet = unsafe { wdf_hid::read_xfer_packet(request) }?;
+        let (buffer, length, report_id) =
+            (packet.reportBuffer, packet.reportBufferLen, packet.reportId);
         let report_buffer: &[u8] = if buffer.is_null() {
             &[]
         } else {

@@ -5,9 +5,7 @@
 
 mod common;
 
-use amtptp_usbkm_core::config::{
-    Bcm5974Config, CONFIG_TABLE, config_for_pid, reader_transfer_length,
-};
+use amtptp_usbkm_core::config::{CONFIG_TABLE, T2Device, config_for_pid, reader_transfer_length};
 use amtptp_usbkm_core::feature::HID_XFER_PACKET_LEN;
 use amtptp_usbkm_core::hid::{
     HID_DESCRIPTOR, HID_DEVICE_ATTRIBUTES_LEN, InternalIoctl, REPORT_DESCRIPTOR,
@@ -24,39 +22,22 @@ use ptp_hid::feature::{
 use ptp_hid::hidport::HID_DESCRIPTOR_LEN;
 use ptp_hid::input::{PTP_CONTACT_LEN, PTP_REPORT_LEN};
 
-fn param(s: &str) -> (i32, i32, i32) {
-    let v: Vec<i32> = s.split(',').map(|x| x.parse().expect("int")).collect();
-    (v[0], v[1], v[2])
-}
-
-fn check_row(r: &Record, row: &Bcm5974Config) {
+fn check_row(r: &Record, row: &T2Device) {
     let id = r.id();
     let int = |k: &str| num(r.req(k)) as i32;
-    assert_eq!(row.identification, int("identification"), "{id}");
-    assert_eq!(row.caps, int("caps"), "{id}");
-    assert_eq!(row.bt_ep, int("bt_ep"), "{id}");
-    assert_eq!(row.bt_datalen, int("bt_datalen"), "{id}");
-    assert_eq!(row.tp_ep, int("tp_ep"), "{id}");
-    assert_eq!(row.tp_type as i32, int("tp_type"), "{id}");
-    assert_eq!(row.tp_header, int("tp_header"), "{id}");
-    assert_eq!(row.tp_datalen, int("tp_datalen"), "{id}");
-    assert_eq!(row.tp_button, int("tp_button"), "{id}");
-    assert_eq!(row.tp_fsize, int("tp_fsize"), "{id}");
-    assert_eq!(row.tp_delta, int("tp_delta"), "{id}");
-    assert_eq!(row.um_size, int("um_size"), "{id}");
-    assert_eq!(row.um_req_val, int("um_req_val"), "{id}");
-    assert_eq!(row.um_req_idx, int("um_req_idx"), "{id}");
-    assert_eq!(row.um_switch_idx, int("um_switch_idx"), "{id}");
-    assert_eq!(row.um_switch_on, int("um_switch_on"), "{id}");
-    assert_eq!(row.um_switch_off, int("um_switch_off"), "{id}");
-    for (p, k) in [
-        (row.p, "p"),
-        (row.w, "w"),
-        (row.x, "x"),
-        (row.y, "y"),
-        (row.o, "o"),
-    ] {
-        assert_eq!((p.snratio, p.min, p.max), param(r.req(k)), "{id} {k}");
+    let format = row.profile.tp_type;
+    let setup = amtptp_usbkm_core::wellspring::wellspring_read_setup(row);
+    assert_eq!(i32::from(row.identification), int("identification"), "{id}");
+    assert_eq!(format as i32, int("tp_type"), "{id}");
+    assert_eq!(format.header(), int("tp_header"), "{id}");
+    assert_eq!(format.button(), int("tp_button"), "{id}");
+    assert_eq!(format.finger_size(), int("tp_fsize"), "{id}");
+    assert_eq!(format.delta(), int("tp_delta"), "{id}");
+    assert_eq!(i32::from(setup.w_value), int("um_req_val"), "{id}");
+    assert_eq!(i32::from(setup.w_index), int("um_req_idx"), "{id}");
+    for (axis, key) in [(row.profile.x, "x"), (row.profile.y, "y")] {
+        let (_, bounds) = r.req(key).split_once(',').expect("axis limits");
+        assert_eq!(bounds, format!("{},{}", axis.min, axis.max), "{id} {key}");
     }
 }
 
@@ -125,7 +106,8 @@ fn descriptors_fixture() {
                 for key in r.keys() {
                     let v = || num(r.req(key)) as usize;
                     match key {
-                        "kind" => {}
+                        // The C configuration layout is internal to the original driver.
+                        "kind" | "BCM5974_CONFIG" => {}
                         "PTP_REPORT" => assert_eq!(v(), PTP_REPORT_LEN),
                         "PTP_CONTACT" => assert_eq!(v(), PTP_CONTACT_LEN),
                         "HID_XFER_PACKET" => assert_eq!(v(), HID_XFER_PACKET_LEN),
@@ -134,7 +116,6 @@ fn descriptors_fixture() {
                         "PTP_DEVICE_SELECTIVE_REPORT_MODE_REPORT" => {
                             assert_eq!(v(), SELECTIVE_REPORT_DEVICE_MODE_STRUCT_LEN);
                         }
-                        "BCM5974_CONFIG" => assert_eq!(v(), size_of::<Bcm5974Config>()),
                         "TRACKPAD_FINGER" => assert_eq!(v(), TRACKPAD_FINGER_LEN),
                         "PTP_DEVICE_CAPS_FEATURE_REPORT" => assert_eq!(v(), DEVICE_CAPS_REPORT_LEN),
                         "PTP_DEVICE_HQA_CERTIFICATION_REPORT" => assert_eq!(v(), HQA_REPORT_LEN),
@@ -157,7 +138,7 @@ fn descriptors_fixture() {
                 assert_eq!(TRANSFER_BUFFER_POOL_TYPE, 512);
                 assert_eq!(
                     num(r.req("reader_transfer_len")) as usize,
-                    reader_transfer_length(CONFIG_TABLE[0].tp_type)
+                    reader_transfer_length(CONFIG_TABLE[0].profile.tp_type)
                 );
                 assert_eq!(
                     hex(r.req("devif_guid_mem")),
@@ -191,9 +172,17 @@ fn descriptors_fixture() {
             "config_select" => {
                 let pid = num(r.req("pid")) as u16;
                 let row = config_for_pid(pid);
-                assert_eq!(row.identification as u64, num(r.req("cfg")), "{id}");
-                assert_eq!(row.x.min, r.req("x_min").parse::<i32>().unwrap(), "{id}");
-                assert_eq!(row.y.max, r.req("y_max").parse::<i32>().unwrap(), "{id}");
+                assert_eq!(u64::from(row.identification), num(r.req("cfg")), "{id}");
+                assert_eq!(
+                    row.profile.x.min,
+                    r.req("x_min").parse::<i32>().unwrap(),
+                    "{id}"
+                );
+                assert_eq!(
+                    row.profile.y.max,
+                    r.req("y_max").parse::<i32>().unwrap(),
+                    "{id}"
+                );
                 tally.add("config_select");
             }
             "ioctl" => tally.add(replay_descriptor_ioctl(r)),

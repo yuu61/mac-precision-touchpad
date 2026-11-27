@@ -6,6 +6,7 @@ version = 4
 name = "amtptp-hidfilter-core"
 version = "0.1.0"
 dependencies = [
+ "bcm5974",
  "ptp-hid",
 ]
 
@@ -20,11 +21,20 @@ dependencies = [
 name = "amtptp-usbkm-core"
 version = "0.1.0"
 dependencies = [
+ "bcm5974",
  "ptp-hid",
 ]
 
 [[package]]
 name = "amtptp-usbum-core"
+version = "0.1.0"
+dependencies = [
+ "bcm5974",
+ "ptp-hid",
+]
+
+[[package]]
+name = "bcm5974"
 version = "0.1.0"
 dependencies = [
  "ptp-hid",

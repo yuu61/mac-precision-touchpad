@@ -7,7 +7,7 @@
 //! records ([`build_report`]).
 
 use ptp_hid::common::{PTP_CONTACT_SLOTS, PTP_MAX_CONTACT_POINTS};
-use ptp_hid::input::{PTP_REPORT_LEN, PtpContact, PtpReport};
+use ptp_hid::input::{PTP_REPORT_LEN, PtpReport};
 
 use crate::device::is_apple_vendor;
 
@@ -15,8 +15,7 @@ use crate::device::is_apple_vendor;
 /// (lookaside list entries, `NonPagedPoolNx`, tag [`crate::config::READ_BUFFER_POOL_TAG`]).
 pub const REPORT_BUFFER_SIZE: usize = 1024;
 
-/// Size of one raw `TRACKPAD_FINGER_TYPE5` record.
-pub const FINGER_RECORD_LEN: usize = 9;
+pub use bcm5974::input::{MT2_FINGER_LEN as FINGER_RECORD_LEN, mt2_contact as parse_finger};
 
 /// The device-context fields the completion routine reads (snapshot them with
 /// [`crate::DeviceState::input_layout`]).
@@ -115,52 +114,6 @@ pub const fn scan_time(now: i64, last: i64) -> u16 {
     } else {
         delta as u16 // (USHORT) truncation of a LONGLONG
     }
-}
-
-/// Parses one 9-byte `TRACKPAD_FINGER_TYPE5` record into a PTP contact (Input.c:202-217).
-///
-/// - X: the low 13 bits of the u16 at bytes 0-1, sign-extended (`(SHORT)(tmp_x << 3) >> 3`).
-/// - Y: `-(INT)(u32 << 6) >> 19`, i.e. `-Y13` when the X bits are zero and `-Y13 - 1` otherwise
-///   (HF-B2); negating `INT_MIN` wraps like MSVC.
-/// - Both minus their `min`, clamped below at 0, never above (HF-B5), then truncated to `USHORT`.
-/// - `ContactID`: low nibble of byte 8. `TipSwitch`: byte 4 != 0. Confidence: byte 5 <= 172 (the C code
-///   tests `TouchMinor` twice, HF-B3).
-#[must_use]
-pub const fn parse_finger(f: &[u8; FINGER_RECORD_LEN], x_min: i32, y_min: i32) -> PtpContact {
-    let [
-        b0,
-        b1,
-        b2,
-        b3,
-        touch_major,
-        touch_minor,
-        _size,
-        _pressure,
-        orientation_origin,
-    ] = *f;
-    let tmp_x = u16::from_le_bytes([b0, b1]) & 0x1FFF;
-    let tmp_y = u32::from_le_bytes([b0, b1, b2, b3]);
-    // tmp_x << 3 <= 0xFFF8; (SHORT) reinterprets, >> on a negative SHORT is arithmetic.
-    let x = (((tmp_x << 3) as i16) >> 3) as i32;
-    // (tmp_y << 6) drops the top 6 bits; (INT) reinterprets; unary minus binds before >>.
-    let y = ((tmp_y << 6) as i32).wrapping_neg() >> 19;
-    let x = clamp_offset(x, x_min);
-    let y = clamp_offset(y, y_min);
-    PtpContact {
-        // ((signed short)TouchMinor << 1) < 345, tested twice.
-        confidence: ((touch_minor as i16 as i32) << 1) < 345,
-        // ((signed short)TouchMajor << 1) > 0.
-        tip_switch: ((touch_major as i16 as i32) << 1) > 0,
-        contact_id: (orientation_origin & 0x0F) as u32,
-        x: x as u16, // (USHORT)x
-        y: y as u16, // (USHORT)y
-    }
-}
-
-/// `(v - min) > 0 ? (v - min) : 0`, with the INT subtraction wrapping like MSVC.
-const fn clamp_offset(v: i32, min: i32) -> i32 {
-    let d = v.wrapping_sub(min);
-    if d > 0 { d } else { 0 }
 }
 
 /// Reads `buffer[base + offset]`, or 0 if that is outside `buffer` (port policy P2). With the 1024-byte

@@ -17,6 +17,7 @@ test = false
 doctest = false
 
 [build-dependencies]
+rc-embed.workspace = true
 wdk-build.workspace = true
 
 [dependencies]

@@ -43,6 +43,8 @@ compile_error!(
 );
 
 pub mod context;
+#[cfg(driver_model__driver_type = "KMDF")]
+pub mod hid;
 pub mod init;
 pub mod ntstatus;
 pub mod request;

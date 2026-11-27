@@ -5,7 +5,7 @@
 //! The handlers that return a status leave the completion to the dispatcher, as in C; the Information
 //! value they set (or not) is what the request completes with.
 
-use core::ptr::{copy_nonoverlapping, null_mut};
+use core::ptr::copy_nonoverlapping;
 
 use amtptp_spikm_core::descriptors::{
     DEVICE_ATTRIBUTES_INFORMATION, device_attributes, hid_descriptor_for, report_descriptor_for,
@@ -13,12 +13,10 @@ use amtptp_spikm_core::descriptors::{
 use amtptp_spikm_core::feature::{SET_FEATURE_READ_LEN, check_xfer_packet, get_feature};
 use ptp_hid::hidport::HID_DEVICE_ATTRIBUTES_LEN;
 use tracelogging as tlg;
-use wdf_support::ntstatus::{NT_SUCCESS, STATUS_SUCCESS};
+use wdf_support::hid as wdf_hid;
+use wdf_support::ntstatus::{NT_SUCCESS, STATUS_INVALID_DEVICE_REQUEST, STATUS_SUCCESS};
 use wdf_support::request::Request;
-use wdf_support::wdm::request_user_buffer;
-use wdk_sys::{
-    HID_XFER_PACKET, NTSTATUS, PVOID, ULONG_PTR, WDFMEMORY, call_unsafe_wdf_function_binding,
-};
+use wdk_sys::{HID_XFER_PACKET, NTSTATUS, ULONG_PTR};
 
 use crate::device::DeviceContext;
 use crate::{PROVIDER, keyword};
@@ -36,19 +34,14 @@ fn copy_descriptor(
     choose: impl FnOnce() -> Result<&'static [u8], NTSTATUS>,
     what: &[u8],
 ) -> NTSTATUS {
-    let mut memory: WDFMEMORY = null_mut();
-    // SAFETY: the dispatcher owns `request`; valid out-parameter.
-    let status = unsafe {
-        call_unsafe_wdf_function_binding!(
-            WdfRequestRetrieveOutputMemory,
-            request.as_raw(),
-            &raw mut memory
-        )
+    // SAFETY: the dispatcher owns the live request for the duration of this handler.
+    let memory = match unsafe { wdf_hid::retrieve_output_memory(request.as_raw()) } {
+        Ok(memory) => memory,
+        Err(status) => {
+            trace_hid_failure(b"WdfRequestRetrieveOutputMemory", what, status);
+            return status;
+        }
     };
-    if !NT_SUCCESS(status) {
-        trace_hid_failure(b"WdfRequestRetrieveOutputMemory", what, status);
-        return status;
-    }
 
     let descriptor = match choose() {
         Ok(descriptor) => descriptor,
@@ -57,18 +50,8 @@ fn copy_descriptor(
             return status;
         }
     };
-    // SAFETY: `memory` is the request's output memory; the source is a
-    // 'static descriptor of `descriptor.len()` bytes that WDF only reads (the
-    // parameter is a non-const PVOID in the C prototype).
-    let status = unsafe {
-        call_unsafe_wdf_function_binding!(
-            WdfMemoryCopyFromBuffer,
-            memory,
-            0,
-            descriptor.as_ptr().cast_mut().cast(),
-            descriptor.len()
-        )
-    };
+    // SAFETY: WDF returned the pending request's writable output memory. It cannot overlap the descriptor.
+    let status = unsafe { wdf_hid::copy_to_output_memory(memory, descriptor) };
     if !NT_SUCCESS(status) {
         trace_hid_failure(b"WdfMemoryCopyFromBuffer", what, status);
         return status;
@@ -119,29 +102,23 @@ pub(crate) fn get_report_descriptor(context: &DeviceContext, request: &Request) 
 /// bytes: `Size` = 32, `VendorID` = 0x8910 (deliberately fake), `ProductID` and `VersionNumber` of the real
 /// device. `Reserved` is left untouched, as in C. Information 32.
 pub(crate) fn get_device_attribs(context: &DeviceContext, request: &Request) -> NTSTATUS {
-    let mut buffer: PVOID = null_mut();
-    // SAFETY: the dispatcher owns `request`; valid out-parameter; the length
-    // out-parameter is optional (NULL, as in C).
-    let status = unsafe {
-        call_unsafe_wdf_function_binding!(
-            WdfRequestRetrieveOutputBuffer,
-            request.as_raw(),
-            HID_DEVICE_ATTRIBUTES_LEN,
-            &raw mut buffer,
-            null_mut()
-        )
+    // SAFETY: the dispatcher owns this request until the handler returns.
+    let (buffer, _) = match unsafe {
+        wdf_hid::retrieve_output_buffer(request.as_raw(), HID_DEVICE_ATTRIBUTES_LEN)
+    } {
+        Ok(output) => output,
+        Err(status) => {
+            trace_hid_failure(
+                b"WdfRequestRetrieveOutputBuffer",
+                b"GetDeviceAttribs",
+                status,
+            );
+            return status;
+        }
     };
-    if !NT_SUCCESS(status) {
-        trace_hid_failure(
-            b"WdfRequestRetrieveOutputBuffer",
-            b"GetDeviceAttribs",
-            status,
-        );
-        return status;
-    }
     if buffer.is_null() {
         // Unreachable: a successful retrieval returns a buffer of at least 32 bytes.
-        return wdf_support::ntstatus::STATUS_INVALID_DEVICE_REQUEST;
+        return STATUS_INVALID_DEVICE_REQUEST;
     }
 
     let header = device_attributes(&context.config.load()).header_bytes();
@@ -149,7 +126,7 @@ pub(crate) fn get_device_attribs(context: &DeviceContext, request: &Request) -> 
     // HID_DEVICE_ATTRIBUTES_LEN (32) bytes, more than the 10 copied; the
     // caller's buffer cannot overlap the local array. No reference to the
     // caller's memory is created.
-    unsafe { copy_nonoverlapping(header.as_ptr(), buffer.cast::<u8>(), header.len()) };
+    unsafe { copy_nonoverlapping(header.as_ptr(), buffer, header.len()) };
     // Lossless: 32.
     request.set_information(DEVICE_ATTRIBUTES_INFORMATION as ULONG_PTR);
     STATUS_SUCCESS
@@ -190,13 +167,9 @@ fn read_xfer_packet(request: &Request, get: bool) -> Result<HID_XFER_PACKET, NTS
             parameters.Parameters.DeviceIoControl.InputBufferLength
         }
     };
-    // SAFETY: the dispatcher owns the request, so its IRP is alive.
-    let packet = unsafe { request_user_buffer(request.as_raw()) }.cast::<HID_XFER_PACKET>();
-    check_xfer_packet(ioctl_buffer_length, !packet.is_null())?;
-    // SAFETY: non-null `HID_XFER_PACKET*` from hidclass, of at least 16 bytes
-    // per the checked IOCTL buffer length; copied out by value (unaligned read,
-    // no reference into the caller's memory).
-    Ok(unsafe { packet.read_unaligned() })
+    check_xfer_packet(ioctl_buffer_length, true)?;
+    // SAFETY: the dispatcher owns this HIDCLASS request and the packet length has been validated.
+    unsafe { wdf_hid::read_xfer_packet(request.as_raw()) }.ok_or(STATUS_INVALID_DEVICE_REQUEST)
 }
 
 /// `AmtPtpReportFeatures` (Hid.c:581-725), `IOCTL_HID_GET_FEATURE`.

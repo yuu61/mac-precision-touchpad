@@ -11,7 +11,7 @@
 
 use core::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicU16, AtomicU32, Ordering};
 
-use crate::config::{Bcm5974Config, config_row};
+use crate::config::{WellspringDevice, config_row};
 
 const RELAXED: Ordering = Ordering::Relaxed;
 
@@ -150,7 +150,7 @@ impl DeviceState {
     // --- config row (DeviceInfo) -------------------------------------------------------------------
 
     /// `DeviceInfo`: the config-table row selected by the last `PrepareHardware`, or `None` (C: `NULL`).
-    pub fn config(&self) -> Option<&'static Bcm5974Config> {
+    pub fn config(&self) -> Option<&'static WellspringDevice> {
         config_row(self.config_row.load(RELAXED))
     }
 

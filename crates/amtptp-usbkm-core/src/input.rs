@@ -20,24 +20,16 @@
 //! read (B8), Tip = `major*2 >= 200 || minor*2 >= 150`, Confidence = `minor*2 > 0`, and `ScanTime` is
 //! [`scan_time_as_c`] (always 0 in the real driver, B1).
 
+use bcm5974::input::wellspring_contact;
 use ptp_hid::common::PTP_CONTACT_SLOTS;
-use ptp_hid::input::{PTP_REPORT_LEN, PtpContact, PtpReport};
+use ptp_hid::input::{PTP_REPORT_LEN, PtpReport};
 
-use crate::config::Bcm5974Config;
+use crate::config::T2Device;
 use crate::output::OutputMemory;
 use crate::state::{DeviceState, InputGates};
 use crate::status::{Completion, NtStatus, STATUS_DATA_ERROR, nt_success};
 
-/// `sizeof(struct TRACKPAD_FINGER)`: 14 little-endian `USHORT`s.
-pub const TRACKPAD_FINGER_LEN: usize = 28;
-/// Offset of `abs_x` in `TRACKPAD_FINGER`.
-pub const FINGER_ABS_X: usize = 2;
-/// Offset of `abs_y` in `TRACKPAD_FINGER`.
-pub const FINGER_ABS_Y: usize = 4;
-/// Offset of `touch_major` in `TRACKPAD_FINGER`.
-pub const FINGER_TOUCH_MAJOR: usize = 16;
-/// Offset of `touch_minor` in `TRACKPAD_FINGER`.
-pub const FINGER_TOUCH_MINOR: usize = 18;
+pub use bcm5974::input::TRACKPAD_FINGER_LEN;
 
 /// `ScanTime` exactly as the C computes it (Interrupt.c:177-183):
 ///
@@ -84,33 +76,19 @@ pub enum PacketAction {
     Deliver(ReadReportResult),
 }
 
-/// `(size_t)(unsigned int)int`: how the C widens `tp_header` / `tp_fsize`.
-const fn size_t_from_int(value: i32) -> usize {
-    value as u32 as usize
-}
-
-/// Little-endian `USHORT` at `offset` reinterpreted as `(int)(signed short)` (`AmtRawToInteger`).
-/// Offsets outside the packet read as 0; they cannot occur for a packet that passed the length gate.
-fn raw_i16(packet: &[u8], offset: usize) -> i32 {
-    let end = offset.wrapping_add(2);
-    match packet.get(offset..end) {
-        Some(&[lo, hi]) => i32::from(i16::from_le_bytes([lo, hi])),
-        _ => 0,
-    }
-}
-
 /// Builds the report from a raw packet (`packet.len()` = `NumBytesTransferred`), with the given config
 /// row, gates and `ScanTime`. Pure; see the module docs for the arithmetic.
 #[must_use]
 pub fn parse_packet(
-    cfg: &Bcm5974Config,
+    cfg: &T2Device,
     packet: &[u8],
     gates: InputGates,
     scan_time: u16,
 ) -> PacketAction {
     let n = packet.len();
-    let header = size_t_from_int(cfg.tp_header);
-    let fsize = size_t_from_int(cfg.tp_fsize);
+    let format = cfg.profile.tp_type;
+    let header = format.header() as usize;
+    let fsize = format.finger_size() as usize;
 
     // Length gate. A zero fsize (no table row) would be a division by zero in C; treat it as malformed.
     let Some(payload) = n.checked_sub(header) else {
@@ -135,36 +113,17 @@ pub fn parse_packet(
         report.contact_count = raw_n as u8; // (UCHAR) raw_n, raw_n <= 5
 
         // f_base = TouchBuffer + header + tp_delta (int added to a pointer: sign-extended).
-        let f_base = header.wrapping_add(cfg.tp_delta as isize as usize);
+        let f_base = header.wrapping_add(format.delta() as usize);
         for (i, contact) in report.contacts.iter_mut().enumerate().take(raw_n) {
             let f = f_base.wrapping_add(i.wrapping_mul(fsize));
-            let abs_x = raw_i16(packet, f.wrapping_add(FINGER_ABS_X));
-            let abs_y = raw_i16(packet, f.wrapping_add(FINGER_ABS_Y));
-            let touch_major = raw_i16(packet, f.wrapping_add(FINGER_TOUCH_MAJOR));
-            let touch_minor = raw_i16(packet, f.wrapping_add(FINGER_TOUCH_MINOR));
-
-            // int arithmetic; wrapping mirrors MSVC (cannot overflow for table values).
-            let dx = abs_x.wrapping_sub(cfg.x.min);
-            let dy = cfg.y.max.wrapping_sub(abs_y);
-            *contact = PtpContact {
-                // `x << 1` on a negative int is UB in C; MSVC (and clang) give `x * 2`.
-                tip_switch: touch_major.wrapping_mul(2) >= 200
-                    || touch_minor.wrapping_mul(2) >= 150,
-                confidence: touch_minor.wrapping_mul(2) > 0,
-                contact_id: u32::from(i as u8), // (UCHAR) i, i < 5
-                x: if dx > 0 { dx as u16 } else { 0 }, // (USHORT) after the > 0 check
-                y: if dy > 0 { dy as u16 } else { 0 },
-            };
+            let finger = packet.get(f..).unwrap_or_default();
+            *contact = wellspring_contact(&cfg.profile, finger, i, Some(150));
         }
     }
 
     if gates.report_button {
         // TouchBuffer[tp_button] (int index, sign-extended); byte 31 < header <= N.
-        let button = usize::try_from(cfg.tp_button)
-            .ok()
-            .and_then(|i| packet.get(i))
-            .copied()
-            .unwrap_or(0);
+        let button = packet.get(format.button() as usize).copied().unwrap_or(0);
         if button != 0 {
             report.is_button_clicked = 1;
         }

@@ -556,6 +556,40 @@ mod tests {
         }
     }
 
+    #[test]
+    fn universal_models_have_unique_supported_hardware_ids() {
+        let text = fs::read_to_string(InfKind::Universal.inx()).unwrap();
+        for (build, usb_section) in [
+            ("16299", "amtptpdeviceusbkm_device"),
+            ("17134", "amtptpdeviceusbum_install"),
+        ] {
+            let heading = format!("[Standard.NT$ARCH$.10.0...{build}]");
+            let models = text
+                .lines()
+                .skip_while(|line| *line != heading)
+                .skip(1)
+                .take_while(|line| !line.starts_with('['));
+            let mut bindings = std::collections::BTreeMap::new();
+            for line in models {
+                let line = line.split(';').next().unwrap().trim();
+                if line.is_empty() {
+                    continue;
+                }
+                let (_, entry) = line.split_once('=').unwrap();
+                let (install, id) = entry.split_once(',').unwrap();
+                let id = id.trim().to_ascii_lowercase();
+                let duplicate = bindings.insert(id.clone(), install.trim().to_ascii_lowercase());
+                assert!(duplicate.is_none(), "{heading}: duplicate binding for {id}");
+            }
+            for pid in ["0273", "0274", "0290", "0291"] {
+                let id = format!("usb\\vid_05ac&pid_{pid}&mi_02");
+                assert_eq!(bindings.get(&id).map(String::as_str), Some(usb_section));
+            }
+            assert!(!bindings.contains_key("spi\\vid_05ac&pid_0280&mi_02"));
+            assert!(bindings.contains_key("usb\\vid_05ac&pid_0280&mi_02"));
+        }
+    }
+
     /// Minimal PE32+ header: `e_lfanew` = 0x40, optional header at 0x58.
     fn pe32plus(dll_characteristics: u16, checksum: u32) -> Vec<u8> {
         let mut img = vec![0_u8; 0x100];

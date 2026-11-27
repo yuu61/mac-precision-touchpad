@@ -4,12 +4,12 @@ use core::ptr::null_mut;
 
 use amtptp_spikm_core::ioctl::{InternalIoctl, NOT_SUPPORTED_STATUS, classify_internal_ioctl};
 use tracelogging as tlg;
-use wdf_support::init::{io_queue_config_init, io_queue_config_init_default_queue};
+use wdf_support::hid as wdf_hid;
 use wdf_support::ntstatus::{NT_SUCCESS, STATUS_INVALID_DEVICE_STATE};
 use wdf_support::request::Request;
 use wdk_sys::{
-    _WDF_IO_QUEUE_DISPATCH_TYPE, _WDF_TRI_STATE, NTSTATUS, ULONG, WDF_NO_OBJECT_ATTRIBUTES,
-    WDFDEVICE, WDFQUEUE, WDFREQUEST, call_unsafe_wdf_function_binding,
+    NTSTATUS, ULONG, WDF_NO_OBJECT_ATTRIBUTES, WDFDEVICE, WDFQUEUE, WDFREQUEST,
+    call_unsafe_wdf_function_binding,
 };
 
 use crate::device::device_context;
@@ -35,18 +35,16 @@ pub(crate) unsafe fn queue_initialize(device: WDFDEVICE, hid_queue: *mut WDFQUEU
     wdk::paged_code!();
 
     let mut queue_config =
-        io_queue_config_init_default_queue(_WDF_IO_QUEUE_DISPATCH_TYPE::WdfIoQueueDispatchParallel);
-    queue_config.EvtIoInternalDeviceControl = Some(evt_io_internal_device_control);
+        wdf_hid::default_queue_config(Some(evt_io_internal_device_control), None);
     let mut queue: WDFQUEUE = null_mut();
     // SAFETY: valid device in AddDevice; initialized config; no attributes;
     // valid out-parameter (the handle is not kept, as in C).
     let status = unsafe {
-        call_unsafe_wdf_function_binding!(
-            WdfIoQueueCreate,
+        wdf_hid::create_queue(
             device,
-            &raw mut queue_config,
+            &mut queue_config,
             WDF_NO_OBJECT_ATTRIBUTES,
-            &raw mut queue
+            &raw mut queue,
         )
     };
     if !NT_SUCCESS(status) {
@@ -54,17 +52,14 @@ pub(crate) unsafe fn queue_initialize(device: WDFDEVICE, hid_queue: *mut WDFQUEU
         return status;
     }
 
-    let mut queue_config =
-        io_queue_config_init(_WDF_IO_QUEUE_DISPATCH_TYPE::WdfIoQueueDispatchManual);
-    queue_config.PowerManaged = _WDF_TRI_STATE::WdfFalse;
+    let mut queue_config = wdf_hid::read_queue_config();
     // SAFETY: as above; `hid_queue` is a writable out-parameter (caller contract).
     let status = unsafe {
-        call_unsafe_wdf_function_binding!(
-            WdfIoQueueCreate,
+        wdf_hid::create_queue(
             device,
-            &raw mut queue_config,
+            &mut queue_config,
             WDF_NO_OBJECT_ATTRIBUTES,
-            hid_queue
+            hid_queue,
         )
     };
     if !NT_SUCCESS(status) {
