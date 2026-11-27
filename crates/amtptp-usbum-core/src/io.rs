@@ -115,6 +115,29 @@ pub enum PipeType {
     Interrupt,
 }
 
+/// The fields of `WDF_USB_PIPE_INFORMATION` the pipe selection reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct PipeInfo {
+    /// `PipeType`.
+    pub pipe_type: PipeType,
+    /// `EndpointAddress`: bit 7 set for an IN (device-to-host) endpoint.
+    pub endpoint_address: u8,
+}
+
+impl PipeInfo {
+    /// A pipe that could not be retrieved.
+    pub const INVALID: Self = Self {
+        pipe_type: PipeType::Invalid,
+        endpoint_address: 0,
+    };
+
+    /// An interrupt IN pipe, the only kind a continuous reader can read from.
+    #[must_use]
+    pub const fn is_interrupt_in(self) -> bool {
+        matches!(self.pipe_type, PipeType::Interrupt) && self.endpoint_address & 0x80 != 0
+    }
+}
+
 /// The WDF USB objects `PrepareHardware` works with (WDFUSBDEVICE, interface 0, its pipes, the
 /// continuous reader).
 pub trait UsbTargetSetup {
@@ -139,14 +162,12 @@ pub trait UsbTargetSetup {
     fn interface0_configured_pipes(&mut self) -> Option<u8>;
 
     /// `WdfUsbInterfaceGetConfiguredPipe(UsbInterface, index, &pipeInfo)` followed by
-    /// `WdfUsbTargetPipeSetNoMaximumPacketSizeCheck(pipe)`; returns `pipeInfo.PipeType`.
-    fn visit_configured_pipe(&mut self, index: u8) -> PipeType;
+    /// `WdfUsbTargetPipeSetNoMaximumPacketSizeCheck(pipe)`; returns `pipeInfo.PipeType` and
+    /// `pipeInfo.EndpointAddress` ([`PipeInfo::INVALID`] if the pipe could not be retrieved).
+    fn visit_configured_pipe(&mut self, index: u8) -> PipeInfo;
 
     /// `ctx.InterruptPipe = pipe` for the pipe last visited at `index`.
     fn select_interrupt_pipe(&mut self, index: u8);
-
-    /// `ctx.InterruptPipe != NULL`. Note that the C handle survives a PnP stop/start.
-    fn has_interrupt_pipe(&self) -> bool;
 
     /// `WDF_USB_CONTINUOUS_READER_CONFIG_INIT(&cfg, EvtUsbInterruptPipeReadComplete, ctx,
     /// transfer_length)`, `cfg.EvtUsbTargetPipeReadersFailed = EvtUsbInterruptReadersFailed` (returns

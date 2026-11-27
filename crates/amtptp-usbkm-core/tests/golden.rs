@@ -165,6 +165,86 @@ fn golden_d_bad_length_dropped() {
     );
 }
 
+/// `SET_FEATURE` 0x06 `[06, bits]` for each combination, then the two-finger frame with the button byte
+/// set: the surface switch decides the contacts, the button switch the button; `PrepareHardware`
+/// restores both.
+#[test]
+fn selective_reporting_shapes_the_input_report() {
+    let state = DeviceState::new();
+    state.on_device_create();
+    let mut hw = FakeHw::new(0x027c);
+    assert_eq!(lifecycle::prepare_hardware(&state, &mut hw), 0);
+    let mut packet = two_finger_packet();
+    packet[31] = 0x01;
+    for (bits, contacts, button) in [(0_u8, 0_u8, 0_u8), (1, 2, 0), (2, 0, 1), (3, 2, 1)] {
+        let switches = [0x06, bits];
+        let c = set_feature(
+            16,
+            || {
+                Some(SetFeaturePacket {
+                    report_id: 0x06,
+                    report_buffer: &switches,
+                })
+            },
+            &state,
+            &mut hw,
+        );
+        assert_eq!(c, Completion::status(0));
+        let r = report(process_packet(&state, &packet, 0));
+        assert_eq!((r[48], r[49]), (contacts, button), "switch byte {bits}");
+        if contacts == 0 {
+            assert!(r[1..46].iter().all(|&b| b == 0), "no contact data");
+        }
+    }
+    let _logs = hw.take_logs();
+    assert_eq!(lifecycle::prepare_hardware(&state, &mut hw), 0);
+    assert_eq!(state.input_gates(), InputGates::ON);
+}
+
+/// Windows turns both selective-reporting switches off, then the device is suspended and resumed:
+/// `D0Entry` still switches Wellspring mode on (C gated it on `PtpReportButton`), so turning the switches
+/// back on brings the contacts back.
+#[test]
+fn d0_entry_switches_the_mode_after_selective_reporting_off() {
+    let state = DeviceState::new();
+    state.on_device_create();
+    let mut hw = FakeHw::new(0x027c);
+    assert_eq!(lifecycle::prepare_hardware(&state, &mut hw), 0);
+    let set_switches = |hw: &mut FakeHw, bits: u8| {
+        let switches = [0x06, bits];
+        set_feature(
+            16,
+            || {
+                Some(SetFeaturePacket {
+                    report_id: 0x06,
+                    report_buffer: &switches,
+                })
+            },
+            &state,
+            hw,
+        )
+    };
+    assert_eq!(set_switches(&mut hw, 0x00), Completion::status(0));
+    assert_eq!(
+        state.input_gates(),
+        InputGates {
+            report_touch: false,
+            report_button: false,
+        }
+    );
+    assert_eq!(lifecycle::d0_exit(&state, &mut hw), 0);
+    assert!(!state.wellspring_mode_on());
+    let _before = hw.take_logs();
+    assert_eq!(lifecycle::d0_entry(&state, &mut hw), 0);
+    assert!(state.wellspring_mode_on());
+    let (_, wire) = hw.take_logs();
+    assert!(wire.contains("out:2109020302000400:02010000"), "mode switch sent: {wire}");
+
+    assert_eq!(set_switches(&mut hw, 0x03), Completion::status(0));
+    let r = report(process_packet(&state, &two_finger_packet(), 0));
+    assert_eq!(r[48], 2, "contacts reported again");
+}
+
 #[test]
 fn input_scan_time_restarts_on_d0_entry() {
     let state = DeviceState::new();
@@ -277,14 +357,37 @@ fn feature_reports_5_5_and_5_6() {
         assert_eq!(c, Completion::status(expect), "mode {mode}");
         assert_eq!(hw.take_logs().1, "-");
     }
-    // SET 0x06: success, gates unchanged.
-    let report = [0x06, 0x00];
+    // SET 0x06 [06, bits]: bit 0 Surface Switch -> report_touch, bit 1 Button Switch -> report_button.
+    for bits in [0_u8, 1, 2, 3] {
+        let report = [0x06, bits];
+        let c = set_feature(
+            16,
+            || {
+                Some(SetFeaturePacket {
+                    report_id: 0x06,
+                    report_buffer: &report,
+                })
+            },
+            &state,
+            &mut hw,
+        );
+        assert_eq!(c, Completion::status(0));
+        assert_eq!(
+            state.input_gates(),
+            InputGates {
+                report_touch: bits & 1 != 0,
+                report_button: bits & 2 != 0,
+            },
+            "switch byte {bits}"
+        );
+    }
+    // A report without byte 1 changes nothing.
     let c = set_feature(
         16,
         || {
             Some(SetFeaturePacket {
                 report_id: 0x06,
-                report_buffer: &report,
+                report_buffer: &[0x06],
             })
         },
         &state,

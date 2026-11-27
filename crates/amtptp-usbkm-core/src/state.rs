@@ -43,14 +43,15 @@ pub struct UsbDeviceIds {
 
 /// `PtpReportTouch` / `PtpReportButton`: gates of contact and button parsing in the reader completion.
 ///
-/// Both are TRUE in every reachable state: they are set at device creation and at the end of every
-/// successful `PrepareHardware`, and nothing ever clears them (selective reporting is ignored, spec B15).
+/// Both are set at device creation and at the end of every successful `PrepareHardware` (the power-on
+/// state of selective reporting), and `SET_FEATURE` 0x06 sets them from the Surface and Button Switches
+/// (P3 fix of spec B15: C never changed them).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InputGates {
     /// `PtpReportTouch`: parse contacts (and apply the more-than-5-fingers `DATA_ERROR` check).
     pub report_touch: bool,
-    /// `PtpReportButton`: report the button byte. Also the (always true) condition of the `D0Entry` mode
-    /// switch.
+    /// `PtpReportButton`: report the button byte. (C also gated the `D0Entry` mode switch on it; the port
+    /// switches the mode unconditionally.)
     pub report_button: bool,
 }
 
@@ -174,10 +175,16 @@ impl DeviceState {
         self.set_input_gates_on();
     }
 
-    /// Sets both input gates (`CreateDevice` and the end of `PrepareHardware`).
+    /// Sets both input gates (`CreateDevice` and the end of `PrepareHardware`): selective reporting's
+    /// power-on state.
     pub(crate) fn set_input_gates_on(&self) {
-        self.report_button.store(true, RELAXED);
-        self.report_touch.store(true, RELAXED);
+        self.set_selective_reporting(ptp_hid::feature::SelectiveReportBits::POWER_ON);
+    }
+
+    /// `SET_FEATURE` 0x06: `PtpReportTouch` = Surface Switch, `PtpReportButton` = Button Switch.
+    pub(crate) fn set_selective_reporting(&self, bits: ptp_hid::feature::SelectiveReportBits) {
+        self.report_button.store(bits.button_report, RELAXED);
+        self.report_touch.store(bits.surface_report, RELAXED);
     }
 
     /// Whether `WdfUsbTargetDeviceCreate` has succeeded (`UsbDevice != NULL`).

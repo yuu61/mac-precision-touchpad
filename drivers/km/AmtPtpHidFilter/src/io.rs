@@ -287,6 +287,20 @@ impl FilterIo for Filter<'_> {
         }
     }
 
+    fn parked_read_count(&mut self) -> usize {
+        let mut queued: ULONG = 0;
+        // SAFETY: HidReadQueue is a live manual queue of this device; DriverRequests is optional (NULL).
+        let _state = unsafe {
+            call_unsafe_wdf_function_binding!(
+                WdfIoQueueGetState,
+                self.ctx.hid_read_queue(),
+                &raw mut queued,
+                null_mut()
+            )
+        };
+        queued as usize
+    }
+
     fn format_using_current_type(&mut self, request: WDFREQUEST) {
         // SAFETY: live owned request.
         unsafe {

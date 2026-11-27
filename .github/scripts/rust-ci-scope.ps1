@@ -170,12 +170,14 @@ else {
         }
         if ($path -like 'crates/ptp-hid/*') {
             Add-All $hostSet $CoreHostPackages
+            # xtask's INF test reads the core crates' model tables (dev-dependencies).
+            [void]$hostSet.Add('xtask')
             Add-All $kmSet $AllKmPackages
             Add-All $umSet $AllUmPackages
             continue
         }
         if ($path -like 'crates/bcm5974/*') {
-            Add-All $hostSet @('bcm5974', 'amtptp-usbum-core', 'amtptp-usbkm-core', 'amtptp-hidfilter-core')
+            Add-All $hostSet @('bcm5974', 'amtptp-usbum-core', 'amtptp-usbkm-core', 'amtptp-hidfilter-core', 'xtask')
             Add-All $kmSet @('amtptp-device-usb-km', 'amtptp-hid-filter')
             Add-All $umSet $AllUmPackages
             continue
@@ -186,6 +188,7 @@ else {
         }
         if ($path -like 'crates/amtptp-usbum-core/*') {
             [void]$hostSet.Add('amtptp-usbum-core')
+            [void]$hostSet.Add('xtask')
             [void]$umSet.Add('amtptp-device-usb-um')
             continue
         }
@@ -195,6 +198,7 @@ else {
         }
         if ($path -like 'crates/amtptp-usbkm-core/*') {
             [void]$hostSet.Add('amtptp-usbkm-core')
+            [void]$hostSet.Add('xtask')
             [void]$kmSet.Add('amtptp-device-usb-km')
             continue
         }
@@ -204,6 +208,7 @@ else {
         }
         if ($path -like 'crates/amtptp-spikm-core/*') {
             [void]$hostSet.Add('amtptp-spikm-core')
+            [void]$hostSet.Add('xtask')
             [void]$kmSet.Add('amtptp-device-spi-km')
             continue
         }
@@ -213,6 +218,7 @@ else {
         }
         if ($path -like 'crates/amtptp-hidfilter-core/*') {
             [void]$hostSet.Add('amtptp-hidfilter-core')
+            [void]$hostSet.Add('xtask')
             [void]$kmSet.Add('amtptp-hid-filter')
             continue
         }
@@ -223,7 +229,7 @@ else {
             continue
         }
 
-        # xtask and INF templates checked by xtask's binaries_match_inx_source_disks_files test.
+        # xtask and the INF templates its tests check (SourceDisksFiles, model bindings).
         if ($path -like 'tools/xtask/*' -or $path -like 'packaging/*.inx') {
             [void]$hostSet.Add('xtask')
             continue

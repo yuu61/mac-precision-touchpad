@@ -3,8 +3,12 @@
 //! GET: [`check_xfer_packet`] then [`get_feature`]; the reply's bytes are written to the start of the
 //! report buffer as allocated (`rbuf`) and diffed against it (`chg`). SET: the flags `pio/prb/prt` are
 //! first brought to `*_in` with SET requests, then the request runs through [`DeviceRuntime::set_feature`]
-//! with the first `min(blen, 3)` bytes of `rbuf`. No record has a `wdf` failure: every status here comes
+//! with the first `min(blen, 2)` bytes of `rbuf`. No record has a `wdf` failure: every status here comes
 //! from driver code.
+//!
+//! SET 0x06 is fixed (P3, SPI-B2/B3): the switches come from byte 1 (C read byte 2), bit 0 is the Surface
+//! Switch (`prt`) and bit 1 the Button Switch (`prb`), and a report without byte 1 changes nothing. Those
+//! records are checked against that rule instead of the C flags.
 
 #![cfg(test)]
 
@@ -12,17 +16,16 @@ mod common;
 
 use amtptp_spikm_core::feature::{SET_FEATURE_READ_LEN, check_xfer_packet, get_feature};
 use amtptp_spikm_core::runtime::DeviceRuntime;
-use amtptp_spikm_core::status::STATUS_SUCCESS;
+use amtptp_spikm_core::status::{STATUS_INVALID_DEVICE_REQUEST, STATUS_SUCCESS};
 use common::{Record, Tally, chg, load};
-use ptp_hid::common::REPORTID_PTPHQA;
-use ptp_hid::feature::{HQA_REPORT, HQA_REPORT_LEN};
+use ptp_hid::common::{REPORTID_FUNCSWITCH, REPORTID_PTPHQA};
+use ptp_hid::feature::{HQA_REPORT, HQA_REPORT_LEN, SelectiveReportBits};
 
 const GET_OK: &str = "GET: bytes written, success";
 const GET_ERR: &str = "GET: driver error status";
 const SET_OK: &str = "SET: success";
 const SET_ERR: &str = "SET: driver error status";
-const SET_OOB: &str =
-    "SET 0x06 with reportBufferLen 2 (oob=1): byte 2 past the report reads as 0 (P2, SPI-B2)";
+const SET_SELECTIVE: &str = "P3: SET 0x06 decoded from byte 1 (Surface bit 0, Button bit 1)";
 
 /// Brings the write-only flags to the record's `*_in` state through the public SET path.
 fn preset(rt: &DeviceRuntime, r: &Record) {
@@ -31,8 +34,8 @@ fn preset(rt: &DeviceRuntime, r: &Record) {
     let prt = r.get("prt_in") == "1";
     let mode = if pio { 3_u8 } else { 0 };
     assert_eq!(rt.set_feature(4, 2, Some(&[4, mode])), STATUS_SUCCESS);
-    let bits = u8::from(prb) | (u8::from(prt) << 1);
-    assert_eq!(rt.set_feature(6, 3, Some(&[6, 0, bits])), STATUS_SUCCESS);
+    let bits = u8::from(prt) | (u8::from(prb) << 1);
+    assert_eq!(rt.set_feature(6, 2, Some(&[6, bits])), STATUS_SUCCESS);
     let s = rt.ptp_settings();
     assert_eq!(
         (s.input_on(), s.report_button(), s.report_touch()),
@@ -100,21 +103,37 @@ fn feature_reports() {
                 let status = if let Err(s) = check_xfer_packet(inlen, user_buffer) {
                     s
                 } else {
-                    // The glue passes min(reportBufferLen, 3) bytes (None for a NULL buffer).
+                    // The glue passes min(reportBufferLen, 2) bytes (None for a NULL buffer).
                     let take = (blen as usize).min(SET_FEATURE_READ_LEN).min(rbuf.len());
                     let report = rb_present.then(|| &rbuf[..take]);
                     rt.set_feature(report_id, blen, report)
                 };
-                if r.opt("oob") == Some("1") {
-                    assert_eq!((report_id, blen, rbuf.len()), (6, 2, 3), "{ctx}");
-                    tally.add(SET_OOB);
-                } else {
-                    tally.add(if status == STATUS_SUCCESS {
-                        SET_OK
+                if report_id == REPORTID_FUNCSWITCH && check_xfer_packet(inlen, user_buffer).is_ok()
+                {
+                    // P3: byte 1 decides; no byte 1 -> no change; byte 1 behind a NULL buffer -> error.
+                    let expected = if blen < 2 || rb_present {
+                        STATUS_SUCCESS
                     } else {
-                        SET_ERR
-                    });
+                        STATUS_INVALID_DEVICE_REQUEST
+                    };
+                    assert_eq!(status, expected, "{ctx}: status");
+                    let (pio, _, _) = before;
+                    let flags_after = if status == STATUS_SUCCESS && blen >= 2 {
+                        let bits = SelectiveReportBits::from_byte(rbuf[1]);
+                        (pio, bits.button_report, bits.surface_report)
+                    } else {
+                        before
+                    };
+                    assert_eq!(flags(&rt), flags_after, "{ctx}: flags");
+                    assert_eq!(chg(&rbuf, &after), r.get("chg"), "{ctx}: chg");
+                    tally.add(SET_SELECTIVE);
+                    continue;
                 }
+                tally.add(if status == STATUS_SUCCESS {
+                    SET_OK
+                } else {
+                    SET_ERR
+                });
                 status
             }
             other => panic!("{ctx}: op {other}"),
@@ -135,10 +154,10 @@ fn feature_reports() {
         assert_eq!(flags(&rt), expect_flags, "{ctx}: flags (before {before:?})");
     }
     assert_eq!((gets, sets), (278, 294));
-    assert_eq!(tally.get(SET_OOB), 2);
+    assert_eq!(tally.get(SET_SELECTIVE), 13);
     assert_eq!(tally.get(GET_OK), 12);
     assert_eq!(tally.get(GET_ERR), 266);
-    assert_eq!(tally.get(SET_OK), 32);
+    assert_eq!(tally.get(SET_OK), 21);
     assert_eq!(tally.get(SET_ERR), 260);
     assert_eq!(tally.total(), 572);
 }

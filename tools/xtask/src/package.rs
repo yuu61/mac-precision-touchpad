@@ -590,6 +590,134 @@ mod tests {
         }
     }
 
+    /// `(VID, PID)` of a hardware ID: `USB\Vid_05ac&Pid_0273&MI_02`, `SPI\VID_05ac&PID_0272&MI_02`,
+    /// `HID\VID_05AC&PID_0265&...` or the Bluetooth form `HID\{...}_VID&0001004c_PID&0265&Col01`, whose
+    /// 8-digit VID carries the vendor-ID source in its upper half.
+    fn vid_pid(id: &str) -> (u16, u16) {
+        let id = id.to_ascii_lowercase();
+        let field = |key: &str| {
+            let (_, rest) = id.split_once(key).unwrap_or_else(|| panic!("{key} in {id}"));
+            let digits: String = rest.chars().take_while(char::is_ascii_hexdigit).collect();
+            let value = u32::from_str_radix(&digits, 16).unwrap_or_else(|e| panic!("{id}: {e}"));
+            u16::try_from(value & 0xFFFF).unwrap()
+        };
+        let vid = if id.contains("vid&") {
+            field("vid&")
+        } else {
+            field("vid_")
+        };
+        let pid = if id.contains("pid&") {
+            field("pid&")
+        } else {
+            field("pid_")
+        };
+        (vid, pid)
+    }
+
+    /// Every `(install section, hardware ID)` of every decorated models section of `inf`.
+    fn model_bindings(inf: InfKind) -> Vec<(String, String, String)> {
+        let text = fs::read_to_string(inf.inx()).unwrap();
+        let mut bindings = Vec::new();
+        let mut section: Option<String> = None;
+        for line in text.lines() {
+            let line = strip_inf_comment(line).trim();
+            if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+                section = name.starts_with("Standard.NT$ARCH$.").then(|| name.to_owned());
+                continue;
+            }
+            let Some(section) = &section else { continue };
+            if line.is_empty() {
+                continue;
+            }
+            let (_, entry) = line.split_once('=').unwrap();
+            let (install, id) = entry.split_once(',').unwrap();
+            bindings.push((
+                section.clone(),
+                install.trim().to_ascii_lowercase(),
+                id.trim().to_owned(),
+            ));
+        }
+        assert!(!bindings.is_empty(), "{}: no models", inf.name());
+        bindings
+    }
+
+    /// Every binding of both INF templates resolves to a model definition of the driver it installs:
+    /// SPI and UMDF to a table entry that also selects a report descriptor, the USB KMDF driver to a table
+    /// row or a listed fallback PID, and the filter to a supported Magic Trackpad 2 transport.
+    #[test]
+    fn model_bindings_resolve_to_model_definitions() {
+        let mut kmdf_fallbacks = std::collections::BTreeSet::new();
+        for inf in InfKind::ALL {
+            for (section, install, id) in model_bindings(inf) {
+                let ctx = format!("{} [{section}] {install}, {id}", inf.name());
+                match install.as_str() {
+                    "amtptpdevicespikm_device" => {
+                        let (vid, pid) = vid_pid(&id);
+                        assert!(id.to_ascii_lowercase().starts_with("spi\\"), "{ctx}");
+                        let trackpad = amtptp_spikm_core::device::lookup_trackpad(vid, pid);
+                        assert!(trackpad.is_some(), "{ctx}: no SPI model");
+                        assert!(
+                            amtptp_spikm_core::device::family_for_product(pid).is_some(),
+                            "{ctx}: no SPI descriptor family"
+                        );
+                    }
+                    "amtptpdeviceusbum_install" => {
+                        let (vid, pid) = vid_pid(&id);
+                        assert_eq!(vid, 0x05AC, "{ctx}");
+                        assert!(
+                            amtptp_usbum_core::config::lookup_config(pid).is_some(),
+                            "{ctx}: no UMDF config row"
+                        );
+                        assert!(
+                            amtptp_usbum_core::descriptors::HidRegistry::for_pid(pid).is_some(),
+                            "{ctx}: no UMDF report descriptor"
+                        );
+                    }
+                    "amtptpdeviceusbkm_device" => {
+                        let (vid, pid) = vid_pid(&id);
+                        assert_eq!(vid, 0x05AC, "{ctx}");
+                        let config = amtptp_usbkm_core::config::config_for_pid(pid);
+                        if config.identification != pid {
+                            assert!(
+                                amtptp_usbkm_core::config::uses_listed_fallback(pid),
+                                "{ctx}: falls back to the generic profile without being listed"
+                            );
+                            kmdf_fallbacks.insert(pid);
+                        }
+                    }
+                    "amtptphidfilter_miniportdevice" => {
+                        let (vid, pid) = vid_pid(&id);
+                        assert!(
+                            amtptp_hidfilter_core::Transport::from_ids(vid, pid).is_ok(),
+                            "{ctx}: no Magic Trackpad 2 transport"
+                        );
+                    }
+                    // Collections the filter disables, and the inbox HID driver for the old USB install.
+                    "amtptphidfilter_nulldevice" | "standardusbhid_device" => {}
+                    other => panic!("{ctx}: unknown install section {other}"),
+                }
+            }
+        }
+        // No listed fallback PID is stale.
+        let listed: std::collections::BTreeSet<u16> =
+            amtptp_usbkm_core::config::FALLBACK_PIDS.into_iter().collect();
+        assert_eq!(kmdf_fallbacks, listed);
+    }
+
+    #[test]
+    fn hardware_id_parsing() {
+        assert_eq!(vid_pid("USB\\Vid_05ac&Pid_027A&MI_02"), (0x05AC, 0x027A));
+        assert_eq!(vid_pid("SPI\\VID_05ac&PID_0272&MI_02"), (0x05AC, 0x0272));
+        assert_eq!(
+            vid_pid("HID\\{00001124-0000-1000-8000-00805f9b34fb}_VID&0001004c_PID&0265&Col01"),
+            (0x004C, 0x0265)
+        );
+        assert_eq!(
+            vid_pid("HID\\VID_05AC&PID_0265&REV_0855&MI_01&Col01"),
+            (0x05AC, 0x0265)
+        );
+    }
+
     /// Minimal PE32+ header: `e_lfanew` = 0x40, optional header at 0x58.
     fn pe32plus(dll_characteristics: u16, checksum: u32) -> Vec<u8> {
         let mut img = vec![0_u8; 0x100];

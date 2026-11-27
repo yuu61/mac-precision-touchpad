@@ -5,13 +5,14 @@
 //! the vendor ID must be Apple USB (0x05AC) or Apple Bluetooth (0x004C) and the product ID must be the
 //! Magic Trackpad 2 (0x0265). [`Transport::from_ids`] reproduces those checks.
 
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU32, AtomicUsize, Ordering};
 
 use bcm5974::config::MAGIC_TRACKPAD_2;
 pub use bcm5974::config::{
     Bcm5974Param, MAGIC_TRACKPAD_2_PID as HID_PID_MAGIC_TRACKPAD_2,
     USB_VENDOR_ID_APPLE as HID_VID_APPLE_USB,
 };
+use ptp_hid::feature::SelectiveReportBits;
 use ptp_hid::scan_time::ScanClock;
 
 use crate::feature::FeatureChange;
@@ -226,9 +227,10 @@ pub struct DeviceSnapshot {
     pub io_target_set: bool,
     /// `PtpInputOn` (written by `SET_FEATURE` 0x04, never read: HF-B20).
     pub ptp_input_on: bool,
-    /// `PtpReportTouch` (written by `SET_FEATURE` 0x06, never read: HF-B20).
+    /// `PtpReportTouch`: the Surface Switch of `SET_FEATURE` 0x06; the input report honours it (P3 fix of
+    /// HF-B20: C never read it).
     pub ptp_report_touch: bool,
-    /// `PtpReportButton` (written by `SET_FEATURE` 0x06, never read: HF-B20).
+    /// `PtpReportButton`: the Button Switch of `SET_FEATURE` 0x06; the input report honours it.
     pub ptp_report_button: bool,
     /// Cached QPC frequency in ticks per second.
     pub qpc_frequency: i64,
@@ -261,6 +263,20 @@ impl AxisState {
     }
 }
 
+/// `DeviceConfigured` in `DeviceState::power`.
+const POWER_CONFIGURED: u32 = 1;
+/// The device is between `D0Entry` and `D0Exit` (not in C).
+const POWER_IN_D0: u32 = 2;
+/// One step of the epoch in the upper bits of `DeviceState::power`: every `D0Exit` advances it.
+const POWER_EPOCH_STEP: u32 = 4;
+
+/// Taken by the recovery timer before its mode switch ([`crate::recovery_timer_callback`]): the power word
+/// it saw, which must still hold when it marks the device configured.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RecoveryTicket {
+    power: u32,
+}
+
 /// The non-handle fields of the C `DEVICE_CONTEXT` (spec 3.1), shared by every callback.
 ///
 /// The C driver reads and writes these fields without any lock from the parallel default queue, the
@@ -268,6 +284,11 @@ impl AxisState {
 /// that behaviour without data races (port policy P2), every field is an atomic accessed with `Relaxed`
 /// ordering, which is what the plain C loads and stores amount to. Put one `DeviceState` in the WDF
 /// device context (initialize it with [`DeviceState::new`], which equals KMDF's zero-filled context).
+///
+/// Two fields are not in C. `DeviceConfigured` shares one atomic word with whether the device is in D0
+/// and an epoch that every `D0Exit` advances, so the recovery timer can tell whether the device was
+/// stopped while its mode switch ran. A counter of the lower reads in flight lets a successful
+/// configuration issue one read per parked upper read that no read serves yet.
 ///
 /// The glue keeps the WDF handles (queues, timer, work item, lookaside list, I/O target) itself.
 #[derive(Debug)]
@@ -281,7 +302,9 @@ pub struct DeviceState {
     input_button_delta: AtomicUsize,
     x: AxisState,
     y: AxisState,
-    device_configured: AtomicBool,
+    /// `DeviceConfigured` ([`POWER_CONFIGURED`]), in D0 ([`POWER_IN_D0`]) and the epoch.
+    power: AtomicU32,
+    in_flight_reads: AtomicUsize,
     detour_completed: AtomicBool,
     io_target_set: AtomicBool,
     ptp_input_on: AtomicBool,
@@ -297,8 +320,10 @@ impl Default for DeviceState {
 }
 
 impl DeviceState {
-    /// All fields zero / FALSE: the state after `PtpFilterCreateDevice` (KMDF zero-fills the context
-    /// and the C code then sets the IDs to 0 and `DeviceConfigured = FALSE` again).
+    /// All fields zero / FALSE except the two selective-reporting switches, which start on
+    /// ([`SelectiveReportBits::POWER_ON`]): the state after `PtpFilterCreateDevice` (KMDF zero-fills the
+    /// context and the C code then sets the IDs to 0 and `DeviceConfigured = FALSE` again; C left the
+    /// switches FALSE, which it never read).
     #[must_use]
     pub const fn new() -> Self {
         Self::with(&DeviceSnapshot {
@@ -315,13 +340,14 @@ impl DeviceState {
             detour_completed: false,
             io_target_set: false,
             ptp_input_on: false,
-            ptp_report_touch: false,
-            ptp_report_button: false,
+            ptp_report_touch: SelectiveReportBits::POWER_ON.surface_report,
+            ptp_report_button: SelectiveReportBits::POWER_ON.button_report,
             qpc_frequency: 0,
         })
     }
 
-    /// Initializes device state from a snapshot and starts a fresh reporting clock.
+    /// Initializes device state from a snapshot and starts a fresh reporting clock. The device is not in
+    /// D0 (call [`crate::d0_entry`]) and has no lower read in flight.
     #[must_use]
     pub const fn with(s: &DeviceSnapshot) -> Self {
         Self {
@@ -334,7 +360,12 @@ impl DeviceState {
             input_button_delta: AtomicUsize::new(s.input_button_delta),
             x: AxisState::new(s.x),
             y: AxisState::new(s.y),
-            device_configured: AtomicBool::new(s.device_configured),
+            power: AtomicU32::new(if s.device_configured {
+                POWER_CONFIGURED
+            } else {
+                0
+            }),
+            in_flight_reads: AtomicUsize::new(0),
             detour_completed: AtomicBool::new(s.detour_completed),
             io_target_set: AtomicBool::new(s.io_target_set),
             ptp_input_on: AtomicBool::new(s.ptp_input_on),
@@ -412,12 +443,86 @@ impl DeviceState {
 
     /// `DeviceConfigured`: the mode switch is done and upper reads may trigger lower reads.
     pub fn device_configured(&self) -> bool {
-        self.device_configured.load(Ordering::Relaxed)
+        self.power.load(Ordering::SeqCst) & POWER_CONFIGURED != 0
     }
 
     /// Sets `DeviceConfigured`.
     pub fn set_device_configured(&self, configured: bool) {
-        self.device_configured.store(configured, Ordering::Relaxed);
+        if configured {
+            self.power.fetch_or(POWER_CONFIGURED, Ordering::SeqCst);
+        } else {
+            self.power.fetch_and(!POWER_CONFIGURED, Ordering::SeqCst);
+        }
+    }
+
+    /// Whether the device is in D0 (between [`crate::d0_entry`] and [`crate::d0_exit`]).
+    pub fn in_d0(&self) -> bool {
+        self.power.load(Ordering::SeqCst) & POWER_IN_D0 != 0
+    }
+
+    /// `D0Entry`: the device is in D0.
+    pub(crate) fn enter_d0(&self) {
+        self.power.fetch_or(POWER_IN_D0, Ordering::SeqCst);
+    }
+
+    /// `D0Exit`: not in D0, not configured, next epoch.
+    pub(crate) fn leave_d0(&self) {
+        let mut power = self.power.load(Ordering::SeqCst);
+        loop {
+            let next = (power & !(POWER_CONFIGURED | POWER_IN_D0)).wrapping_add(POWER_EPOCH_STEP);
+            match self
+                .power
+                .compare_exchange_weak(power, next, Ordering::SeqCst, Ordering::SeqCst)
+            {
+                Ok(_) => return,
+                Err(actual) => power = actual,
+            }
+        }
+    }
+
+    /// The recovery timer may work on the device only while it is in D0.
+    pub(crate) fn begin_recovery(&self) -> Option<RecoveryTicket> {
+        let power = self.power.load(Ordering::SeqCst);
+        (power & POWER_IN_D0 != 0).then_some(RecoveryTicket { power })
+    }
+
+    /// Marks the device configured if nothing changed since `ticket` was taken (in particular, no
+    /// `D0Exit`). Returns whether it did.
+    pub(crate) fn finish_recovery(&self, ticket: RecoveryTicket) -> bool {
+        self.power
+            .compare_exchange(
+                ticket.power,
+                ticket.power | POWER_CONFIGURED,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            )
+            .is_ok()
+    }
+
+    /// Lower reads sent and not completed yet.
+    pub fn in_flight_reads(&self) -> usize {
+        self.in_flight_reads.load(Ordering::SeqCst)
+    }
+
+    /// A lower read is about to be sent.
+    pub(crate) fn read_sent(&self) {
+        self.in_flight_reads.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// A lower read completed, or its send failed. Never goes below zero.
+    pub(crate) fn read_done(&self) {
+        let mut reads = self.in_flight_reads.load(Ordering::SeqCst);
+        while reads > 0 {
+            match self.in_flight_reads.compare_exchange_weak(
+                reads,
+                reads - 1,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => return,
+                Err(actual) => reads = actual,
+            }
+        }
     }
 
     /// `IsHidIoDetourCompleted`.
@@ -448,6 +553,23 @@ impl DeviceState {
     /// Caches the QPC frequency and starts a new input-reporting session.
     pub(crate) fn set_qpc_frequency(&self, value: i64) {
         self.scan_clock.restart(value);
+    }
+
+    /// The selective-reporting switches the input report honours.
+    pub fn selective_reporting(&self) -> SelectiveReportBits {
+        SelectiveReportBits {
+            surface_report: self.ptp_report_touch.load(Ordering::Relaxed),
+            button_report: self.ptp_report_button.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Back to [`SelectiveReportBits::POWER_ON`] (`PrepareHardware`: the state is not kept across a
+    /// power reset).
+    pub(crate) fn reset_selective_reporting(&self) {
+        self.apply_feature_change(FeatureChange::SelectiveReporting {
+            button_report: SelectiveReportBits::POWER_ON.button_report,
+            surface_report: SelectiveReportBits::POWER_ON.surface_report,
+        });
     }
 
     /// Applies a decoded `SET_FEATURE` ([`crate::decode_set_feature`]).
@@ -522,6 +644,13 @@ mod tests {
             ..DeviceSnapshot::default()
         };
         assert_eq!(DeviceState::with(&s).snapshot(), s);
-        assert_eq!(DeviceState::new().snapshot(), DeviceSnapshot::default());
+        assert_eq!(
+            DeviceState::new().snapshot(),
+            DeviceSnapshot {
+                ptp_report_touch: true,
+                ptp_report_button: true,
+                ..DeviceSnapshot::default()
+            }
+        );
     }
 }

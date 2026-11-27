@@ -1,5 +1,9 @@
 //! Replays `fixtures/feature.txt`: `GET/SET_FEATURE` for all 256 report IDs, every SET payload byte
 //! for 0x04 and 0x06, size and NULL edges, and the spec D.5 rows.
+//!
+//! SET 0x06 is fixed (P3): bit 0 of byte 1 is the Surface Switch (`PtpReportTouch`) and bit 1 the Button
+//! Switch (`PtpReportButton`); C applied them the other way round. A report without byte 1 changes
+//! nothing (C, and the P2 port, turned both off).
 
 #![cfg(test)]
 
@@ -11,6 +15,10 @@ use ptp_hid::common::REPORTID_PTPHQA;
 use ptp_hid::feature::{HQA_REPORT, HQA_REPORT_LEN};
 
 const TOTAL: usize = 1588;
+const P3_SWAPPED: &str = "P3: SET 0x06 Surface = bit 0, Button = bit 1 (C swapped)";
+const P3_NO_BYTE: &str = "P3: SET 0x06 without byte 1 changes nothing (oob)";
+/// Successful SET 0x06 records that carry byte 1.
+const SWAPPED_06: usize = 516;
 
 #[test]
 fn replay_feature_reports() {
@@ -79,7 +87,31 @@ fn replay_feature_reports() {
             r.get("touch_out") == "1",
             r.get("btn_out") == "1",
         );
-        if oob {
+        let applied_06 = r.get("op") == "set" && r.num("rid") == 0x06 && s == 0;
+        if applied_06 && !oob {
+            // P3: the port's switches are the C switches exchanged.
+            assert_eq!(out.ptp_input_on, c_inp, "{}", r.case());
+            assert_eq!(
+                (out.ptp_report_touch, out.ptp_report_button),
+                (c_btn, c_touch),
+                "{}",
+                r.case()
+            );
+            tally.add(P3_SWAPPED);
+        } else if oob && r.num("rid") == 0x06 {
+            // HF-B23: C read reportBuffer[1] past reportBufferLen (it held 03 here). P3: no byte 1, no
+            // change.
+            assert_eq!(buf_in.get(1), Some(&0x03), "{}", r.case());
+            assert!(c_touch && c_btn, "C read 03");
+            assert_eq!(out.ptp_input_on, c_inp);
+            assert_eq!(
+                (out.ptp_report_touch, out.ptp_report_button),
+                (snap.ptp_report_touch, snap.ptp_report_button),
+                "{}",
+                r.case()
+            );
+            tally.add(P3_NO_BYTE);
+        } else if oob {
             // HF-B23, port policy P2: C read reportBuffer[1] past reportBufferLen (it held 03 here). The
             // port reads the missing byte as 0: mode 0 = mouse (PtpInputOn FALSE) for 0x04, both
             // switches off for 0x06. The status is SUCCESS either way.
@@ -91,15 +123,6 @@ fn replay_feature_reports() {
                     assert_eq!(
                         (out.ptp_report_touch, out.ptp_report_button),
                         (c_touch, c_btn)
-                    );
-                }
-                0x06 => {
-                    assert!(c_touch && c_btn, "C read 03");
-                    assert_eq!(out.ptp_input_on, c_inp);
-                    assert!(
-                        !out.ptp_report_touch && !out.ptp_report_button,
-                        "{}",
-                        r.case()
                     );
                 }
                 other => panic!("unexpected oob rid {other}"),
@@ -126,8 +149,10 @@ fn replay_feature_reports() {
         assert_eq!(rest, snap);
     }
     let total = tally.assert(&[
-        ("exact", 1584),
-        ("P2-fixed: SET reads missing byte 1 as 0 (oob, HF-B23)", 4),
+        ("exact", 1584 - SWAPPED_06),
+        ("P2-fixed: SET reads missing byte 1 as 0 (oob, HF-B23)", 2),
+        (P3_SWAPPED, SWAPPED_06),
+        (P3_NO_BYTE, 2),
     ]);
     assert_eq!(total, TOTAL);
 }

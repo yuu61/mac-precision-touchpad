@@ -7,6 +7,7 @@
 //! records ([`build_report`]).
 
 use ptp_hid::common::{PTP_CONTACT_SLOTS, PTP_MAX_CONTACT_POINTS};
+use ptp_hid::feature::SelectiveReportBits;
 use ptp_hid::input::{PTP_REPORT_LEN, PtpReport};
 
 use crate::device::is_apple_vendor;
@@ -120,8 +121,15 @@ pub fn build_report(
     length: usize,
     buffer: &[u8],
     scan_time: u16,
+    selective: SelectiveReportBits,
 ) -> [u8; PTP_REPORT_LEN] {
-    let count = contact_count(layout, length);
+    // Selective reporting (P3 fix of HF-B20): no contacts with the surface switch off, no button with
+    // the button switch off.
+    let count = if selective.surface_report {
+        contact_count(layout, length)
+    } else {
+        0
+    };
     let mut report = PtpReport {
         scan_time,
         contact_count: count,
@@ -142,7 +150,7 @@ pub fn build_report(
         }
         *slot = parse_finger(&record, layout.x_min, layout.y_min);
     }
-    if byte_at(buffer, Some(layout.button_delta), 0) & 1 != 0 {
+    if selective.button_report && byte_at(buffer, Some(layout.button_delta), 0) & 1 != 0 {
         report.is_button_clicked = 1;
     }
     report.to_bytes()

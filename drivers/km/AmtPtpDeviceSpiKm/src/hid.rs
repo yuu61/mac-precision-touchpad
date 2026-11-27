@@ -216,10 +216,11 @@ pub(crate) fn report_features(request: &Request) -> NTSTATUS {
 
 /// `AmtPtpSetFeatures` (Hid.c:727-861), `IOCTL_HID_SET_FEATURE`.
 ///
-/// Report 4 (input mode) and 6 (function switch) are accepted and only update the write-only PTP flags
-/// (SPI-B3); any other report ID: `STATUS_NOT_SUPPORTED`. `reportBufferLen` is not validated (SPI-B4). C
-/// read byte 2 of the 2-byte report 6 (out of bounds); the port reads only the first
-/// `min(reportBufferLen, 3)` bytes and treats the rest as 0 (SPI-B2, P2). Information stays 0.
+/// Report 4 (input mode) and 6 (function switch) are accepted and update the PTP flags; the input report
+/// honours the selective-reporting switches of report 6 (byte 1: Surface bit 0, Button bit 1). Any other
+/// report ID: `STATUS_NOT_SUPPORTED`. `reportBufferLen` is not validated (SPI-B4). C read byte 2 of the
+/// 2-byte report 6 (out of bounds) and never used the flags; the port reads only the first
+/// `min(reportBufferLen, 2)` bytes. Information stays 0.
 pub(crate) fn set_features(context: &DeviceContext, request: &Request) -> NTSTATUS {
     let packet = match read_xfer_packet(request, false) {
         Ok(packet) => packet,

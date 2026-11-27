@@ -6,6 +6,7 @@
 //! `X` @4, `Y` @6, `TouchMajor` @18, `TouchMinor` @20 and `Pressure` @26.
 
 use ptp_hid::common::PTP_CONTACT_SLOTS;
+use ptp_hid::feature::SelectiveReportBits;
 use ptp_hid::input::{SPI_PTP_REPORT_LEN, SpiPtpContact, SpiPtpReport};
 
 use crate::device::SpiTrackpadInfo;
@@ -44,8 +45,9 @@ pub const FINGER_TOUCH_MINOR: usize = 20;
 /// Offset of `Pressure` in a finger.
 pub const FINGER_PRESSURE: usize = 26;
 
-/// The literal `5` of Input.c:228: at most this many contacts are filled (equal to
-/// `PTP_MAX_CONTACT_POINTS`). `ContactCount` itself is not clamped (SPI-B6).
+/// The literal `5` of Input.c:228: at most this many contacts are filled, and `ContactCount` is clamped to
+/// it (P3 fix of SPI-B6: C reported the raw `NumOfFingers`). It equals `PTP_MAX_CONTACT_POINTS`, the
+/// maximum the device-capabilities feature report declares; Windows drops every frame with more.
 pub const MAX_FILLED_CONTACTS: u8 = 5;
 const _: () = assert!(MAX_FILLED_CONTACTS as usize == PTP_CONTACT_SLOTS);
 /// Confidence threshold (Input.c:242-243): Confidence = `TouchMajor < 2500 && TouchMinor < 2500`, signed.
@@ -106,6 +108,12 @@ impl<'a> SpiPacket<'a> {
         self.byte(NUM_OF_FINGERS_OFFSET)
     }
 
+    /// Whether the valid bytes hold the header and every finger record `NumOfFingers` declares.
+    #[must_use]
+    pub fn holds_declared_fingers(&self) -> bool {
+        self.bytes.len() >= packet_len_for(self.num_of_fingers())
+    }
+
     /// `Fingers[index]`. `index` must be below [`SPI_MAX_FINGERS`] to address a real finger; larger
     /// indexes read zeros.
     #[must_use]
@@ -121,6 +129,27 @@ impl<'a> SpiPacket<'a> {
             touch_minor: at(FINGER_TOUCH_MINOR),
             pressure: at(FINGER_PRESSURE),
         }
+    }
+}
+
+/// Bytes a packet with `num_of_fingers` finger records occupies: the 46-byte header plus 30 bytes per
+/// finger.
+#[must_use]
+pub const fn packet_len_for(num_of_fingers: u8) -> usize {
+    SPI_PACKET_HEADER_LEN + SPI_FINGER_LEN * num_of_fingers as usize
+}
+
+/// The consistency check after the length gate (not in C): the lower read must hold every finger record
+/// the header declares. C accepted a bare header that declared contacts, and reported them with zeroed or
+/// stale finger data (SPI-B6, SPI-B9).
+///
+/// # Errors
+/// Returns `STATUS_DEVICE_DATA_ERROR` if the packet is shorter than its declared contacts need.
+pub fn check_declared_fingers(packet: &SpiPacket<'_>) -> Result<(), NtStatus> {
+    if packet.holds_declared_fingers() {
+        Ok(())
+    } else {
+        Err(STATUS_DEVICE_DATA_ERROR)
     }
 }
 
@@ -158,27 +187,37 @@ const fn positive_difference(a: i16, b: i16) -> u16 {
 /// Builds the PTP input report from a packet (Input.c:224-264), zero-initialized (P2 fix of SPI-B5: C left
 /// unused contacts and the padding bits as stack garbage).
 ///
-/// - `ContactCount` = `NumOfFingers` raw (SPI-B6), `IsButtonClicked` = `ClickOccurred` raw.
-/// - For `i < min(NumOfFingers, 5)`: `ContactID` = `i` (SPI-B7), X = `X - XMin` if positive else 0,
+/// - `ContactCount` = `min(NumOfFingers, 5)` (P3 fix of SPI-B6), `IsButtonClicked` = `ClickOccurred` raw.
+/// - For `i < min(NumOfFingers, 5)`: `ContactID` = `i` (SPI-B7; the descriptor's logical maximum is 4,
+///   P3), X = `X - XMin` if positive else 0,
 ///   Y = `YMax - Y` if positive else 0, Tip = `Pressure > 0`, Confidence = `TouchMajor < 2500 &&
 ///   TouchMinor < 2500`.
 /// - `ScanTime` = `scan_time`.
+/// - Selective reporting (P3 fix of SPI-B3): with the surface switch off no contact is reported
+///   (`ContactCount` 0); with the button switch off `IsButtonClicked` is 0.
 #[must_use]
 pub fn build_report(
     packet: &SpiPacket<'_>,
     trackpad: &SpiTrackpadInfo,
     scan_time: u16,
+    selective: SelectiveReportBits,
 ) -> SpiPtpReport {
-    let mut report = SpiPtpReport {
-        scan_time,
-        contact_count: packet.num_of_fingers(),
-        is_button_clicked: packet.click_occurred(),
-        ..SpiPtpReport::EMPTY
-    };
-    let filled = if packet.num_of_fingers() > MAX_FILLED_CONTACTS {
+    let filled = if !selective.surface_report {
+        0
+    } else if packet.num_of_fingers() > MAX_FILLED_CONTACTS {
         MAX_FILLED_CONTACTS
     } else {
         packet.num_of_fingers()
+    };
+    let mut report = SpiPtpReport {
+        scan_time,
+        contact_count: filled,
+        is_button_clicked: if selective.button_report {
+            packet.click_occurred()
+        } else {
+            0
+        },
+        ..SpiPtpReport::EMPTY
     };
     for (index, slot) in report
         .contacts
@@ -206,8 +245,9 @@ pub fn report_bytes(
     packet: &SpiPacket<'_>,
     trackpad: &SpiTrackpadInfo,
     scan_time: u16,
+    selective: SelectiveReportBits,
 ) -> [u8; SPI_PTP_REPORT_LEN] {
-    build_report(packet, trackpad, scan_time).to_bytes()
+    build_report(packet, trackpad, scan_time, selective).to_bytes()
 }
 
 /// The valid prefix of a lower read buffer: the first `min(length, buffer.len())` bytes, where `length`

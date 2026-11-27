@@ -10,13 +10,13 @@ use amtptp_spikm_core::descriptors::{
 use amtptp_spikm_core::device::{
     APPLE_VENDOR_ID, DeviceConfig, Family, ReportType, family_for_product, lookup_trackpad,
 };
-use amtptp_spikm_core::feature::{
-    DEVICE_CAPS_REPLY, check_xfer_packet, get_feature,
-};
+use amtptp_spikm_core::feature::{DEVICE_CAPS_REPLY, check_xfer_packet, get_feature};
 use amtptp_spikm_core::input::{SpiPacket, build_report, lower_read_length};
-use amtptp_spikm_core::runtime::DeviceRuntime;
+use amtptp_spikm_core::runtime::{DeviceRuntime, ReadTracker};
 use amtptp_spikm_core::status::*;
 use amtptp_spikm_core::wire::{POOL_TAG, SetStatePacket};
+use ptp_hid::descriptor::{SPI_CONTACT_ID_LOGICAL_MAX, SPI_CONTACT_ID_MAX_OFFSETS};
+use ptp_hid::feature::SelectiveReportBits;
 use core::fmt::Write as _;
 
 /// Minimal SHA-256 (FIPS 180-4) for checking the spec's descriptor hashes.
@@ -195,7 +195,13 @@ fn report_descriptor_hashes_spec_5_1() {
         ),
     ];
     for (desc, hash) in table {
-        assert_eq!(sha256(desc), hash);
+        // The spec hashes are of the C bytes, whose contact-ID logical maximum is 3 (the port declares 4).
+        let mut c_bytes = desc.to_vec();
+        for offset in SPI_CONTACT_ID_MAX_OFFSETS {
+            assert_eq!(c_bytes[offset], SPI_CONTACT_ID_LOGICAL_MAX);
+            c_bytes[offset] = 3;
+        }
+        assert_eq!(sha256(&c_bytes), hash);
     }
 }
 
@@ -271,7 +277,7 @@ fn table_and_families_spec_8() {
     assert_eq!(family_for_product(0x0277), Some(Family::F3a));
     assert!(
         lookup_trackpad(APPLE_VENDOR_ID, 0x0280).is_none(),
-        "INF-only PID (SPI-B17)"
+        "0x0280 is a USB KMDF binding, not an SPI model"
     );
     assert!(Family::F1.report_descriptor(ReportType::INVALID).is_none());
 }
@@ -295,7 +301,7 @@ fn packet_with_fingers(n: u8, click: u8, fingers: &[(i16, i16, i16, i16, i16)]) 
 fn worked_example_spec_7_4() {
     let info = lookup_trackpad(APPLE_VENDOR_ID, 0x0272).unwrap();
     let pkt = packet_with_fingers(1, 0, &[(100, 2000, 800, 600, 30)]);
-    let report = build_report(&SpiPacket::new(&pkt), info, 0).to_bytes();
+    let report = build_report(&SpiPacket::new(&pkt), info, 0, SelectiveReportBits::POWER_ON).to_bytes();
     assert_eq!(report[..6], [0x05, 0x03, 0xF2, 0x12, 0x7A, 0x12]);
     assert!(
         report[6..28].iter().all(|&b| b == 0),
@@ -304,10 +310,77 @@ fn worked_example_spec_7_4() {
     assert_eq!((report[28], report[29]), (1, 0));
 }
 
+/// The runtime's whole-frame path: five contacts with their records, a header that declares more contacts
+/// than the data holds, and more contacts than the report can carry.
+#[test]
+fn declared_contacts_must_match_the_frame() {
+    let info = lookup_trackpad(APPLE_VENDOR_ID, 0x0272).unwrap();
+    let five = [(100, 2000, 800, 600, 30); 5];
+    let run = |pkt: &[u8], len: u64| {
+        let rt = DeviceRuntime::new();
+        rt.on_d0_entry(10_000_000);
+        let mut queried = false;
+        let report = rt.complete_lower_read(info, len, pkt, || {
+            queried = true;
+            0
+        });
+        (report, queried)
+    };
+
+    // Five contacts, each with its 30-byte record: delivered with IDs 0..=4 and ContactCount 5.
+    let pkt = packet_with_fingers(5, 0, &five);
+    let (report, queried) = run(&pkt, 46 + 5 * 30);
+    let report = report.expect("a complete five-contact frame");
+    assert!(queried);
+    assert_eq!(report[28], 5);
+    let ids: Vec<u8> = (0..5).map(|i| (report[1 + 5 * i] >> 2) & 0x07).collect();
+    assert_eq!(ids, [0, 1, 2, 3, 4]);
+    assert!(ids.iter().all(|&id| id <= SPI_CONTACT_ID_LOGICAL_MAX));
+
+    // The header alone, declaring six contacts: rejected before the clock is sampled.
+    let header = packet_with_fingers(6, 0, &[]);
+    assert_eq!(run(&header[..46], 46), (Err(STATUS_DEVICE_DATA_ERROR), false));
+    // Two contacts declared, one record present.
+    let pkt = packet_with_fingers(2, 0, &five[..1]);
+    assert_eq!(run(&pkt, 46 + 30), (Err(STATUS_DEVICE_DATA_ERROR), false));
+
+    // Seven contacts with all seven records: only the first five are reported, ContactCount 5.
+    let seven = [(100, 2000, 800, 600, 30); 7];
+    let pkt = packet_with_fingers(7, 1, &seven);
+    let (report, _) = run(&pkt, 46 + 7 * 30);
+    let report = report.expect("a complete seven-contact frame");
+    assert_eq!((report[28], report[29]), (5, 1));
+}
+
+/// `SET_FEATURE` 0x06 `[06, bits]` (bit 0 Surface Switch, bit 1 Button Switch) for each of the four
+/// combinations, then one frame with a contact and the button down.
+#[test]
+fn selective_reporting_shapes_the_input_report() {
+    let info = lookup_trackpad(APPLE_VENDOR_ID, 0x0272).unwrap();
+    let pkt = packet_with_fingers(1, 1, &[(100, 2000, 800, 600, 30)]);
+    for (bits, contacts, button) in [(0_u8, 0_u8, 0_u8), (1, 1, 0), (2, 0, 1), (3, 1, 1)] {
+        let rt = DeviceRuntime::new();
+        rt.on_d0_entry(10_000_000);
+        assert_eq!(rt.set_feature(6, 2, Some(&[6, bits])), STATUS_SUCCESS);
+        let r = rt.complete_lower_read(info, 76, &pkt, || 0).unwrap();
+        assert_eq!((r[28], r[29]), (contacts, button), "switch byte {bits:#04x}");
+        if contacts == 0 {
+            assert!(r[1..26].iter().all(|&b| b == 0), "no contact data");
+        } else {
+            assert_eq!(r[1..6], [0x03, 0xF2, 0x12, 0x7A, 0x12]);
+        }
+        // A restart (PrepareHardware) restores both switches.
+        rt.ptp_settings().reset_selective_reporting();
+        let r = rt.complete_lower_read(info, 76, &pkt, || 0).unwrap();
+        assert_eq!((r[28], r[29]), (1, 1));
+    }
+}
+
 #[test]
 fn contact_flags_and_quirks() {
     let info = lookup_trackpad(APPLE_VENDOR_ID, 0x0278).unwrap();
-    // 255 fingers announced: ContactCount raw (SPI-B6), 5 contacts filled with IDs 0..4 (SPI-B7).
+    // 255 fingers announced: ContactCount clamped to 5 (P3 fix of SPI-B6), 5 contacts filled with IDs
+    // 0..4 (SPI-B7; the descriptor's logical maximum is 4). The whole-frame check is the runtime's.
     let fingers = [
         (0, 0, -1, -0x8000, -5),
         (1, 1, 2499, 2499, 1),
@@ -316,7 +389,7 @@ fn contact_flags_and_quirks() {
         (4, 4, 0, 0, 1),
     ];
     let pkt = packet_with_fingers(255, 0xFF, &fingers);
-    let r = build_report(&SpiPacket::new(&pkt), info, 0).to_bytes();
+    let r = build_report(&SpiPacket::new(&pkt), info, 0, SelectiveReportBits::POWER_ON).to_bytes();
     let flag = |i: usize| r[1 + 5 * i];
     assert_eq!(
         flag(0),
@@ -327,7 +400,7 @@ fn contact_flags_and_quirks() {
     assert_eq!(flag(2), 2 << 2, "TouchMajor 2500 -> not confident");
     assert_eq!(flag(3), 0x02 | (3 << 2));
     assert_eq!(flag(4), 0x13, "conf + tip + ID 4 (spec addendum)");
-    assert_eq!((r[28], r[29]), (255, 0xFF));
+    assert_eq!((r[28], r[29]), (5, 0xFF));
     // X = X - XMin, Y = YMax - Y, no upper clamp (SPI-B19).
     assert_eq!(u16::from_le_bytes([r[2], r[3]]), 7456);
     assert_eq!(u16::from_le_bytes([r[4], r[5]]), 9283);
@@ -337,7 +410,7 @@ fn contact_flags_and_quirks() {
         0,
         &[(-0x8000, 0x7FFF, 0, 0, 0), (0x7FFF, -0x8000, 0, 0, 0)],
     );
-    let r = build_report(&SpiPacket::new(&pkt), info, 0).to_bytes();
+    let r = build_report(&SpiPacket::new(&pkt), info, 0, SelectiveReportBits::POWER_ON).to_bytes();
     assert_eq!(r[2..6], [0, 0, 0, 0]);
     assert_eq!(u16::from_le_bytes([r[7], r[8]]), 40223);
     assert_eq!(u16::from_le_bytes([r[9], r[10]]), 42051);
@@ -348,7 +421,11 @@ fn scan_time_advances_and_wraps_in_spi_reports() {
     let rt = DeviceRuntime::new();
     let frequency = 10_000_000;
     rt.on_d0_entry(frequency);
-    let _status = rt.on_self_managed_io_init_or_restart(STATUS_SUCCESS, || frequency);
+    let _status = rt.on_self_managed_io_init_or_restart(
+        &mut ReadTracker::<u32>::new(),
+        STATUS_SUCCESS,
+        || frequency,
+    );
     let info = lookup_trackpad(APPLE_VENDOR_ID, 0x0272).unwrap();
     let pkt = packet_with_fingers(1, 1, &[(100, 2000, 800, 600, 30)]);
     let scan_time = |counter| {
@@ -360,20 +437,29 @@ fn scan_time_advances_and_wraps_in_spi_reports() {
     assert_eq!(scan_time(start + 256_000), 256);
     assert_eq!(scan_time(start + 65_535_000), u16::MAX);
     assert_eq!(scan_time(start + 65_536_000), 0);
-    let _status = rt.on_self_managed_io_init_or_restart(STATUS_SUCCESS, || frequency);
+    let _status = rt.on_self_managed_io_init_or_restart(
+        &mut ReadTracker::<u32>::new(),
+        STATUS_SUCCESS,
+        || frequency,
+    );
     assert_eq!(scan_time(start + 70_000_000), 0);
 }
 
 #[test]
-fn b9_bytes_past_length_read_as_zero() {
+fn b9_bytes_past_length_are_never_read() {
     let rt = DeviceRuntime::new();
     rt.on_d0_entry(0);
     let info = lookup_trackpad(APPLE_VENDOR_ID, 0x0272).unwrap();
     let pkt = packet_with_fingers(1, 1, &[(100, 2000, 800, 600, 30)]);
-    // Information 46: the finger lies past the valid data and reads as zeros.
-    let r = rt.complete_lower_read(info, 46, &pkt, || 0).unwrap();
-    // X = 0 - (-4750), Y = 6730 - 0, Confidence (0 < 2500), no tip.
-    assert_eq!(r[1..6], [0x01, 0x8E, 0x12, 0x4A, 0x1A]);
+    // Information 46: the declared finger lies past the valid data, so the frame is rejected (P3). C
+    // read the finger from the stale buffer; the P2 port read it as zeros.
+    assert_eq!(
+        rt.complete_lower_read(info, 46, &pkt, || 0),
+        Err(STATUS_DEVICE_DATA_ERROR)
+    );
+    // With its record inside Information the same finger is converted.
+    let r = rt.complete_lower_read(info, 76, &pkt, || 0).unwrap();
+    assert_eq!(r[1..6], [0x03, 0xF2, 0x12, 0x7A, 0x12]);
     assert_eq!(lower_read_length(45), Err(STATUS_DEVICE_DATA_ERROR));
 }
 
@@ -396,7 +482,10 @@ fn feature_checks_spec_4_6() {
     assert_eq!(check_xfer_packet(16, true), Ok(()));
     assert_eq!(get_feature(9, 4, true).status, STATUS_NOT_SUPPORTED);
     assert_eq!(get_feature(8, 256, true).status, STATUS_INVALID_BUFFER_SIZE);
-    assert_eq!(get_feature(8, 257, true).write, ptp_hid::feature::HQA_REPORT);
+    assert_eq!(
+        get_feature(8, 257, true).write,
+        ptp_hid::feature::HQA_REPORT
+    );
     let rt = DeviceRuntime::new();
     assert_eq!(rt.set_feature(9, 4, Some(&[9, 1, 2])), STATUS_NOT_SUPPORTED);
 }

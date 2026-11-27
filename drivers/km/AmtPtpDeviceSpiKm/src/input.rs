@@ -2,10 +2,15 @@
 //! normally triggers one lower `IOCTL_HID_READ_REPORT` to the Apple PDO, and each lower completion turns
 //! Apple's packet into a PTP input report for the **oldest** queued upstream request.
 //!
+//! Every lower read is registered in the device's read tracker before it is sent and unregistered when it
+//! completes (see [`amtptp_spikm_core::runtime`]): the claim fails once the device is suspended, and a read
+//! sent before the last suspend is dropped when it completes.
+//!
 //! Everything here runs at IRQL <= `DISPATCH_LEVEL` and is non-paged.
 
 use core::ptr::{null, null_mut, write_bytes};
 
+use amtptp_spikm_core::runtime::{ClaimRefused, LowerReadOrigin, ReadTicket};
 use amtptp_spikm_core::wire::LOWER_READ_IOCTL;
 use ptp_hid::input::SPI_PTP_REPORT_LEN;
 use tracelogging as tlg;
@@ -14,7 +19,7 @@ use wdf_support::init::object_attributes_init_context_type;
 use wdf_support::ntstatus::{NT_SUCCESS, STATUS_SUCCESS};
 use wdf_support::request::Request;
 use wdk_sys::{
-    NTSTATUS, PWDF_REQUEST_COMPLETION_PARAMS, ULONG_PTR, WDFCONTEXT, WDFDEVICE, WDFIOTARGET,
+    NTSTATUS, PWDF_REQUEST_COMPLETION_PARAMS, ULONG, ULONG_PTR, WDFCONTEXT, WDFDEVICE, WDFIOTARGET,
     WDFMEMORY, WDFOBJECT, WDFREQUEST, call_unsafe_wdf_function_binding,
 };
 
@@ -30,6 +35,8 @@ pub(crate) struct WorkerRequestContext {
     device_context: *const DeviceContext,
     /// `RequestMemory`: the lookaside buffer used as the read's output; deleted by the completion routine.
     request_memory: WDFMEMORY,
+    /// The epoch the read was claimed in (not in C).
+    ticket: ReadTicket,
 }
 
 declare_context_type!(
@@ -43,7 +50,8 @@ declare_context_type!(
 ///
 /// `WdfRequestForwardToIoQueue(HidQueue)`; if that fails the request is completed with its status.
 /// Otherwise, only when the device is `D0ActiveAndConfigured`, one lower read is issued. A read that
-/// arrives while unconfigured just waits in the queue (SPI-B12/B13, preserved).
+/// arrives while unconfigured waits in the queue until the device is configured, which issues a lower read
+/// for it ([`issue_backlog_reads`]).
 ///
 /// # Safety
 /// `device` is the request's live device and `context` its context; IRQL <= `DISPATCH_LEVEL`.
@@ -79,6 +87,35 @@ unsafe fn delete_object(object: WDFOBJECT) {
     unsafe { call_unsafe_wdf_function_binding!(WdfObjectDelete, object) };
 }
 
+/// Right after the device became configured: one lower read for every upstream read waiting in `HidQueue`
+/// that no current read serves yet ([`amtptp_spikm_core::runtime::DeviceRuntime::backlog_reads`]; the queue
+/// depth is read after the transition). Returns how many reads were attempted.
+///
+/// # Safety
+/// `device` is a live device of this driver and `context` its context; IRQL <= `DISPATCH_LEVEL`.
+pub(crate) unsafe fn issue_backlog_reads(device: WDFDEVICE, context: &DeviceContext) -> u32 {
+    let mut queued: ULONG = 0;
+    // SAFETY: `hid_queue` is the device's manual queue; DriverRequests is optional (NULL).
+    let _state = unsafe {
+        call_unsafe_wdf_function_binding!(
+            WdfIoQueueGetState,
+            context.hid_queue,
+            &raw mut queued,
+            null_mut()
+        )
+    };
+    // SAFETY: caller contract; the closure only reads the tracker.
+    let reads = unsafe {
+        context.with_reads(|runtime, tracker| runtime.backlog_reads(tracker, queued as usize))
+    };
+    for _ in 0..reads {
+        // SAFETY: forwarded caller contract.
+        unsafe { spi_input_issue_request(device, context) };
+    }
+    // At most `queued`, a ULONG.
+    u32::try_from(reads).unwrap_or(u32::MAX)
+}
+
 /// Trace for a lower read that could not be issued (the upstream request stays queued).
 fn trace_issue_failure(step: &[u8], status: NTSTATUS) {
     tlg::write_event!(
@@ -98,10 +135,12 @@ fn trace_issue_failure(step: &[u8], status: NTSTATUS) {
 /// 2. `WdfMemoryCreateFromLookaside` (1024 bytes, `NonPagedPoolNx`). The buffer is zeroed (P2: lookaside
 ///    buffers are not zero-initialized and may hold an earlier read; the completion routine only looks at
 ///    the first `Information` bytes anyway, so this changes nothing observable).
-/// 3. Context = {device context, memory}.
-/// 4. `WdfIoTargetFormatRequestForInternalIoctl(IOCTL_HID_READ_REPORT, no input, output = the memory)`.
-/// 5. `WdfRequestSetCompletionRoutine` with the context pointer, then `WdfRequestSend` (no options, no
-///    timeout).
+/// 3. `WdfIoTargetFormatRequestForInternalIoctl(IOCTL_HID_READ_REPORT, no input, output = the memory)`.
+/// 4. `WdfRequestSetCompletionRoutine` with the context pointer.
+/// 5. Claim the read in the read tracker (not in C): refused when the device is not configured (e.g. it
+///    was suspended since the caller looked) or too many reads are in flight. Context = {device context,
+///    memory, ticket}.
+/// 6. `WdfRequestSend` (no options, no timeout); a failed send unregisters the read again.
 ///
 /// Any failure deletes what was created (memory first, then the request, as in C) and returns silently:
 /// the upstream request stays queued and is served by a later completion.
@@ -166,14 +205,6 @@ pub(crate) unsafe fn spi_input_issue_request(device: WDFDEVICE, context: &Device
         }
         return;
     }
-    // SAFETY: the zero-filled, aligned context of the new request, not yet
-    // visible to anyone else.
-    unsafe {
-        worker_context.write(WorkerRequestContext {
-            device_context: context,
-            request_memory: memory,
-        });
-    }
 
     // SAFETY: valid target and request; output = the lookaside memory, whole
     // (offset NULL); no input.
@@ -211,6 +242,38 @@ pub(crate) unsafe fn spi_input_issue_request(device: WDFDEVICE, context: &Device
         );
     }
 
+    // SAFETY: caller contract; the closure only touches the tracker.
+    let claim = unsafe {
+        context.with_reads(|runtime, reads| runtime.claim_lower_read(reads, lower_request))
+    };
+    let ticket = match claim {
+        Ok(ticket) => ticket,
+        Err(refused) => {
+            tlg::write_event!(
+                PROVIDER,
+                "LowerReadNotClaimed",
+                level(Verbose),
+                keyword(keyword::DEVICE),
+                bool8("TooManyInFlight", &(refused == ClaimRefused::TooManyInFlight))
+            );
+            // SAFETY: both created above, never sent (C order: memory, then request).
+            unsafe {
+                delete_object(memory.cast());
+                delete_object(lower_request.cast());
+            }
+            return;
+        }
+    };
+    // SAFETY: the zero-filled, aligned context of the new request, not yet visible to the completion
+    // routine (the request is not sent yet).
+    unsafe {
+        worker_context.write(WorkerRequestContext {
+            device_context: context,
+            request_memory: memory,
+            ticket,
+        });
+    }
+
     // SAFETY: formatted request for this target; no send options (C: NULL).
     let sent = unsafe {
         call_unsafe_wdf_function_binding!(WdfRequestSend, lower_request, target, null_mut())
@@ -222,6 +285,12 @@ pub(crate) unsafe fn spi_input_issue_request(device: WDFDEVICE, context: &Device
             level(Warning),
             keyword(keyword::DEVICE)
         );
+        // SAFETY: caller contract; the closure only touches the tracker.
+        let _origin = unsafe {
+            context.with_reads(|runtime, reads| {
+                runtime.finish_lower_read(reads, lower_request, ticket)
+            })
+        };
         // SAFETY: the send failed, so the completion routine will not run and
         // both objects are still ours (C order: memory, then request).
         unsafe {
@@ -234,6 +303,9 @@ pub(crate) unsafe fn spi_input_issue_request(device: WDFDEVICE, context: &Device
 /// `AmtPtpRequestCompletionRoutine` (Input.c:157-321): completion of a lower read, IRQL <= `DISPATCH_LEVEL`,
 /// possibly on several CPUs at once.
 ///
+/// 0. Unregister the read (not in C). A read sent before the last suspend is stale: its data is dropped
+///    and `HidQueue` is not touched (P3 fix of SPI-B14), so it cannot complete a request queued after the
+///    resume.
 /// 1. Retrieve the oldest request from `HidQueue`. None: the data is dropped and no new read is issued
 ///    (SPI-B11, preserved).
 /// 2. `(LONG)WdfRequestGetInformation(lower)` < 46: complete it with `STATUS_DEVICE_DATA_ERROR`; the lower
@@ -253,22 +325,36 @@ unsafe extern "C" fn request_completion_routine(
     // SAFETY: `context` is the WORKER_REQUEST_CONTEXT of `spi_request`
     // (registered in spi_input_issue_request), alive until the request is
     // deleted below. Both fields are copied out now, before that delete.
-    let (device_context, request_memory) = unsafe {
+    let (device_context, request_memory, ticket) = unsafe {
         match worker_context.as_ref() {
-            Some(worker) => (worker.device_context, worker.request_memory),
+            Some(worker) => (worker.device_context, worker.request_memory, worker.ticket),
             // Unreachable: spi_input_issue_request never registers a NULL
             // context. The memory handle lives only in that context, so it
             // cannot be deleted here (accepted for an impossible state, SPI-X12).
-            None => (null(), null_mut()),
+            None => (null(), null_mut(), ReadTicket::default()),
         }
     };
 
     // SAFETY: the device context outlives every lower request (they are
     // children of the device); it is only accessed through shared references.
     if let Some(device) = unsafe { device_context.as_ref() } {
-        // SAFETY: `spi_request` is the completed lower request; `params` its
-        // completion parameters, valid during this callback.
-        unsafe { serve_oldest_read(device, spi_request, params) };
+        // SAFETY: the context of a live device; completion routines run at IRQL <= DISPATCH_LEVEL. The
+        // closure only touches the tracker.
+        let origin = unsafe {
+            device.with_reads(|runtime, reads| runtime.finish_lower_read(reads, spi_request, ticket))
+        };
+        if origin == LowerReadOrigin::Current {
+            // SAFETY: `spi_request` is the completed lower request; `params` its
+            // completion parameters, valid during this callback.
+            unsafe { serve_oldest_read(device, spi_request, params) };
+        } else {
+            tlg::write_event!(
+                PROVIDER,
+                "StaleLowerReadDropped",
+                level(Verbose),
+                keyword(keyword::HID_INPUT)
+            );
+        }
     }
 
     // SAFETY: the lower request is ours and complete; it is not used again.

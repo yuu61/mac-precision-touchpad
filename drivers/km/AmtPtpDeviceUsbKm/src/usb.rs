@@ -7,7 +7,7 @@
 //! | `device_descriptor` | `WdfUsbTargetDeviceGetDeviceDescriptor` (Device.c:194) |
 //! | `retrieve_device_traits` | `WDF_USB_DEVICE_INFORMATION_INIT` + `WdfUsbTargetDeviceRetrieveInformation` (Device.c:212) |
 //! | `select_single_interface` | `..._SELECT_CONFIG_PARAMS_INIT_SINGLE_INTERFACE` + `WdfUsbTargetDeviceSelectConfig` (Device.c:437) |
-//! | `configured_pipe_type` | `WDF_USB_PIPE_INFORMATION_INIT` + `WdfUsbInterfaceGetConfiguredPipe` (Device.c:458) |
+//! | `configured_pipe` | `WDF_USB_PIPE_INFORMATION_INIT` + `WdfUsbInterfaceGetConfiguredPipe` (Device.c:458) |
 //! | `set_no_maximum_packet_size_check` | `WdfUsbTargetPipeSetNoMaximumPacketSizeCheck` (Device.c:469) |
 //! | `interrupt_pipe_selected` | the assignment `InterruptPipe = pipe` (Device.c:479) |
 //! | `configure_continuous_reader` | `WDF_USB_CONTINUOUS_READER_CONFIG_INIT` + `WdfUsbTargetPipeConfigContinuousReader` (Interrupt.c:54-65) |
@@ -22,7 +22,7 @@
 
 use core::ptr::{self, NonNull};
 
-use amtptp_usbkm_core::lifecycle::{ContinuousReaderConfig, UsbHardware, UsbPipeType};
+use amtptp_usbkm_core::lifecycle::{ContinuousReaderConfig, UsbHardware, UsbPipeInfo, UsbPipeType};
 use amtptp_usbkm_core::state::UsbDeviceIds;
 use amtptp_usbkm_core::status::NtStatus;
 use amtptp_usbkm_core::wellspring::{
@@ -363,7 +363,7 @@ impl UsbHardware for UsbIo<'_> {
         Ok(single.NumberConfiguredPipes)
     }
 
-    fn configured_pipe_type(&mut self, index: u8) -> UsbPipeType {
+    fn configured_pipe(&mut self, index: u8) -> UsbPipeInfo {
         let mut information = usb_pipe_information_init();
         // SAFETY: the interface handle comes from the successful WdfUsbTargetDeviceSelectConfig just
         // before (the core calls this only after it); `index` < NumberConfiguredPipes; `information` is
@@ -388,12 +388,16 @@ impl UsbHardware for UsbIo<'_> {
             u8_hex("EndpointAddress", &information.EndpointAddress),
             u32("MaximumPacketSize", &information.MaximumPacketSize)
         );
-        match pipe_type {
+        let pipe_type = match pipe_type {
             _WDF_USB_PIPE_TYPE::WdfUsbPipeTypeControl => UsbPipeType::Control,
             _WDF_USB_PIPE_TYPE::WdfUsbPipeTypeIsochronous => UsbPipeType::Isochronous,
             _WDF_USB_PIPE_TYPE::WdfUsbPipeTypeBulk => UsbPipeType::Bulk,
             _WDF_USB_PIPE_TYPE::WdfUsbPipeTypeInterrupt => UsbPipeType::Interrupt,
             _ => UsbPipeType::Invalid,
+        };
+        UsbPipeInfo {
+            pipe_type,
+            endpoint_address: information.EndpointAddress,
         }
     }
 
@@ -452,7 +456,7 @@ impl UsbHardware for UsbIo<'_> {
             )
         };
         if !NT_SUCCESS(status) {
-            // B9 (preserved): the caller ignores this status; only the trace shows it.
+            // The core returns this status from PrepareHardware.
             tlg::write_event!(
                 PROVIDER,
                 "WdfUsbTargetPipeConfigContinuousReaderFailed",

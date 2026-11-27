@@ -26,18 +26,18 @@ The policy terms come from the [behavior policy](README.md#behavior-policy):
 | KM-B6 | FIXED (P2) | When `WdfRequestRetrieveOutputMemory` fails for a dequeued READ_REPORT, `input::complete_read_report(.., Err(status))` completes it with that status and Information 0. In C it leaked, non-cancelable, and removal hung. This failure takes precedence over DATA_ERROR, as in the C order. |
 | KM-B7 | FIXED (P2) | When the output buffer is shorter than 50 bytes, the request is completed with `STATUS_BUFFER_TOO_SMALL` (the `WdfMemoryCopyFromBuffer` status) and nothing is written. In C it leaked. DATA_ERROR takes precedence, as in the C order. |
 | KM-B8 | PRESERVED (P1) | More than 5 finger blocks give `ReadReportResult::DataError`, which completes with `STATUS_DATA_ERROR` and Information 0. The check sits inside the `PtpReportTouch` gate. |
-| KM-B9 | PRESERVED (P3) | `lifecycle::configure_continuous_reader` ignores the `WdfUsbTargetPipeConfigContinuousReader` status and returns success, so PrepareHardware succeeds. *Glue:* trace the failure inside `UsbHardware::configure_continuous_reader`. |
+| KM-B9 | FIXED (P3) | `lifecycle::configure_continuous_reader` returns the `WdfUsbTargetPipeConfigContinuousReader` status, and PrepareHardware fails with it. |
 | KM-B10 | PRESERVED (P1) | `lifecycle::d0_exit` returns the wellspring-OFF status. |
-| KM-B11 | PRESERVED (P1) | `lifecycle::d0_entry` ignores the wellspring-ON status. The switch runs before the reader starts, and the condition `PtpReportButton \|\| IsWellspringModeOn` is kept. |
+| KM-B11 | PRESERVED (P1) status, FIXED (P3) condition | `lifecycle::d0_entry` ignores the wellspring-ON status. The switch runs before the reader starts, now unconditionally: C's condition `PtpReportButton \|\| IsWellspringModeOn` was always true while SET_FEATURE 0x06 was ignored, and would otherwise leave the device in mouse mode after a resume with the button switch off. |
 | KM-B12 | FIXED (P2) *glue* | `WdfPdoInitAllowForwardingRequestToParent` (a PDO-only API, rejected by KMDF on a filter `DeviceInit`, with a verifier break) is not called. It has no other effect. The wire test asserts the DeviceAdd call list without it. |
 | KM-B13 | PRESERVED (P1) | GET/SET_FEATURE complete with Information 0 (`feature::get_feature` / `set_feature` return `Completion::status`). |
 | KM-B14 | PRESERVED (P3) values, FIXED (P2) read | Mode values other than 0 and 3 succeed with no action. `feature::input_mode` reads byte 1 only when it lies inside `reportBufferLen`; otherwise it uses 0, giving `STATUS_NOT_SUPPORTED` and no transfer. C read past the report (fixture tag `ub_oob_read`). |
-| KM-B15 | PRESERVED (P3) behavior, FIXED (P2) read | SET_FEATURE 0x06 succeeds and changes nothing. The traced bits come from `feature::selective_report_trace_bits`, which reads `reportBuffer[2]` through the 3-byte C struct only when that byte exists (it never does for the 2-byte report), and returns `None` otherwise. |
+| KM-B15 | FIXED (P3) | SET_FEATURE 0x06 sets `PtpReportTouch` from bit 0 (Surface Switch) and `PtpReportButton` from bit 1 (Button Switch) of byte 1 (`feature::selective_report_bits`); the reader completion honours them. A report without byte 1 changes nothing. |
 | KM-B16 | FIXED (P2) *glue* | A NULL `reportBuffer` is passed to the core as an empty slice. GET 0x07/0x08 then returns `STATUS_INVALID_BUFFER_SIZE`, which is the C result whenever C does not crash. SET 0x04 treats it as mode 0. |
 | KM-B17 | PRESERVED (P1) | `hid::get_device_attributes` writes only bytes 0..10 (`HidDeviceAttributes::write_to`). `Reserved` keeps the caller's bytes. The fixtures show the caller's prefill there, so this is observable. |
 | KM-B18 | PRESERVED (P1) | ContactID = slot index (`u32::from(i as u8)`). |
 | KM-B19 | PRESERVED (P1) | X/Y are clamped below at 0 only; Y is inverted (`y.max - abs_y`). |
-| KM-B20 | FIXED (P2) stale handle, PRESERVED (P3) selection | `lifecycle::select_interrupt_interface` resets `InterruptPipe` before the selection. A restart that finds no interrupt pipe now fails with `STATUS_INVALID_DEVICE_STATE`; C kept the deleted pipe handle, a use-after-free. It still takes the first interrupt pipe regardless of direction and ignores `tp_ep`. |
+| KM-B20 | FIXED (P2) stale handle, FIXED (P3) selection | `lifecycle::select_interrupt_interface` resets `InterruptPipe` before the selection and takes the first interrupt **IN** pipe. A restart that finds none fails with `STATUS_INVALID_DEVICE_STATE`; C kept the deleted pipe handle, a use-after-free, and took the first interrupt pipe whatever its direction. |
 | KM-B21 | PRESERVED (P1) | The descriptor bytes are reproduced exactly (`hid::REPORT_DESCRIPTOR` = `ptp_hid::descriptor::report_descriptor_u32_id(T2_AXES)`): physical maxima 1300/850, COLLECTION_2 without the unit reset, and Contact ID Logical Max `27 FF FF FF FF`. |
 | KM-B22 | PRESERVED (P3) *glue* | `FILETYPE VFT_APP` in the version resource is a driver-crate resource matter, not core logic. |
 | KM-B23 | PRESERVED (P1) *packaging* | Duplicate INF hardware IDs are an INF matter (`packaging/AmtPtpDevice.inx`). |
@@ -103,7 +103,9 @@ Details:
     callback, which the glue owns: it is documented in `input`'s module docs, and the order-relevant outcomes are
     asserted via `res`.
 - **wire.txt**:
-  - PrepareHardware (39 + 1 B20), D0Entry (45 + 1 B4) and D0Exit (26 + 1 B4) run through `lifecycle::*`. Each
+  - PrepareHardware (37 + 1 B20 + 2 P3: `pipes-int-out-first` takes the interrupt IN pipe 1, and
+    `fail-cont-reader-masked` returns the reader failure), D0Entry (45 + 1 B4) and D0Exit (26 + 1 B4) run through
+    `lifecycle::*`. Each
     asserts the status, `ctx_out`, the wire bytes and the normalized WDF call list (`fake::normalize_ops`). That
     list includes `mem_create`, `ctl_xfer` setup/dir/mdlen and `obj_delete`.
   - The 42 `driver_entry` and 41 `device_add` steps are WDF configuration the glue performs. For these the test
@@ -116,6 +118,8 @@ Details:
   - `ctx_out.iface` and `inputq` are glue-side handles, tracked by the fake. `ptpinputon` is always 0 (the field is
     dropped).
 - **feature.txt**:
+  - The input gates are compared with the P3 rule: a successful SET 0x06 with byte 1 sets `touch` from bit 0 and
+    `button` from bit 1 (C never changed them).
   - Each `ub_oob_read` record is asserted with its P2 result (`0xc00000bb`, no transfer). It is also replayed with
     `reportBufferLen` = 2; that replay must match the C record exactly, which shows the only difference is the
     out-of-report byte.
@@ -194,7 +198,7 @@ The KMDF 1.23 glue. It makes the WDF calls the C code makes, in the C order, and
 | KM-B12 | FIXED (P2) | `WdfPdoInitAllowForwardingRequestToParent` is not called. `evt_device_add` calls only `WdfFdoInitSetFilter` and then CreateDevice. |
 | KM-B16 / KM-B24 | FIXED (P2) / PRESERVED | `queue::xfer_packet` reads `Irp->UserBuffer` only after the core's 16-byte check, and NULL becomes `None`. The report slice is `(reportBuffer, reportBufferLen)`, and a NULL `reportBuffer` becomes a literal empty slice, never `from_raw_parts(NULL, ..)`. hidclass is trusted for the length. |
 | KM-B27 / KM-B3 / KM-B4 | FIXED (P2) | `UsbIo::allocate_transfer_buffer` calls `WdfMemoryCreate(WDF_NO_OBJECT_ATTRIBUTES, NonPagedPoolNx, 'PTPC', 4, ..)`. `TransferBuffer::drop` calls `WdfObjectDelete` once, and only for a real allocation. |
-| KM-B9 | PRESERVED | `UsbIo::configure_continuous_reader` traces a failed `WdfUsbTargetPipeConfigContinuousReader` (`WdfUsbTargetPipeConfigContinuousReaderFailed`) and returns the status; the core masks it. |
+| KM-B9 | FIXED (P3) | `UsbIo::configure_continuous_reader` traces a failed `WdfUsbTargetPipeConfigContinuousReader` (`WdfUsbTargetPipeConfigContinuousReaderFailed`) and returns the status; the core returns it from PrepareHardware. |
 | KM-B6 / KM-B7 | FIXED (P2) | The reader completes a dequeued READ_REPORT on every path: the retrieval status, `STATUS_DATA_ERROR`, or the `WdfMemoryCopyFromBuffer` status. Each failure is traced. The `Request` guard's drop fallback (`STATUS_UNSUCCESSFUL`) is unreachable. |
 | KM-X5 | FIXED (P2) | `UsbIo::control_transfer` returns `STATUS_INVALID_DEVICE_STATE` when no `WDFUSBDEVICE` exists yet. `queue::retrieve_output_memory` maps a (framework-impossible) success with a NULL WDFMEMORY to `STATUS_INVALID_DEVICE_STATE`, so a READ_REPORT is never completed as success without data. That only happens for a SET_FEATURE input mode 3 before the first PrepareHardware, which hidclass never sends. The C would send on a NULL handle, a bugcheck. The other unreachable NULLs are guarded the same way: a missing context, a missing InputQueue in the dispatcher (`STATUS_INVALID_DEVICE_STATE`) or in the reader (packet dropped), and a missing pipe handle (start fails with `STATUS_INVALID_DEVICE_STATE`, stop is skipped). |
 | KM-X6 | FIXED (P2) | The WDF handles in the context (`UsbDevice`, `InterruptPipe`, `UsbInterface`, `InputQueue`) are `AtomicPtr` (Relaxed), like the core state (X1). The context is written once with `ptr.write` right after `WdfDeviceCreate`, and only shared references exist after that. |

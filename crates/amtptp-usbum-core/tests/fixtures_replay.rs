@@ -25,7 +25,7 @@ use amtptp_usbum_core::hid::{
     get_report_descriptor, get_string, route_ioctl, set_feature,
 };
 use amtptp_usbum_core::input::on_read_complete;
-use amtptp_usbum_core::io::PipeType;
+use amtptp_usbum_core::io::{PipeInfo, PipeType};
 use amtptp_usbum_core::pnp::{
     CONTINUOUS_READER_NUM_PENDING_READS, GUID_DEVINTERFACE_AMTPTP_DEVICE, READERS_FAILED_RESULT,
     d0_entry, d0_exit, prepare_hardware,
@@ -41,6 +41,10 @@ const B1_UMASK: &str = "B1 TYPE4/5 SET payload bytes past a short GET are 00 (um
 const B6_LEAK: &str = "B6 failed READ_REPORT is completed with the error instead of leaked";
 const B7_STRING: &str = "B7 GET_STRING copies the string to the caller's buffer";
 const B16_RESTART: &str = "B16 restart does not reconfigure the continuous reader";
+const B21_INTERRUPT_IN: &str = "B21 the reader goes on the first interrupt IN pipe, not the OUT one";
+const B10_GATE: &str = "B10 D0Entry switches the mode on whatever the button switch (= the wsm1 record)";
+const B10_SEQUENCES: &str =
+    "B10 sequences recorded the mode-switch gate; see d0_entry_switches_the_mode_after_selective_reporting_off";
 const GLUE_ONLY: &str = "glue-only (WDF driver object / tracing / no-op EvtIoStop)";
 
 /// Per-file bookkeeping: total records, records that assert P2-fixed behavior (by reason), records
@@ -147,9 +151,30 @@ fn dispatch(
 
 /// Builds the request of an IOCTL record (`inlen/in`, `outlen`, output pre-filled with 0xa5).
 fn ioctl_request(rec: &Rec<'_>) -> FakeReq {
-    let input = rec.hex("in");
+    let mut input = rec.hex("in");
     assert_eq!(input.len() as u64, rec.u("inlen"), "{}: inlen", rec.case());
-    FakeReq::new(input, rec.u("outlen") as usize, 0xa5)
+    let outlen = rec.u("outlen") as usize;
+    // UM-B14 (P3): the C decoded SET_FEATURE 0x06 with bit 0 as the button switch and bit 1 as the
+    // surface switch; the port reads bit 0 as Surface (usage 0x57) and bit 1 as Button (0x58). The port
+    // reaches the recorded state from the byte with bits 0 and 1 exchanged, so the C expectations (state,
+    // the D0Entry mode-switch gate, input gating) apply unchanged.
+    let is_set = match rec.get("ioctl") {
+        Some(code) => code == "0x000b0053",
+        None => rec.get("op") == Some("SetFeature"),
+    };
+    if is_set
+        && outlen == usize::from(ptp_hid::common::REPORTID_FUNCSWITCH)
+        && let Some(byte) = input.get_mut(1)
+    {
+        *byte = (*byte & !0x03) | ((*byte & 0x01) << 1) | ((*byte >> 1) & 0x01);
+        SELECTIVE_SWAPS.with(|swaps| swaps.set(swaps.get() + 1));
+    }
+    FakeReq::new(input, outlen, 0xa5)
+}
+
+thread_local! {
+    /// SET 0x06 switch bytes exchanged by [`ioctl_request`] in the current test.
+    static SELECTIVE_SWAPS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
 }
 
 /// Compares an IOCTL completion with `cpl/status/info` and the output buffer with `out`.
@@ -445,6 +470,7 @@ fn features() {
         assert_eq!(state.snapshot(), rec.state_after(), "{case}: state after");
     }
     tally.assert("feature.txt", 1050, &[(B1_UMASK, 8)], &[], 20);
+    assert_eq!(SELECTIVE_SWAPS.with(core::cell::Cell::get), 258, "SET 0x06 bytes exchanged");
 }
 
 // =================================================================================================
@@ -673,6 +699,12 @@ fn sequences() {
         tally.total += 1;
         let case = rec.case();
         let seq = rec.s("seq");
+        if seq.starts_with("b10") {
+            // UM-B10 (P3): these sequences show the trackpad left in mouse mode after a D0Entry with the
+            // button switch off; the port switches the mode on in every D0Entry.
+            tally.skip(B10_SEQUENCES);
+            continue;
+        }
         let pid = pid_of(&rec);
         if current.as_ref().is_none_or(|(name, _, _)| name != seq) {
             assert_eq!(rec.s("step"), "0", "{case}: sequence starts at step 0");
@@ -748,8 +780,10 @@ fn sequences() {
         check_dev2(&rec, usb);
         assert_eq!(state.snapshot(), rec.state_after(), "{case}: state after");
     }
-    assert_eq!(sequences, 7, "sequence count");
-    tally.assert("sequences.txt", 48, &[], &[], 1);
+    assert_eq!(sequences, 5, "sequence count");
+    tally.assert("sequences.txt", 48, &[], &[(B10_SEQUENCES, 12)], 0);
+    // The only SET 0x06 records of this file are in the B10 sequences.
+    assert_eq!(SELECTIVE_SWAPS.with(core::cell::Cell::get), 0, "SET 0x06 bytes exchanged");
 }
 
 // =================================================================================================
@@ -772,15 +806,25 @@ fn prepare_usb(rec: &Rec<'_>, restart: bool) -> FakeUsb {
         },
         ..FakeUsb::default()
     };
+    // Endpoints 0x81, 0x82, ... (IN), except the OUT endpoint 0x03 of `prep-intout-then-intin`.
+    let ins = |types: &[PipeType]| -> Vec<PipeInfo> {
+        (0_u8..)
+            .zip(types)
+            .map(|(i, &t)| common::pipe(t, 0x81 + i))
+            .collect()
+    };
     let pipes = match case {
         "prep-iface-null" => None,
         "prep-no-pipes" => Some(vec![]),
-        "prep-bulk-only" => Some(vec![Bulk, Bulk]),
-        "prep-bulk-then-int" => Some(vec![Bulk, Interrupt]),
-        "prep-intout-then-intin" => Some(vec![Interrupt, Interrupt]),
-        "prep-int-then-bulk" => Some(vec![Interrupt, Bulk, Bulk]),
-        "prep-control-iso-int" => Some(vec![Control, Isochronous, Interrupt]),
-        _ => Some(vec![Interrupt]),
+        "prep-bulk-only" => Some(ins(&[Bulk, Bulk])),
+        "prep-bulk-then-int" => Some(ins(&[Bulk, Interrupt])),
+        "prep-intout-then-intin" => Some(vec![
+            common::pipe(Interrupt, 0x03),
+            common::pipe(Interrupt, 0x83),
+        ]),
+        "prep-int-then-bulk" => Some(ins(&[Interrupt, Bulk, Bulk])),
+        "prep-control-iso-int" => Some(ins(&[Control, Isochronous, Interrupt])),
+        _ => Some(ins(&[Interrupt])),
     };
     usb.set_pipes(pipes);
     if case == "prep-info-fail" {
@@ -800,10 +844,22 @@ fn prepare_usb(rec: &Rec<'_>, restart: bool) -> FakeUsb {
 #[test]
 fn lifecycle() {
     let text = fixture("wire.txt");
+    let all = records(&text);
     let mut tally = Tally::default();
     for rec in records(&text) {
         tally.total += 1;
         let case = rec.case();
+        // UM-B10 (P3): with the button switch off and the mode off, C skipped the D0Entry mode switch. The
+        // port switches anyway, which is what the record with the mode on (same device register) shows.
+        let gate_companion = case
+            .strip_suffix("-d0entry-gate-btn0-wsm0")
+            .map(|family| format!("{family}-d0entry-gate-btn0-wsm1"))
+            .map(|companion| {
+                all.iter()
+                    .find(|r| r.case() == companion)
+                    .unwrap_or_else(|| panic!("{case}: {companion}"))
+            });
+        let expect = gate_companion.unwrap_or(&rec);
         match rec.s("op") {
             "EvtDeviceAdd" if case == "deviceadd" => {
                 let (d1, d2, d3, d4) = GUID_DEVINTERFACE_AMTPTP_DEVICE;
@@ -845,6 +901,21 @@ fn lifecycle() {
                     after.button_report_on = true;
                     assert_eq!(state.snapshot(), after, "{case}: state after");
                     tally.p2(B16_RESTART);
+                } else if case == "prep-intout-then-intin" {
+                    // B21 (P3): C configured the reader on the interrupt OUT pipe 0.
+                    assert_eq!(rec.i("pipe"), 0, "{case}: C pipe");
+                    assert_eq!(rec.s("nomaxpkt"), "1,0", "{case}: C visits");
+                    assert_eq!(outcome.status, rec.status("status"), "{case}: status");
+                    let expected = rec.s("calls").replace(
+                        "SetNoMaxPktCheck(0),ConfigContinuousReader(0)",
+                        "SetNoMaxPktCheck(0),GetConfiguredPipe(1),SetNoMaxPktCheck(1),ConfigContinuousReader(1)",
+                    );
+                    assert_eq!(calls, expected, "{case}: calls");
+                    assert_eq!(state.snapshot(), rec.state_after(), "{case}: state after");
+                    assert_eq!(usb.interrupt_pipe, Some(1), "{case}: interrupt pipe");
+                    assert_eq!(usb.visited, [true, true], "{case}: visits");
+                    tally.p2(B21_INTERRUPT_IN);
+                    continue;
                 } else {
                     assert_eq!(
                         status_hex(outcome.status),
@@ -884,8 +955,13 @@ fn lifecycle() {
                 let state = device(pid_of(&rec), 0x05ac, 0x0105, (1, 2, 3));
                 state.restore(&rec.state_before());
                 let mut usb = FakeUsb::from_rec(&rec);
+                if let Some(companion) = gate_companion {
+                    assert_eq!(rec.s("dev"), companion.s("dev"), "{case}: same device register");
+                    assert_eq!(rec.s("wire"), "-", "{case}: C skipped the switch");
+                    tally.p2(B10_GATE);
+                }
                 // The framework's WdfIoTargetStart result is part of the record.
-                if let Some(start) = rec
+                if let Some(start) = expect
                     .s("calls")
                     .split(',')
                     .find_map(|c| c.strip_prefix("IoTargetStart(pipe0)="))
@@ -910,21 +986,24 @@ fn lifecycle() {
                 );
                 tally.fake_status(status, &[&usb.failures]);
                 assert_eq!(qpc_calls, rec.u("qpcn"), "{case}: QPC calls");
-                let (wire, masked) = normalize_wire(case, rec.s("wire"));
+                let (wire, masked) = normalize_wire(case, expect.s("wire"));
                 if masked > 0 {
                     tally.p2(B1_UMASK);
                 }
                 assert_eq!(usb.wire_string(), wire, "{case}: wire");
-                check_dev2(&rec, &usb);
+                check_dev2(expect, &usb);
                 // Framework calls without the C WdfMemoryCreate/WdfObjectDelete pair (no allocation).
-                let expected_calls = rec
+                let expected_calls = expect
                     .s("calls")
                     .split(',')
                     .filter(|c| *c != "del" && !c.starts_with("mc"))
                     .collect::<Vec<_>>()
                     .join(",");
                 assert_eq!(usb.calls.join(","), expected_calls, "{case}: calls");
-                assert_eq!(state.snapshot(), rec.state_after(), "{case}: state after");
+                let mut after = expect.state_after();
+                // The reporting clock comes from this record's own QPC sample.
+                after.qpc_frequency = rec.state_after().qpc_frequency;
+                assert_eq!(state.snapshot(), after, "{case}: state after");
                 assert_eq!(rec.s("tl"), "-", "{case}");
             }
             other => panic!("{case}: unknown op {other}"),
@@ -933,7 +1012,12 @@ fn lifecycle() {
     tally.assert(
         "wire.txt",
         259,
-        &[(B1_UMASK, 16), (B16_RESTART, 16)],
+        &[
+            (B1_UMASK, 16),
+            (B10_GATE, 5),
+            (B16_RESTART, 16),
+            (B21_INTERRUPT_IN, 1),
+        ],
         &[(GLUE_ONLY, 5)],
         20,
     );

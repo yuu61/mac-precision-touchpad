@@ -197,6 +197,9 @@ pub fn started(vid: u16, hdr: usize) -> DeviceSnapshot {
         device_configured: true,
         detour_completed: true,
         io_target_set: true,
+        // Both selective-reporting switches on: what the C input path behaved like (it ignored them).
+        ptp_report_touch: true,
+        ptp_report_button: true,
         qpc_frequency: 10_000_000,
         ..DeviceSnapshot::default()
     }
@@ -497,6 +500,11 @@ impl FilterIo for Mock {
             ));
             Err(NO_MORE_ENTRIES)
         }
+    }
+
+    fn parked_read_count(&mut self) -> usize {
+        // A pure query: the C oracle logs no getters.
+        self.read_queue.len()
     }
 
     fn format_using_current_type(&mut self, request: usize) {

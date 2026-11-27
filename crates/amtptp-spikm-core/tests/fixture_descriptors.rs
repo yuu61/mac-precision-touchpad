@@ -18,6 +18,7 @@ use amtptp_spikm_core::device::{DeviceConfig, ReportType};
 use amtptp_spikm_core::ioctl::{InternalIoctl, classify_internal_ioctl};
 use amtptp_spikm_core::status::{NtStatus, STATUS_BUFFER_TOO_SMALL, STATUS_SUCCESS};
 use common::{Tally, load, prefill, to_hex, wdf_failures};
+use ptp_hid::descriptor::{SPI_CONTACT_ID_LOGICAL_MAX, SPI_CONTACT_ID_MAX_OFFSETS};
 
 const OK: &str = "driver result: success";
 const NOT_FOUND: &str = "driver result: STATUS_NOT_FOUND (injected unreachable state)";
@@ -121,7 +122,17 @@ fn descriptors_and_attributes() {
             "{ctx}"
         );
         assert_eq!(r.get("completed"), "1", "{ctx}");
-        assert_eq!(to_hex(&out), r.get("out"), "{ctx}: out");
+        let mut expected = common::hex(r.get("out"));
+        if status == STATUS_SUCCESS
+            && classify_internal_ioctl(code) == InternalIoctl::GetReportDescriptor
+        {
+            // P3: the C descriptors declare a contact-ID logical maximum of 3; the port declares 4.
+            for offset in SPI_CONTACT_ID_MAX_OFFSETS {
+                assert_eq!(expected[offset], 3, "{ctx}: C contact-ID maximum");
+                expected[offset] = SPI_CONTACT_ID_LOGICAL_MAX;
+            }
+        }
+        assert_eq!(to_hex(&out), to_hex(&expected), "{ctx}: out");
     }
     assert_eq!(tally.get(OK), 63);
     assert_eq!(tally.get(NOT_FOUND), 10);

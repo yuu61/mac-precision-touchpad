@@ -21,7 +21,7 @@ use core::ptr::{self, null_mut};
 
 use amtptp_usbum_core::input;
 use amtptp_usbum_core::io::{
-    ControlPipe, InterruptPipeTarget, PipeType, UsbStringSource, UsbTargetSetup,
+    ControlPipe, InterruptPipeTarget, PipeInfo, PipeType, UsbStringSource, UsbTargetSetup,
 };
 use amtptp_usbum_core::pnp;
 use amtptp_usbum_core::state::UsbDeviceDescriptor;
@@ -187,11 +187,11 @@ impl UsbTargetSetup for UsbSetup<'_> {
         Some(pipes)
     }
 
-    fn visit_configured_pipe(&mut self, index: u8) -> PipeType {
+    fn visit_configured_pipe(&mut self, index: u8) -> PipeInfo {
         self.step = "SelectInterruptInterface";
         let usb_interface = self.context.usb_interface();
         if usb_interface.is_null() {
-            return PipeType::Invalid;
+            return PipeInfo::INVALID;
         }
         let mut pipe_info = usb_pipe_information_init();
         // SAFETY: valid WDFUSBINTERFACE (stored by interface0_configured_pipes); `index` is below the
@@ -207,7 +207,7 @@ impl UsbTargetSetup for UsbSetup<'_> {
         if pipe.is_null() {
             // C would pass NULL to WdfUsbTargetPipeSetNoMaximumPacketSizeCheck; skip the pipe instead.
             self.visited = None;
-            return PipeType::Invalid;
+            return PipeInfo::INVALID;
         }
         // Tell the framework that it is okay to read less than MaximumPacketSize (every visited pipe).
         // SAFETY: valid WDFUSBPIPE just returned by the framework.
@@ -215,12 +215,16 @@ impl UsbTargetSetup for UsbSetup<'_> {
             call_unsafe_wdf_function_binding!(WdfUsbTargetPipeSetNoMaximumPacketSizeCheck, pipe);
         };
         self.visited = Some((index, pipe, pipe_info.EndpointAddress));
-        match pipe_info.PipeType {
+        let pipe_type = match pipe_info.PipeType {
             _WDF_USB_PIPE_TYPE::WdfUsbPipeTypeControl => PipeType::Control,
             _WDF_USB_PIPE_TYPE::WdfUsbPipeTypeIsochronous => PipeType::Isochronous,
             _WDF_USB_PIPE_TYPE::WdfUsbPipeTypeBulk => PipeType::Bulk,
             _WDF_USB_PIPE_TYPE::WdfUsbPipeTypeInterrupt => PipeType::Interrupt,
             _ => PipeType::Invalid,
+        };
+        PipeInfo {
+            pipe_type,
+            endpoint_address: pipe_info.EndpointAddress,
         }
     }
 
@@ -240,10 +244,6 @@ impl UsbTargetSetup for UsbSetup<'_> {
         if pipe != self.context.reader_pipe() {
             self.context.state.set_reader_configured(false);
         }
-    }
-
-    fn has_interrupt_pipe(&self) -> bool {
-        !self.context.interrupt_pipe().is_null()
     }
 
     fn configure_continuous_reader(&mut self, transfer_length: usize) -> NtStatus {

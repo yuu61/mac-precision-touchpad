@@ -12,7 +12,7 @@ use ptp_hid::common::{
     REPORTID_PTPHQA, REPORTID_REPORTMODE,
 };
 use ptp_hid::feature::{
-    DeviceCapsReport, INPUT_MODE_OFFSET, SELECTIVE_REPORT_BITS_OFFSET, SelectiveReportBits,
+    DeviceCapsReport, INPUT_MODE_OFFSET, SelectiveReportBits,
     write_hqa_report,
 };
 
@@ -54,7 +54,8 @@ pub fn get_feature_report(report_id: u8, report_buffer: &mut [u8]) -> NtStatus {
     }
 }
 
-/// The device-state change a `SET_FEATURE` asks for. The fields it writes are never read (HF-B20).
+/// The device-state change a `SET_FEATURE` asks for. `PtpInputOn` is never read (HF-B20); the input
+/// report honours the two selective-reporting switches.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FeatureChange {
     /// Nothing changes (input mode other than 0 or 3).
@@ -64,7 +65,8 @@ pub enum FeatureChange {
         /// New `PtpInputOn`.
         ptp_input_on: bool,
     },
-    /// `PtpReportButton` = bit 0, `PtpReportTouch` = bit 1 of report byte 1.
+    /// `PtpReportTouch` = bit 0 (Surface Switch), `PtpReportButton` = bit 1 (Button Switch) of report
+    /// byte 1.
     SelectiveReporting {
         /// New `PtpReportButton`.
         button_report: bool,
@@ -78,7 +80,8 @@ pub enum FeatureChange {
 /// `STATUS_NOT_SUPPORTED` for every other ID.
 ///
 /// C reads byte 1 without checking `reportBufferLen` (HF-B23). This port reads it only if it is inside
-/// the buffer and uses 0 otherwise (port policy P2, out-of-bounds read).
+/// the buffer. For 0x04 a missing byte reads as 0 (port policy P2); for 0x06 a report without its switch
+/// byte changes nothing ([`SelectiveReportBits::from_report`], P3; C also applied the switches swapped).
 ///
 /// # Errors
 /// Returns `STATUS_NOT_SUPPORTED` for unsupported report IDs.
@@ -94,17 +97,13 @@ pub fn decode_set_feature(report_id: u8, report_buffer: &[u8]) -> Result<Feature
                 _ => FeatureChange::None,
             })
         }
-        REPORTID_FUNCSWITCH => {
-            let byte = report_buffer
-                .get(SELECTIVE_REPORT_BITS_OFFSET)
-                .copied()
-                .unwrap_or(0);
-            let bits = SelectiveReportBits::from_byte(byte);
-            Ok(FeatureChange::SelectiveReporting {
+        REPORTID_FUNCSWITCH => Ok(SelectiveReportBits::from_report(report_buffer).map_or(
+            FeatureChange::None,
+            |bits| FeatureChange::SelectiveReporting {
                 button_report: bits.button_report,
                 surface_report: bits.surface_report,
-            })
-        }
+            },
+        )),
         _ => Err(STATUS_NOT_SUPPORTED),
     }
 }
@@ -143,10 +142,11 @@ mod tests {
         assert_eq!(
             decode_set_feature(6, &[6, 2]),
             Ok(FeatureChange::SelectiveReporting {
-                button_report: false,
-                surface_report: true
+                button_report: true,
+                surface_report: false
             })
         );
+        assert_eq!(decode_set_feature(6, &[6]), Ok(FeatureChange::None));
         assert_eq!(decode_set_feature(7, &[7, 0]), Err(STATUS_NOT_SUPPORTED));
         assert_eq!(decode_set_feature(8, &[8, 0]), Err(STATUS_NOT_SUPPORTED));
         // P2: a missing byte 1 reads as 0.

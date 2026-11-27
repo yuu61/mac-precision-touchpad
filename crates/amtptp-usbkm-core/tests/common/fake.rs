@@ -12,7 +12,7 @@ use core::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
-use amtptp_usbkm_core::lifecycle::{ContinuousReaderConfig, UsbHardware, UsbPipeType};
+use amtptp_usbkm_core::lifecycle::{ContinuousReaderConfig, UsbHardware, UsbPipeInfo, UsbPipeType};
 use amtptp_usbkm_core::state::UsbDeviceIds;
 use amtptp_usbkm_core::status::NtStatus;
 use amtptp_usbkm_core::wellspring::{ControlTransfer, UsbSetupPacket, WELLSPRING_DATA_LEN};
@@ -216,14 +216,18 @@ impl UsbHardware for FakeHw {
         }
     }
 
-    fn configured_pipe_type(&mut self, index: u8) -> UsbPipeType {
+    fn configured_pipe(&mut self, index: u8) -> UsbPipeInfo {
         self.log(format!("usbif_get_pipe:idx={index}"));
-        match self.pipes[usize::from(index)].0 {
-            1 => UsbPipeType::Control,
-            2 => UsbPipeType::Isochronous,
-            3 => UsbPipeType::Bulk,
-            4 => UsbPipeType::Interrupt,
-            _ => UsbPipeType::Invalid,
+        let (pipe_type, endpoint_address) = self.pipes[usize::from(index)];
+        UsbPipeInfo {
+            pipe_type: match pipe_type {
+                1 => UsbPipeType::Control,
+                2 => UsbPipeType::Isochronous,
+                3 => UsbPipeType::Bulk,
+                4 => UsbPipeType::Interrupt,
+                _ => UsbPipeType::Invalid,
+            },
+            endpoint_address,
         }
     }
 

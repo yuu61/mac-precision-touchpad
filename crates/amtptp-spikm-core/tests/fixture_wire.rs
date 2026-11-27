@@ -13,7 +13,9 @@ use amtptp_spikm_core::device::{
     DESIRED_REPORT_TYPE_VALUE_LEN, DeviceConfig, PARAMETERS_KEY_ACCESS, ReportType,
     desired_report_type_value,
 };
-use amtptp_spikm_core::runtime::{DeviceRuntime, DeviceStatus, RECOVERY_TIMER_DUE_TIME};
+use amtptp_spikm_core::runtime::{
+    DeviceRuntime, DeviceStatus, RECOVERY_TIMER_DUE_TIME, ReadTracker,
+};
 use amtptp_spikm_core::status::{
     NtStatus, STATUS_BUFFER_OVERFLOW, STATUS_OBJECT_NAME_NOT_FOUND, STATUS_SUCCESS,
 };
@@ -209,10 +211,14 @@ fn wire_records() {
             let ev = r.get("ev");
             if ev.starts_with("SelfManagedIo") {
                 let mut qpc = 0;
-                let out = rt.on_self_managed_io_init_or_restart(lower_status, || {
-                    qpc += 1;
-                    QPC_FREQUENCY
-                });
+                let out = rt.on_self_managed_io_init_or_restart(
+                    &mut ReadTracker::<u32>::new(),
+                    lower_status,
+                    || {
+                        qpc += 1;
+                        QPC_FREQUENCY
+                    },
+                );
                 assert_eq!(out.status, r.status("status"), "{ctx}");
                 if let Some(due) = out.start_recovery_timer {
                     assert_eq!(due, RECOVERY_TIMER_DUE_TIME);
@@ -234,9 +240,14 @@ fn wire_records() {
             } else {
                 assert_eq!(ev, "TimerCallback", "{ctx}");
                 assert_eq!(r.get("status"), "-", "{ctx}");
-                let mut reads = 0_u32;
-                rt.on_recovery_timer(lower_status, || reads += 1);
-                assert_eq!(reads, r.dec::<u32>("lower_reads"), "{ctx}: lower_reads");
+                let mut tracker = ReadTracker::<u32>::new();
+                let ticket = rt.begin_recovery(&tracker).expect("unconfigured device");
+                assert!(rt.finish_recovery(&mut tracker, ticket, lower_status, || QPC_FREQUENCY));
+                // SPI-B12 (P3): the C callback issued exactly one read whatever was queued; the port
+                // issues one per queued upstream read, and nothing is queued in this record.
+                assert_eq!(r.dec::<u32>("lower_reads"), 1, "{ctx}: C lower_reads");
+                assert_eq!(rt.backlog_reads(&tracker, 0), 0, "{ctx}: lower_reads");
+                assert_eq!(rt.backlog_reads(&tracker, 1), 1, "{ctx}: lower_reads");
             }
             assert_eq!(
                 rt.device_status() as u32,
@@ -246,7 +257,11 @@ fn wire_records() {
             tally.add(SETSTATE);
         } else if case.starts_with("lower-read-") {
             let (_, rt) = bring_up();
-            let _status = rt.on_self_managed_io_init_or_restart(STATUS_SUCCESS, || QPC_FREQUENCY);
+            let _status = rt.on_self_managed_io_init_or_restart(
+                &mut ReadTracker::<u32>::new(),
+                STATUS_SUCCESS,
+                || QPC_FREQUENCY,
+            );
             assert_eq!(rt.device_status(), DeviceStatus::D0ActiveAndConfigured);
             assert_eq!(r.dec::<u32>("ds_in"), 1);
             assert_eq!(r.hex32("code"), LOWER_READ_IOCTL);

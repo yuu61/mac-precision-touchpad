@@ -97,13 +97,12 @@ pub fn input_mode(report: &[u8]) -> u8 {
     report.get(INPUT_MODE_OFFSET).copied().unwrap_or(0)
 }
 
-/// The `ButtonReport` / `SurfaceReport` bits the C traces for `SET_FEATURE` 0x06, read through its 3-byte
-/// `PTP_DEVICE_SELECTIVE_REPORT_MODE_REPORT` from `reportBuffer[2]` (spec B15). That byte is past the
-/// 2-byte report the descriptor defines, and the values have no effect (selective reporting is ignored),
-/// so this returns `None` instead of reading outside the report. For tracing only.
+/// The switches of `SET_FEATURE` 0x06: byte 1 of the 2-byte report ([`SelectiveReportBits::from_report`];
+/// `None` without byte 1). The C read them from `reportBuffer[2]` through a 3-byte struct, only traced
+/// them and ignored them (spec B15).
 #[must_use]
-pub const fn selective_report_trace_bits(report: &[u8]) -> Option<SelectiveReportBits> {
-    SelectiveReportBits::from_device_mode_struct(report)
+pub const fn selective_report_bits(report: &[u8]) -> Option<SelectiveReportBits> {
+    SelectiveReportBits::from_report(report)
 }
 
 /// `AmtPtpSetFeatures`.
@@ -113,8 +112,9 @@ pub const fn selective_report_trace_bits(report: &[u8]) -> Option<SelectiveRepor
 ///   - 3 (`PTP_COLLECTION_WINDOWS`) → if wellspring mode is off, call [`set_wellspring_mode`]
 ///     to enable it and return its failure status; otherwise (or on success) `STATUS_SUCCESS`;
 ///   - any other value → `STATUS_SUCCESS` with no action (spec B14, preserved).
-/// - 0x06 (selective reporting) → `STATUS_SUCCESS`, no action: `PtpReportButton`/`PtpReportTouch` are not
-///   changed (spec B15, preserved). See [`selective_report_trace_bits`] for the traced values.
+/// - 0x06 (selective reporting) → `STATUS_SUCCESS`; `PtpReportTouch` = Surface Switch (bit 0) and
+///   `PtpReportButton` = Button Switch (bit 1) of [`selective_report_bits`], which the reader completion
+///   honours (P3 fix of spec B15: C ignored the report). A report without byte 1 changes nothing.
 /// - any other ID → `STATUS_NOT_SUPPORTED`.
 ///
 /// Must run at `PASSIVE_LEVEL` (synchronous control transfers). `input_buffer_length` is
@@ -148,7 +148,12 @@ pub fn set_feature<'a, T: ControlTransfer + ?Sized, F: FnOnce() -> Option<SetFea
                 _ => Completion::status(STATUS_SUCCESS),
             }
         }
-        REPORTID_FUNCSWITCH => Completion::status(STATUS_SUCCESS),
+        REPORTID_FUNCSWITCH => {
+            if let Some(bits) = selective_report_bits(packet.report_buffer) {
+                state.set_selective_reporting(bits);
+            }
+            Completion::status(STATUS_SUCCESS)
+        }
         _ => Completion::status(STATUS_NOT_SUPPORTED),
     }
 }
@@ -218,12 +223,12 @@ mod tests {
         assert_eq!(input_mode(&[0x04, 0x03]), 3);
         assert_eq!(input_mode(&[0x04]), 0);
         assert_eq!(input_mode(&[]), 0);
-        assert_eq!(selective_report_trace_bits(&[0x06, 0x03]), None);
+        assert_eq!(selective_report_bits(&[0x06]), None);
         assert_eq!(
-            selective_report_trace_bits(&[0x06, 0x00, 0x03]),
+            selective_report_bits(&[0x06, 0x01]),
             Some(SelectiveReportBits {
-                button_report: true,
-                surface_report: true
+                surface_report: true,
+                button_report: false
             })
         );
     }

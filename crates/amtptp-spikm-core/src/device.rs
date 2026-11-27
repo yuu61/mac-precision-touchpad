@@ -1,6 +1,7 @@
-//! Device identification: `SpiTrackpadConfigTable`, the PID-to-family switch, `REPORT_TYPE`, and the
-//! `PrepareHardware` logic that fills the device configuration (C `DEVICE_CONTEXT` fields `HidVendorID`,
-//! `HidProductID`, `HidVersionNumber`, `TrackpadInfo` and `ReportType`).
+//! Device identification: the SPI model table ([`SPI_MODELS`]: coordinate range and descriptor family of
+//! every PID), `REPORT_TYPE`, and the `PrepareHardware` logic that fills the device configuration (C
+//! `DEVICE_CONTEXT` fields `HidVendorID`, `HidProductID`, `HidVersionNumber`, `TrackpadInfo` and
+//! `ReportType`).
 
 use core::sync::atomic::{AtomicI16, AtomicU16, AtomicU32, Ordering};
 
@@ -42,41 +43,64 @@ impl SpiTrackpadInfo {
         y_max: 0,
     };
 
-    const fn apple(product_id: u16, x_min: i16, x_max: i16, y_min: i16, y_max: i16) -> Self {
+}
+
+/// One SPI trackpad model: its coordinate range (with the PID) and its descriptor family. This is the
+/// only place a PID is listed: identification ([`lookup_trackpad`]) and descriptor selection
+/// ([`family_for_product`]) both read it, and the INF test in `xtask` checks that every SPI binding of the
+/// INF resolves to an entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SpiModel {
+    /// `SpiTrackpadConfigTable` entry: VID, PID and coordinate range.
+    pub trackpad: SpiTrackpadInfo,
+    /// The descriptor family (the C `HidProductID` switches of Hid.c).
+    pub family: Family,
+}
+
+impl SpiModel {
+    const fn apple(
+        family: Family,
+        product_id: u16,
+        (x_min, x_max): (i16, i16),
+        (y_min, y_max): (i16, i16),
+    ) -> Self {
         Self {
-            vendor_id: APPLE_VENDOR_ID,
-            product_id,
-            x_min,
-            x_max,
-            y_min,
-            y_max,
+            trackpad: SpiTrackpadInfo {
+                vendor_id: APPLE_VENDOR_ID,
+                product_id,
+                x_min,
+                x_max,
+                y_min,
+                y_max,
+            },
+            family,
         }
     }
 }
 
-/// Number of real entries in [`SPI_TRACKPAD_CONFIG_TABLE`].
-pub const SPI_TRACKPAD_CONFIG_COUNT: usize = 9;
+/// Number of entries in [`SPI_MODELS`].
+pub const SPI_MODEL_COUNT: usize = 9;
 
-/// `SpiTrackpadConfigTable` (AppleDefinition.h:52-71) without its `{0}` terminator, in C order.
+/// The SPI models: `SpiTrackpadConfigTable` (AppleDefinition.h:52-71, without its `{0}` terminator, in C
+/// order) merged with the PID-to-family switches of Hid.c, which covered the same 9 PIDs.
 ///
-/// PID 0x0280 is bound by the INF but absent here; such a device fails `PrepareHardware` with
-/// `STATUS_NOT_FOUND` (preserved known issue SPI-B17).
-pub static SPI_TRACKPAD_CONFIG_TABLE: [SpiTrackpadInfo; SPI_TRACKPAD_CONFIG_COUNT] = [
+/// PID 0x0280 is not an SPI trackpad: the INF binds it only to the USB KMDF driver.
+pub static SPI_MODELS: [SpiModel; SPI_MODEL_COUNT] = [
     // MacBookPro11,1 / MacBookPro12,1
-    SpiTrackpadInfo::apple(0x0272, -4750, 5280, -150, 6730),
-    SpiTrackpadInfo::apple(0x0273, -4750, 5280, -150, 6730),
+    SpiModel::apple(Family::F2, 0x0272, (-4750, 5280), (-150, 6730)),
+    SpiModel::apple(Family::F2, 0x0273, (-4750, 5280), (-150, 6730)),
     // MacBook9
-    SpiTrackpadInfo::apple(0x0275, -5087, 5579, -128, 6089),
+    SpiModel::apple(Family::F1, 0x0275, (-5087, 5579), (-128, 6089)),
     // MacBookPro14,1 / MacBookPro14,2
-    SpiTrackpadInfo::apple(0x0276, -6243, 6749, -170, 7685),
-    SpiTrackpadInfo::apple(0x0277, -6243, 6749, -170, 7685),
+    SpiModel::apple(Family::F3a, 0x0276, (-6243, 6749), (-170, 7685)),
+    SpiModel::apple(Family::F3a, 0x0277, (-6243, 6749), (-170, 7685)),
     // MacBookPro14,3
-    SpiTrackpadInfo::apple(0x0278, -7456, 7976, -163, 9283),
+    SpiModel::apple(Family::F3b, 0x0278, (-7456, 7976), (-163, 9283)),
     // MacBook10
-    SpiTrackpadInfo::apple(0x0279, -5087, 5579, -128, 6089),
+    SpiModel::apple(Family::F1, 0x0279, (-5087, 5579), (-128, 6089)),
     // MacBookAir7,2 fallback
-    SpiTrackpadInfo::apple(0x0290, -5087, 5579, -128, 6089),
-    SpiTrackpadInfo::apple(0x0291, -5087, 5579, -128, 6089),
+    SpiModel::apple(Family::F1, 0x0290, (-5087, 5579), (-128, 6089)),
+    SpiModel::apple(Family::F1, 0x0291, (-5087, 5579), (-128, 6089)),
 ];
 
 /// The `PrepareHardware` table lookup (Device.c:244-259): the first entry whose `VendorId` **and**
@@ -87,14 +111,13 @@ pub static SPI_TRACKPAD_CONFIG_TABLE: [SpiTrackpadInfo; SPI_TRACKPAD_CONFIG_COUN
 /// sentinel-based indexing.
 #[must_use]
 pub fn lookup_trackpad(vendor_id: u16, product_id: u16) -> Option<&'static SpiTrackpadInfo> {
-    SPI_TRACKPAD_CONFIG_TABLE
+    SPI_MODELS
         .iter()
+        .map(|model| &model.trackpad)
         .find(|e| e.vendor_id == vendor_id && e.product_id == product_id)
 }
 
-/// The descriptor family selected by the `HidProductID` switches in `AmtPtpGetHidDescriptor` and
-/// `AmtPtpGetReportDescriptor` (Hid.c:147-282, 403-475). The switch is independent of the config table,
-/// but covers the same 9 PIDs.
+/// The descriptor family of an SPI model.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Family {
     /// Series 1: PIDs 0x0275, 0x0279, 0x0290, 0x0291 (MacBook9/10, MacBookAir7,2 fallback).
@@ -107,16 +130,15 @@ pub enum Family {
     F3b,
 }
 
-/// The `HidProductID` switch: which descriptor family a PID uses, or `None` for the `default:` branch.
+/// The `HidProductID` switch of `AmtPtpGetHidDescriptor` / `AmtPtpGetReportDescriptor` (Hid.c:147-282,
+/// 403-475): the family of the model with this PID ([`SPI_MODELS`]), or `None` for the `default:`
+/// branch. Like C, the vendor ID is not checked.
 #[must_use]
-pub const fn family_for_product(product_id: u16) -> Option<Family> {
-    match product_id {
-        0x0275 | 0x0279 | 0x0290 | 0x0291 => Some(Family::F1),
-        0x0272 | 0x0273 => Some(Family::F2),
-        0x0276 | 0x0277 => Some(Family::F3a),
-        0x0278 => Some(Family::F3b),
-        _ => None,
-    }
+pub fn family_for_product(product_id: u16) -> Option<Family> {
+    SPI_MODELS
+        .iter()
+        .find(|model| model.trackpad.product_id == product_id)
+        .map(|model| model.family)
 }
 
 /// `REPORT_TYPE` (Device.h:40-44), kept as the raw 32-bit enum value.
@@ -340,15 +362,39 @@ pub const fn desired_report_type_value(
 mod tests {
     use super::*;
 
+    /// The C `HidProductID` switch, kept as the oracle of [`family_for_product`].
+    const fn c_family_switch(product_id: u16) -> Option<Family> {
+        match product_id {
+            0x0275 | 0x0279 | 0x0290 | 0x0291 => Some(Family::F1),
+            0x0272 | 0x0273 => Some(Family::F2),
+            0x0276 | 0x0277 => Some(Family::F3a),
+            0x0278 => Some(Family::F3b),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn model_table_reproduces_the_c_family_switch() {
+        for pid in 0..=u16::MAX {
+            assert_eq!(family_for_product(pid), c_family_switch(pid), "{pid:04x}");
+            // The table and the switch covered the same PIDs.
+            assert_eq!(
+                lookup_trackpad(APPLE_VENDOR_ID, pid).is_some(),
+                c_family_switch(pid).is_some(),
+                "{pid:04x}"
+            );
+        }
+    }
+
     #[test]
     fn table_matches_spec_section_8() {
         let pids: [u16; 9] = [
             0x0272, 0x0273, 0x0275, 0x0276, 0x0277, 0x0278, 0x0279, 0x0290, 0x0291,
         ];
-        for (entry, pid) in SPI_TRACKPAD_CONFIG_TABLE.iter().zip(pids) {
-            assert_eq!(entry.vendor_id, APPLE_VENDOR_ID);
-            assert_eq!(entry.product_id, pid);
-            assert!(family_for_product(pid).is_some());
+        for (model, pid) in SPI_MODELS.iter().zip(pids) {
+            assert_eq!(model.trackpad.vendor_id, APPLE_VENDOR_ID);
+            assert_eq!(model.trackpad.product_id, pid);
+            assert_eq!(family_for_product(pid), Some(model.family));
         }
         assert_eq!(lookup_trackpad(0x05ac, 0x0280), None);
         assert_eq!(lookup_trackpad(0, 0), None);
@@ -374,7 +420,7 @@ mod tests {
             hid_vendor_id: 0x05ac,
             hid_product_id: 0x0278,
             hid_version_number: 0x0102,
-            trackpad_info: SpiTrackpadInfo::apple(0x0278, -7456, 7976, -163, 9283),
+            trackpad_info: *lookup_trackpad(APPLE_VENDOR_ID, 0x0278).expect("0278"),
             report_type: ReportType::TOUCHSCREEN,
         };
         shared.store(&cfg);

@@ -170,63 +170,64 @@ impl InputModeReport {
 /// Length of feature report 0x06 as the descriptor defines it: ID plus one byte with two 1-bit switches
 /// and 6 padding bits. This is also `sizeof(PTP_DEVICE_SELECTIVE_REPORT_MODE_REPORT)` in `UsbUm` and `HidFilter`.
 pub const SELECTIVE_REPORT_LEN: usize = 2;
-/// Offset of the switch byte in feature report 0x06 as the descriptor defines it. `UsbUm` and `HidFilter` read
-/// it here.
+/// Offset of the switch byte in feature report 0x06 as the descriptor defines it. Every driver reads it
+/// here.
 pub const SELECTIVE_REPORT_BITS_OFFSET: usize = 1;
-/// `sizeof(PTP_DEVICE_SELECTIVE_REPORT_MODE_REPORT)` in `UsbKm` and `SpiKm`: their C struct has an extra
-/// `DeviceMode` byte at offset 1 that is not in the descriptor.
+/// `sizeof(PTP_DEVICE_SELECTIVE_REPORT_MODE_REPORT)` in the C `UsbKm` and `SpiKm`: their struct had an extra
+/// `DeviceMode` byte at offset 1 that is not in the descriptor, so they read the switches from byte 2,
+/// outside the 2-byte report (spec A7.2). The port reads byte 1 everywhere.
 pub const SELECTIVE_REPORT_DEVICE_MODE_STRUCT_LEN: usize = 3;
-/// Offset at which `UsbKm` and `SpiKm` read the switch byte (after their spurious `DeviceMode` byte). It lies
-/// outside the 2-byte report that the descriptor defines (spec A7.2). How each driver deals with that is
-/// decided in its core crate.
-pub const SELECTIVE_REPORT_DEVICE_MODE_BITS_OFFSET: usize = 2;
 
-/// The switch byte of feature report 0x06, with the C bitfield names (MSVC allocates bitfields from the
-/// LSB): bit 0 `ButtonReport`, bit 1 `SurfaceReport`, bits 2-7 padding.
+/// The switch byte of feature report 0x06: bit 0 is the Surface Switch (Digitizers usage 0x57, the first
+/// usage in the descriptor), bit 1 the Button Switch (usage 0x58); bits 2-7 are padding.
 ///
-/// Preserved naming bug (UM-B14): in the descriptor, bit 0 has usage 0x57 and bit 1 usage 0x58, which the
-/// HID Usage Tables call *Surface Switch* and *Button Switch*. The C names are therefore swapped relative
-/// to the standard. This type keeps the C names; it only maps bits.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// The C drivers named the bits the other way round (`ButtonReport` for bit 0, UM-B14); `UsbUm` applied
+/// them swapped, `UsbKm` ignored the report, and `SpiKm` read the wrong byte. All four drivers now decode
+/// the report with this type and start from [`SelectiveReportBits::POWER_ON`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SelectiveReportBits {
-    /// Bit 0 (`ButtonReport : 1`).
-    pub button_report: bool,
-    /// Bit 1 (`SurfaceReport : 1`).
+    /// Bit 0, Surface Switch: report surface contacts.
     pub surface_report: bool,
+    /// Bit 1, Button Switch: report the button state.
+    pub button_report: bool,
+}
+
+impl Default for SelectiveReportBits {
+    fn default() -> Self {
+        Self::POWER_ON
+    }
 }
 
 impl SelectiveReportBits {
+    /// The state after a cold boot or power reset: report surface contacts and the button state. It is
+    /// not kept across a power reset, so the drivers restore it whenever the device (re)starts
+    /// (`PrepareHardware`).
+    pub const POWER_ON: Self = Self {
+        surface_report: true,
+        button_report: true,
+    };
+
     /// Decodes bits 0 and 1 of the switch byte. The padding bits are ignored.
     #[must_use]
     pub const fn from_byte(byte: u8) -> Self {
         Self {
-            button_report: byte & 0x01 != 0,
-            surface_report: byte & 0x02 != 0,
+            surface_report: byte & 0x01 != 0,
+            button_report: byte & 0x02 != 0,
         }
     }
 
     /// Encodes the switch byte with the padding bits zero.
     #[must_use]
     pub const fn to_byte(self) -> u8 {
-        (self.button_report as u8) | ((self.surface_report as u8) << 1)
+        (self.surface_report as u8) | ((self.button_report as u8) << 1)
     }
 
-    /// Decodes the switch byte at [`SELECTIVE_REPORT_BITS_OFFSET`] (the descriptor's layout, used by `UsbUm`
-    /// and `HidFilter`). Returns `None` if `buf` is shorter than 2 bytes. Byte 0 is not checked.
+    /// Decodes the switch byte at [`SELECTIVE_REPORT_BITS_OFFSET`]. Returns `None` if `buf` is shorter than
+    /// 2 bytes. Byte 0 is not checked.
     #[must_use]
     pub const fn from_report(buf: &[u8]) -> Option<Self> {
         match buf.first_chunk::<SELECTIVE_REPORT_LEN>() {
             Some(&[_, byte]) => Some(Self::from_byte(byte)),
-            None => None,
-        }
-    }
-
-    /// Decodes the switch byte at [`SELECTIVE_REPORT_DEVICE_MODE_BITS_OFFSET`] (the 3-byte C struct layout of
-    /// `UsbKm` and `SpiKm`). Returns `None` if `buf` is shorter than 3 bytes. Bytes 0 and 1 are not checked.
-    #[must_use]
-    pub const fn from_device_mode_struct(buf: &[u8]) -> Option<Self> {
-        match buf.first_chunk::<SELECTIVE_REPORT_DEVICE_MODE_STRUCT_LEN>() {
-            Some(&[_, _, byte]) => Some(Self::from_byte(byte)),
             None => None,
         }
     }
@@ -376,56 +377,40 @@ mod tests {
     fn selective_bits() {
         for byte in 0..=u8::MAX {
             let bits = SelectiveReportBits::from_byte(byte);
-            assert_eq!(bits.button_report, byte & 1 == 1);
-            assert_eq!(bits.surface_report, byte & 2 == 2);
+            assert_eq!(bits.surface_report, byte & 1 == 1);
+            assert_eq!(bits.button_report, byte & 2 == 2);
             assert_eq!(bits.to_byte(), byte & 3);
         }
-        // HidFilter spec D.5: `06 03` -> both on; `06 02` -> button 0, surface 1.
+        // `06 03` -> both on; `06 01` -> surface only (usage 0x57 is bit 0); `06 02` -> button only.
         assert_eq!(
             SelectiveReportBits::from_report(&[0x06, 0x03]),
+            Some(SelectiveReportBits::POWER_ON)
+        );
+        assert_eq!(
+            SelectiveReportBits::from_report(&[0x06, 0x01]),
             Some(SelectiveReportBits {
-                button_report: true,
-                surface_report: true
+                surface_report: true,
+                button_report: false
             })
         );
         assert_eq!(
             SelectiveReportBits::from_report(&[0x06, 0x02]),
             Some(SelectiveReportBits {
-                button_report: false,
-                surface_report: true
+                surface_report: false,
+                button_report: true
             })
         );
         assert_eq!(SelectiveReportBits::from_report(&[0x06]), None);
     }
 
     #[test]
-    fn selective_device_mode_layout_reads_byte_two() {
-        assert_eq!(
-            SelectiveReportBits::from_device_mode_struct(&[0x06, 0x03, 0x01]),
-            Some(SelectiveReportBits {
-                button_report: true,
-                surface_report: false
-            })
-        );
-        // The descriptor's 2-byte report is too short for the 3-byte C struct.
-        assert_eq!(
-            SelectiveReportBits::from_device_mode_struct(&[0x06, 0x03]),
-            None
-        );
-        assert_eq!(
-            SELECTIVE_REPORT_DEVICE_MODE_BITS_OFFSET,
-            SELECTIVE_REPORT_LEN
-        );
-    }
-
-    #[test]
     fn selective_report_encode() {
         let bits = SelectiveReportBits {
-            button_report: true,
             surface_report: false,
+            button_report: true,
         };
-        assert_eq!(bits.to_report(), [0x06, 0x01]);
-        assert_eq!(SelectiveReportBits::default().to_report(), [0x06, 0x00]);
+        assert_eq!(bits.to_report(), [0x06, 0x02]);
+        assert_eq!(SelectiveReportBits::default().to_report(), [0x06, 0x03]);
     }
 
     #[test]
