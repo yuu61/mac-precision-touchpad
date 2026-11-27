@@ -1,5 +1,11 @@
 #Requires -Version 7
 
+[CmdletBinding()]
+param(
+    [ValidateSet('x64', 'arm64', 'all')]
+    [string]$Arch = 'all'
+)
+
 $PSNativeCommandUseErrorActionPreference = $true
 
 if (-not (Test-Path (Join-Path $env:LIBCLANG_PATH 'libclang.dll') -PathType Leaf)) {
@@ -22,8 +28,9 @@ function Expand-KitPackage($PackageId, $Destination, [string[]]$Members) {
 
 # wdk-build expects the SDK and WDK files under the same kit root.
 Expand-KitPackage -PackageId 'microsoft.windows.sdk.cpp' -Destination $kit -Members @('c/Include', 'c/bin')
-foreach ($arch in 'x64', 'arm64') {
-    Expand-KitPackage -PackageId "microsoft.windows.sdk.cpp.$arch" -Destination $sdkLib -Members @('c/um', 'c/ucrt')
-    Expand-KitPackage -PackageId "microsoft.windows.wdk.$arch" -Destination $kit -Members @('c/Include', 'c/Lib')
+$arches = if ($Arch -eq 'all') { @('x64', 'arm64') } else { @($Arch) }
+foreach ($a in $arches) {
+    Expand-KitPackage -PackageId "microsoft.windows.sdk.cpp.$a" -Destination $sdkLib -Members @('c/um', 'c/ucrt')
+    Expand-KitPackage -PackageId "microsoft.windows.wdk.$a" -Destination $kit -Members @('c/Include', 'c/Lib')
 }
 "WDKContentRoot=$kit" >> $env:GITHUB_ENV
