@@ -23,6 +23,7 @@ AmtPtpDeviceUsbKm.sys = 1,,
 AmtPtpDeviceUsbUm.dll = 1,,
 AmtPtpDeviceSpiKm.sys = 1,,
 AmtPtpHidFilter.sys   = 1,,
+AmtPtpBthFilter.sys   = 1,,
 
 [Manufacturer]
 ; Two TargetOSVersion-decorated models sections (Windows picks the highest one <= the running build):
@@ -64,6 +65,8 @@ AmtPtpHidFilter.sys   = 1,,
 ; Magic Trackpad 2 Bluetooth
 %AmtPtpHidFilter.DeviceDesc%=AmtPtpHidFilter_MiniPortDevice, HID\{00001124-0000-1000-8000-00805f9b34fb}_VID&0001004c_PID&0265&Col01
 %AmtPtpHidFilter.NullDeviceDesc%=AmtPtpHidFilter_NullDevice, HID\{00001124-0000-1000-8000-00805f9b34fb}_VID&0001004c_PID&0265&Col02
+%AmtPtpHidFilter.VendorDeviceDesc%=AmtPtpHidFilter_NullDevice, HID\{00001124-0000-1000-8000-00805f9b34fb}_VID&0001004c_PID&0265&Col03
+%AmtPtpBthFilter.DeviceDesc%=AmtPtpBthFilter_Device, BTHENUM\{00001124-0000-1000-8000-00805f9b34fb}_VID&0001004c_PID&0265
 
 [Standard.NT$ARCH$.10.0...17134]
 ; Apple T2
@@ -122,6 +125,8 @@ AmtPtpHidFilter.sys   = 1,,
 ; Magic Trackpad 2 Bluetooth
 %AmtPtpHidFilter.DeviceDesc%=AmtPtpHidFilter_MiniPortDevice, HID\{00001124-0000-1000-8000-00805f9b34fb}_VID&0001004c_PID&0265&Col01
 %AmtPtpHidFilter.NullDeviceDesc%=AmtPtpHidFilter_NullDevice, HID\{00001124-0000-1000-8000-00805f9b34fb}_VID&0001004c_PID&0265&Col02
+%AmtPtpHidFilter.VendorDeviceDesc%=AmtPtpHidFilter_NullDevice, HID\{00001124-0000-1000-8000-00805f9b34fb}_VID&0001004c_PID&0265&Col03
+%AmtPtpBthFilter.DeviceDesc%=AmtPtpBthFilter_Device, BTHENUM\{00001124-0000-1000-8000-00805f9b34fb}_VID&0001004c_PID&0265
 
 ; Null Device
 [AmtPtpHidFilter_NullDevice]
@@ -133,6 +138,9 @@ AddService = ,2    ; no value for the service name
 ; File paylods for each set of driver
 [FilterDriver_Payload]
 AmtPtpHidFilter.sys
+
+[BthFilterDriver_Payload]
+AmtPtpBthFilter.sys
 
 [PtpKmDrivers_Dir]
 AmtPtpDeviceUsbKm.sys
@@ -176,6 +184,41 @@ ErrorControl   = 1               ; SERVICE_ERROR_NORMAL
 ServiceBinary  = %13%\AmtPtpHidFilter.sys
 
 [AmtPtpHidFilter_wdfsect]
+KmdfLibraryVersion = $KMDFVERSION$
+
+; Bluetooth HID node of the Magic Trackpad 2: the inbox HidBth function driver (hidbth.inf) with
+; AmtPtpBthFilter below it. The filter appends a vendor collection (Col03: input 0x31, feature 0xF1)
+; to the SDP HID descriptor and pads the 0x31 reports to their declared length, so HIDCLASS delivers
+; them and AmtPtpHidFilter (Col01) reads Col03 like any HID client.
+[AmtPtpBthFilter_Device.NT]
+Include = hidbth.inf, input.inf
+Needs = HIDBTH_Inst.NT, HID_Inst.NT
+CopyFiles = BthFilterDriver_Payload
+
+[AmtPtpBthFilter_Device.NT.HW]
+Include = hidbth.inf
+Needs = HIDBTH_Inst.NT.HW
+AddReg = AmtPtpBthFilter_AddReg
+
+[AmtPtpBthFilter_AddReg]
+HKR,,"LowerFilters",0x00010008,"AmtPtpBthFilter"
+
+[AmtPtpBthFilter_Device.NT.Services]
+Include = hidbth.inf
+Needs = HIDBTH_Inst.NT.Services
+AddService = AmtPtpBthFilter,, AmtPtpBthFilter_Service_Inst
+
+[AmtPtpBthFilter_Device.NT.Wdf]
+KmdfService = AmtPtpBthFilter, AmtPtpBthFilter_wdfsect
+
+[AmtPtpBthFilter_Service_Inst]
+DisplayName    = %AmtPtpBthFilter.SVCDESC%
+ServiceType    = 1               ; SERVICE_KERNEL_DRIVER
+StartType      = 3               ; SERVICE_DEMAND_START
+ErrorControl   = 1               ; SERVICE_ERROR_NORMAL
+ServiceBinary  = %13%\AmtPtpBthFilter.sys
+
+[AmtPtpBthFilter_wdfsect]
 KmdfLibraryVersion = $KMDFVERSION$
 
 ; USB KM
@@ -293,3 +336,6 @@ AmtPtpHidRootDevice.DeviceDesc = "Apple Multi-touch Trackpad HID Device"
 AmtPtpHidFilter.DeviceDesc = "Apple Multi-touch Trackpad HID Filter"
 AmtPtpHidFilter.NullDeviceDesc = "Apple Multi-touch Auxiliary Services"
 AmtPtpHidFilter.SVCDESC = "Apple Multi-touch Trackpad HID Filter Service"
+AmtPtpHidFilter.VendorDeviceDesc = "Apple Multi-touch Trackpad Raw Input"
+AmtPtpBthFilter.DeviceDesc = "Apple Multi-touch Trackpad (Bluetooth)"
+AmtPtpBthFilter.SVCDESC = "Apple Multi-touch Trackpad Bluetooth Filter Service"

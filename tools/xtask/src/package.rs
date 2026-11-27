@@ -7,7 +7,7 @@
 //! ```text
 //! target/package/<arch>/AmtPtpDevice/            AmtPtpDevice.inf + .cat, AmtPtpDeviceUsbKm.sys,
 //!                                                AmtPtpDeviceUsbUm.dll, AmtPtpDeviceSpiKm.sys,
-//!                                                AmtPtpHidFilter.sys
+//!                                                AmtPtpHidFilter.sys, AmtPtpBthFilter.sys
 //! target/package/<arch>/AmtPtpDevice.symbols/    the matching .pdb files of that package
 //! ```
 //!
@@ -58,6 +58,10 @@ const HID_FILTER: Binary = Binary {
     ws: Workspace::Km,
     name: "AmtPtpHidFilter",
 };
+const BTH_FILTER: Binary = Binary {
+    ws: Workspace::Km,
+    name: "AmtPtpBthFilter",
+};
 
 /// INF/CAT base name and package directory name of the driver package.
 const PACKAGE: &str = "AmtPtpDevice";
@@ -68,7 +72,7 @@ const PACKAGE: &str = "AmtPtpDevice";
 const OBSOLETE_PACKAGES: [&str; 2] = ["AmtPtpHidFilter", "AmtPtpHidFilter.symbols"];
 
 /// The driver binaries of the package. Must match the INF's `[SourceDisksFiles]`.
-const BINARIES: [Binary; 4] = [USB_KM, USB_UM, SPI_KM, HID_FILTER];
+const BINARIES: [Binary; 5] = [USB_KM, USB_UM, SPI_KM, HID_FILTER, BTH_FILTER];
 
 /// `packaging/AmtPtpDevice.inx`.
 fn inx() -> PathBuf {
@@ -672,7 +676,17 @@ mod tests {
                         "{ctx}: no Magic Trackpad 2 transport"
                     );
                 }
-                // The collections the filter disables.
+                // The Bluetooth HID node itself (HidBth with the SDP/padding filter below it).
+                "amtptpbthfilter_device" => {
+                    let id = id.to_ascii_lowercase();
+                    assert!(id.starts_with("bthenum\\{00001124-"), "{ctx}");
+                    let (vid, pid) = vid_pid(&id);
+                    assert!(
+                        amtptp_hidfilter_core::Transport::from_ids(vid, pid).is_ok(),
+                        "{ctx}: no Magic Trackpad 2 transport"
+                    );
+                }
+                // The collections the filter disables or reads (Col03).
                 "amtptphidfilter_nulldevice" => {}
                 other => panic!("{ctx}: unknown install section {other}"),
             }

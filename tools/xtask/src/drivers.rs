@@ -32,7 +32,7 @@ const DRIVER_TARGET_ENV: [&str; 3] = [
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Workspace {
-    /// `drivers/km`: KMDF (`AmtPtpDeviceUsbKm`, `AmtPtpDeviceSpiKm`, `AmtPtpHidFilter`).
+    /// `drivers/km`: KMDF (`AmtPtpDeviceUsbKm`, `AmtPtpDeviceSpiKm`, `AmtPtpHidFilter`, `AmtPtpBthFilter`).
     Km,
     /// `drivers/um`: UMDF (`AmtPtpDeviceUsbUm`).
     Um,

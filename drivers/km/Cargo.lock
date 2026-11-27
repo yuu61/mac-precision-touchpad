@@ -12,6 +12,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "amtptp-bth-filter"
+version = "0.1.0"
+dependencies = [
+ "amtptp-hidfilter-core",
+ "rc-embed",
+ "tracelogging",
+ "wdf-support",
+ "wdk",
+ "wdk-build",
+ "wdk-panic",
+ "wdk-sys",
+]
+
+[[package]]
 name = "amtptp-device-spi-km"
 version = "0.1.0"
 dependencies = [
