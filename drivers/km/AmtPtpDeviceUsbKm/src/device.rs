@@ -140,6 +140,20 @@ unsafe fn create_device(mut device_init: PWDFDEVICE_INIT) -> NTSTATUS {
         return status;
     }
 
+    // SAFETY: PASSIVE_LEVEL; created once, before any callback can use the context; the device
+    // outlives its child lock.
+    let status = unsafe { context.contacts.create(device.cast()) };
+    if !NT_SUCCESS(status) {
+        tlg::write_event!(
+            PROVIDER,
+            "WdfSpinLockCreateFailed",
+            level(Error),
+            keyword(KW_DRIVER),
+            win_ntstatus("Status", &status)
+        );
+        return status;
+    }
+
     // SAFETY: live device; the GUID is a 'static; NULL reference string as in C.
     let status = unsafe {
         call_unsafe_wdf_function_binding!(
@@ -180,6 +194,8 @@ unsafe extern "C" fn evt_device_prepare_hardware(
     // SAFETY: `device` owns `context`; PrepareHardware runs at PASSIVE_LEVEL.
     let mut io = unsafe { UsbIo::new(device, context) };
     let status = lifecycle::prepare_hardware(&context.state, &mut io);
+    // SAFETY: live device context; spinlock created in `create_device`; no WDF calls inside.
+    unsafe { context.contacts.with(amtptp_usbkm_core::input::ContactTracker::reset) };
     let config = context.state.config();
     let pipe = context.state.interrupt_pipe().map_or(-1, i32::from);
     tlg::write_event!(
@@ -215,6 +231,8 @@ unsafe extern "C" fn evt_device_d0_entry(
     };
     // SAFETY: `device` owns `context`; D0Entry runs at PASSIVE_LEVEL.
     let mut io = unsafe { UsbIo::new(device, context) };
+    // SAFETY: live device context; spinlock created in `create_device`; no WDF calls inside.
+    unsafe { context.contacts.with(amtptp_usbkm_core::input::ContactTracker::reset) };
     let status = lifecycle::d0_entry(&context.state, &mut io);
     let wellspring = context.state.wellspring_mode_on();
     if NT_SUCCESS(status) {
@@ -261,6 +279,8 @@ unsafe extern "C" fn evt_device_d0_exit(
     // SAFETY: `device` owns `context`; D0Exit runs at PASSIVE_LEVEL.
     let mut io = unsafe { UsbIo::new(device, context) };
     let outcome = lifecycle::d0_exit(&context.state, &mut io);
+    // SAFETY: live device context; spinlock created in `create_device`; no WDF calls inside.
+    unsafe { context.contacts.with(amtptp_usbkm_core::input::ContactTracker::reset) };
     let mode_switch_status = outcome.mode_switch_status;
     if !NT_SUCCESS(mode_switch_status) {
         tlg::write_event!(

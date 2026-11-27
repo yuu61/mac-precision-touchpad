@@ -89,5 +89,6 @@ pub mod state;
 pub mod status;
 pub mod usb;
 
+pub use ptp_hid::contact_tracker::ContactTracker;
 pub use state::DeviceState;
 pub use status::NtStatus;

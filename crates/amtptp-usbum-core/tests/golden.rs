@@ -1,11 +1,13 @@
-//! Focused unit tests for the golden vectors of the porting spec (`specs/usbum.md`) and for the P2
-//! decisions that no fixture record covers.
+//! Focused unit tests for the golden vectors of the porting spec (`specs/usbum.md`), the P2/P3 fixes,
+//! and Step 2 improvements (descriptor cleanup, `Ws5a`/`Ws9` axis alignment, Wellspring `Confidence`,
+//! coordinate clamping, and `ContactTracker` liftoff synthesis).
 
 #![cfg(test)]
 
 use core::fmt::Write as _;
 mod common;
 
+use amtptp_usbum_core::ContactTracker;
 use amtptp_usbum_core::config::{
     CONFIG_TABLE, Family, TrackpadType, lookup_config, lookup_config_row,
 };
@@ -17,12 +19,16 @@ use amtptp_usbum_core::descriptors::{
 use amtptp_usbum_core::hid::{
     IoctlOutcome, IoctlRoute, TraceEvent, get_string, route_ioctl, set_feature,
 };
-use amtptp_usbum_core::input::{ReadCompleteOutcome, build_report, mt2_contact, on_read_complete, wellspring_contact};
+use amtptp_usbum_core::input::{
+    ReadCompleteOutcome, build_report, mt2_contact, on_read_complete, wellspring_contact,
+};
+use amtptp_usbum_core::io::{PipeInfo, PipeType};
 use amtptp_usbum_core::pnp::{d0_entry, d0_exit, prepare_hardware};
 use amtptp_usbum_core::state::{DeviceState, UsbDeviceDescriptor};
-use amtptp_usbum_core::status::{STATUS_BUFFER_TOO_SMALL, STATUS_INVALID_DEVICE_STATE, STATUS_SUCCESS};
+use amtptp_usbum_core::status::{
+    STATUS_BUFFER_TOO_SMALL, STATUS_INVALID_DEVICE_STATE, STATUS_SUCCESS,
+};
 use amtptp_usbum_core::usb::{wellspring_mode_read_setup, wellspring_mode_write_setup};
-use amtptp_usbum_core::io::{PipeInfo, PipeType};
 use common::{FakeQueue, FakeReq, FakeUsb, hex, to_hex};
 use ptp_hid::common::{MAX_FINGERS, PTP_COLLECTION_WINDOWS};
 use ptp_hid::descriptor::{
@@ -342,8 +348,6 @@ fn config_lookup_is_bounded() {
 
 #[test]
 fn unknown_pid_fails_prepare_hardware() {
-    // Excluded fixture case 1 (B3): the C lookup walks past the table. The port returns
-    // STATUS_INVALID_DEVICE_STATE with the DeviceNotFoundInRegistry event and DeviceInfo = NULL.
     let state = DeviceState::new();
     let mut usb = FakeUsb {
         descriptor: UsbDeviceDescriptor {
@@ -368,7 +372,6 @@ fn unknown_pid_fails_prepare_hardware() {
 
 #[test]
 fn reader_is_configured_once() {
-    // B16 (P2): a PnP stop/start re-runs PrepareHardware; the reader is configured only the first time.
     let state = DeviceState::new();
     let mut usb = FakeUsb::default();
     usb.descriptor.id_product = 0x0265;
@@ -379,7 +382,7 @@ fn reader_is_configured_once() {
     );
     state.set_surface_report_on(false);
     usb.calls.clear();
-    usb.reader_status = STATUS_INVALID_DEVICE_STATE; // what WDF would answer to a second configuration
+    usb.reader_status = STATUS_INVALID_DEVICE_STATE;
     let second = prepare_hardware(&state, &mut usb);
     assert_eq!(
         (second.status, second.configured_reader),
@@ -396,7 +399,6 @@ fn reader_is_configured_once() {
     assert!(state.is_surface_report_on());
 }
 
-/// A Magic Trackpad 2 whose interface 0 has the given pipes.
 fn mt2_with_pipes(pipes: Vec<PipeInfo>) -> (DeviceState, FakeUsb) {
     let mut usb = FakeUsb::default();
     usb.descriptor.id_product = 0x0265;
@@ -406,7 +408,6 @@ fn mt2_with_pipes(pipes: Vec<PipeInfo>) -> (DeviceState, FakeUsb) {
 
 #[test]
 fn reader_goes_on_the_interrupt_in_pipe_after_an_out_pipe() {
-    // B21 (P3): interrupt OUT 0x03, then interrupt IN 0x83.
     let (state, mut usb) = mt2_with_pipes(vec![
         common::pipe(PipeType::Interrupt, 0x03),
         common::interrupt_in(0x83),
@@ -414,7 +415,10 @@ fn reader_goes_on_the_interrupt_in_pipe_after_an_out_pipe() {
     let outcome = prepare_hardware(&state, &mut usb);
     assert_eq!(outcome.status, STATUS_SUCCESS);
     assert_eq!(usb.interrupt_pipe, Some(1));
-    assert_eq!(usb.calls.last().map(String::as_str), Some("ConfigContinuousReader(1)=0x00000000"));
+    assert_eq!(
+        usb.calls.last().map(String::as_str),
+        Some("ConfigContinuousReader(1)=0x00000000")
+    );
 }
 
 #[test]
@@ -426,7 +430,11 @@ fn interrupt_out_pipe_alone_fails_prepare_hardware() {
     let outcome = prepare_hardware(&state, &mut usb);
     assert_eq!(outcome.status, STATUS_INVALID_DEVICE_STATE);
     assert_eq!(usb.interrupt_pipe, None);
-    assert!(!usb.calls.iter().any(|c| c.starts_with("ConfigContinuousReader")));
+    assert!(
+        !usb.calls
+            .iter()
+            .any(|c| c.starts_with("ConfigContinuousReader"))
+    );
     assert!(!state.reader_configured());
 }
 
@@ -474,11 +482,9 @@ fn setup_packets() {
 
 #[test]
 fn type4_short_response_sends_zero_padding() {
-    // B1 (P2): the TYPE4/5 buffer is 4 zeroed bytes, so a 1-byte GET answer leaves bytes 1..3 zero
-    // before the mode byte is patched in.
     let state = DeviceState::new();
     state.set_config_row(lookup_config_row(0x0272));
-    state.set_button_report_on(true); // as after PrepareHardware
+    state.set_button_report_on(true);
     let mut usb = FakeUsb {
         reg: [0x02, 0x00, 0x5a, 0xa5, 0, 0, 0, 0],
         resp: 1,
@@ -507,7 +513,6 @@ fn type4_short_response_sends_zero_padding() {
 #[test]
 fn mt2_golden_vectors() {
     let c = cfg(Family::Mt2);
-    // finger bytes, X, Y, ID, Tip, Conf
     for (bytes, x, y, id, tip, conf) in [
         ("000000001020000013", 3678, 2479, 3, true, true),
         ("01000000 10ac000002", 3679, 2479, 2, true, true),
@@ -515,7 +520,6 @@ fn mt2_golden_vectors() {
         ("ffffff03 304000 0001", 3677, 2480, 1, true, true),
         ("62f19a02 2030000004", 0, 5065, 4, true, true),
         ("00e0ff01 0101000000", 3678, 0, 0, true, true),
-        // Y13 = -4096 maps to the upper edge.
         ("00000002 0101000000", 3678, 5065, 0, true, true),
     ] {
         let raw = hex(&bytes.replace(' ', ""));
@@ -538,12 +542,14 @@ fn mt2_golden_vectors() {
 #[test]
 fn wellspring_golden_vectors() {
     let c = cfg(Family::Ws3);
+    // Step 2 (A-2.2 / A-2.4): Confidence is `major < 2500 && minor < 2500` (minor == 0 stays
+    // confident), and X/Y clamp to WS3's 0..=9626 and 0..=6775 logical spans.
     for (abs_x, abs_y, major, minor, x, y, tip, conf) in [
         (0_i16, 0_i16, 100_i16, 1_i16, 4460_u16, 6700_u16, true, true),
-        (-4460, 6700, 99, 0, 0, 0, false, false),
-        (-5000, 7000, -5, -1, 0, 0, false, false),
+        (-4460, 6700, 99, 0, 0, 0, false, true),
+        (-5000, 7000, -5, -1, 0, 0, false, true),
         (5166, -75, 150, 30, 9626, 6775, true, true),
-        (0x7FFF, -0x8000, 0x4000, 2, 37227, 39468, true, true),
+        (0x7FFF, -0x8000, 0x4000, 2, 9626, 6775, true, false),
     ] {
         let mut finger = [0_u8; 28];
         finger[2..4].copy_from_slice(&abs_x.to_le_bytes());
@@ -566,8 +572,7 @@ fn wellspring_golden_vectors() {
 }
 
 #[test]
-fn type4_frame_vector() {
-    // Spec 7.6 frame-level vector (WS9, 106 bytes, two fingers, button), ScanTime forced to 0xFF.
+fn type4_frame_vector_and_liftoff() {
     let mut packet = [0_u8; 106];
     packet[31] = 1;
     for (offset, value) in [
@@ -582,20 +587,38 @@ fn type4_frame_vector() {
     ] {
         packet[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
     }
-    let report = build_report(cfg(Family::Ws9), &packet, true, true, 0xff);
+    let mut contacts = ContactTracker::new();
+    let report = build_report(cfg(Family::Ws9), &packet, true, true, 0xff, &mut contacts);
+    // Finger 0 is active (flags 03, ID 0, X 0x1340, Y 0x19cb); finger 1 is hover (major 100 < 200).
     let expected = concat!(
-        "05 03 00 00 00 00 40 13 cb 19 00 01 00 00 00 00 00 00 00 00 00 00 00 00 00",
-        "00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ff 00 02 01"
+        "05 03 00 00 00 00 40 13 cb 19 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00",
+        "00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ff 00 01 01"
     )
     .replace(' ', "");
     assert_eq!(to_hex(&report.to_bytes()), expected);
+
+    // Header-only empty frame synthesizes a single TipSwitch=0 liftoff frame for finger 0.
+    let liftoff = build_report(cfg(Family::Ws9), &[0_u8; 46], true, false, 0x100, &mut contacts);
+    assert_eq!(liftoff.contact_count, 1);
+    assert_eq!(
+        liftoff.contacts[0],
+        PtpContact {
+            confidence: true,
+            tip_switch: false,
+            contact_id: 0,
+            x: 0x1340,
+            y: 0x19cb,
+        }
+    );
+    let after = build_report(cfg(Family::Ws9), &[0_u8; 46], true, false, 0x101, &mut contacts);
+    assert_eq!(after.contact_count, 0);
 }
 
 #[test]
 fn report_with_surface_off_is_zero() {
-    // B13 (P2): with the surface off, C sends garbage contacts; the port sends zeros.
     let packet = [0xff_u8; 30 + 28];
-    let report = build_report(cfg(Family::Ws3), &packet, false, false, 7);
+    let mut contacts = ContactTracker::new();
+    let report = build_report(cfg(Family::Ws3), &packet, false, false, 7, &mut contacts);
     let mut expected = [0_u8; 50];
     expected[0] = 0x05;
     expected[46] = 7;
@@ -607,7 +630,10 @@ fn input_scan_time_uses_the_cached_qpc_frequency() {
     let state = started(0x0272);
     let mut usb = FakeUsb::default();
     let frequency = 24_000_000;
-    assert_eq!(d0_entry(&state, &mut usb, || frequency).status, STATUS_SUCCESS);
+    assert_eq!(
+        d0_entry(&state, &mut usb, || frequency).status,
+        STATUS_SUCCESS
+    );
     state.set_wellspring_mode_on(true);
     let packet = [0_u8; 46];
     let mut queue = FakeQueue::with_lengths(&[50; 3]);
@@ -622,18 +648,19 @@ fn input_scan_time_uses_the_cached_qpc_frequency() {
     }
 }
 
-/// `SET_FEATURE` 0x06 `[06, bits]` (bit 0 Surface Switch, bit 1 Button Switch) for each combination,
-/// then a WS3 frame with one contact and the button down.
 #[test]
 fn selective_reporting_shapes_the_input_report() {
     let state = started(0x0236);
     let mut usb = FakeUsb::default();
-    assert_eq!(d0_entry(&state, &mut usb, || 10_000_000).status, STATUS_SUCCESS);
+    assert_eq!(
+        d0_entry(&state, &mut usb, || 10_000_000).status,
+        STATUS_SUCCESS
+    );
     state.set_wellspring_mode_on(true);
     let mut packet = vec![0_u8; 30 + 28];
-    packet[15] = 1; // button
-    packet[30 + 2..30 + 4].copy_from_slice(&1000_i16.to_le_bytes()); // X
-    packet[30 + 16..30 + 18].copy_from_slice(&200_i16.to_le_bytes()); // touch major: tip
+    packet[15] = 1;
+    packet[30 + 2..30 + 4].copy_from_slice(&1000_i16.to_le_bytes());
+    packet[30 + 16..30 + 18].copy_from_slice(&200_i16.to_le_bytes());
     for (bits, contacts, button) in [(0_u8, 0_u8, 0_u8), (1, 1, 0), (2, 0, 1), (3, 1, 1)] {
         let mut req = FakeReq::new(vec![0x06, bits], 6, 0xa5);
         assert_eq!(
@@ -654,9 +681,6 @@ fn selective_reporting_shapes_the_input_report() {
     }
 }
 
-/// UM-B10 (P3): Windows turns both selective-reporting switches off, the device is suspended and resumed.
-/// `D0Entry` still switches the trackpad into multitouch (Wellspring) mode, so turning the switches back
-/// on brings the contacts back without an input-mode report.
 #[test]
 fn d0_entry_switches_the_mode_after_selective_reporting_off() {
     let state = started(0x0236);
@@ -667,7 +691,10 @@ fn d0_entry_switches_the_mode_after_selective_reporting_off() {
     };
     state.set_wellspring_mode_on(true);
     let mut req = FakeReq::new(vec![0x06, 0x00], 6, 0xa5);
-    assert_eq!(set_feature(&state, &mut req, &mut usb), IoctlOutcome::success(2));
+    assert_eq!(
+        set_feature(&state, &mut req, &mut usb),
+        IoctlOutcome::success(2)
+    );
     assert!(!state.is_button_report_on() && !state.is_surface_report_on());
 
     assert_eq!(d0_exit(&state, &mut usb).status, STATUS_SUCCESS);
@@ -682,7 +709,10 @@ fn d0_entry_switches_the_mode_after_selective_reporting_off() {
     );
 
     let mut req = FakeReq::new(vec![0x06, 0x03], 6, 0xa5);
-    assert_eq!(set_feature(&state, &mut req, &mut usb), IoctlOutcome::success(2));
+    assert_eq!(
+        set_feature(&state, &mut req, &mut usb),
+        IoctlOutcome::success(2)
+    );
     let mut packet = vec![0_u8; 30 + 28];
     packet[30 + 16..30 + 18].copy_from_slice(&200_i16.to_le_bytes());
     let mut queue = FakeQueue::with_lengths(&[50]);
@@ -721,7 +751,12 @@ fn short_set_feature_reports_leave_the_device_unchanged() {
     state.set_qual_levels(1, 2, 3);
     let before = state.snapshot();
     let mut usb = FakeUsb::default();
-    for (id, bytes) in [(4, vec![4]), (6, vec![6]), (9, vec![9, 7]), (9, vec![9, 7, 8])] {
+    for (id, bytes) in [
+        (4, vec![4]),
+        (6, vec![6]),
+        (9, vec![9, 7]),
+        (9, vec![9, 7, 8]),
+    ] {
         let mut req = FakeReq::new(bytes, id, 0xa5);
         assert_eq!(
             set_feature(&state, &mut req, &mut usb),
@@ -734,7 +769,6 @@ fn short_set_feature_reports_leave_the_device_unchanged() {
 
 #[test]
 fn set_feature_input_mode_other_values_only_read() {
-    // Modes other than 0/3 still issue the GET, then report Information 2.
     let state = started(0x0265);
     let mut usb = FakeUsb {
         reg: [0x02, 0x01, 0x5a, 0xa5, 0, 0, 0, 0],
@@ -764,7 +798,10 @@ fn get_string_edge_cases() {
     for (source, expected) in [
         (Vec::new(), vec![0, 0]),
         (vec![0x42, 0, 0, 0], vec![0x42, 0, 0, 0]),
-        (common::FakeStrings::utf16("Apple Inc."), common::FakeStrings::utf16("Apple Inc.\0")),
+        (
+            common::FakeStrings::utf16("Apple Inc."),
+            common::FakeStrings::utf16("Apple Inc.\0"),
+        ),
     ] {
         for len in [expected.len() - 1, expected.len(), expected.len() + 7] {
             let mut req = FakeReq::new(vec![0x0e, 0, 0x09, 0x04], len, 0xa5);

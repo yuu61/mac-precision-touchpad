@@ -104,6 +104,7 @@ pub fn prepare_hardware<T: UsbTargetSetup>(
 
     state.set_button_report_on(true);
     state.set_surface_report_on(true);
+    usb.reset_contacts();
     PrepareHardwareOutcome {
         status: STATUS_SUCCESS,
         event: None,
@@ -152,6 +153,7 @@ where
     T: ControlPipe + InterruptPipeTarget,
     F: FnOnce() -> i64,
 {
+    io.with_contacts(ptp_hid::contact_tracker::ContactTracker::reset);
     let mode_switch_status = match state.config() {
         Some(cfg) => io.serialized(|io| set_wellspring_mode(state, cfg, io, true)),
         // P2: C would dereference DeviceInfo == NULL; D0Entry never runs without a config row.
@@ -193,6 +195,7 @@ where
         // P2: see d0_entry.
         None => STATUS_INVALID_DEVICE_STATE,
     };
+    io.with_contacts(ptp_hid::contact_tracker::ContactTracker::reset);
     D0ExitOutcome {
         status: STATUS_SUCCESS,
         mode_switch_status,

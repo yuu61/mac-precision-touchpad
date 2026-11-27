@@ -336,7 +336,13 @@ pub fn set_feature<R: HidRequest, C: ControlPipe>(
     };
     match report_id {
         REPORTID_REPORTMODE => match input.get(1) {
-            Some(&mode) => set_input_mode(state, control, mode),
+            Some(&mode) => {
+                let outcome = set_input_mode(state, control, mode);
+                if !state.is_wellspring_mode_on() {
+                    control.with_contacts(ptp_hid::contact_tracker::ContactTracker::reset);
+                }
+                outcome
+            }
             None => IoctlOutcome::status(STATUS_INVALID_BUFFER_SIZE),
         },
         REPORTID_FUNCSWITCH => {
@@ -345,6 +351,9 @@ pub fn set_feature<R: HidRequest, C: ControlPipe>(
             };
             state.set_button_report_on(bits.button_report);
             state.set_surface_report_on(bits.surface_report);
+            if !bits.surface_report {
+                control.with_contacts(ptp_hid::contact_tracker::ContactTracker::reset);
+            }
             IoctlOutcome::success(SELECTIVE_REPORT_LEN)
         }
         REPORTID_UMAPP_CONF => {

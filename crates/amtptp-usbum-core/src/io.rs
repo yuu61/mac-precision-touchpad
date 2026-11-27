@@ -6,6 +6,8 @@
 //! (for example the result of `WdfMemoryCopyFromBuffer` on a short buffer): those come back through these
 //! traits.
 
+use ptp_hid::contact_tracker::ContactTracker;
+
 use crate::status::NtStatus;
 use crate::usb::SetupPacket;
 
@@ -90,6 +92,10 @@ pub trait ControlPipe {
     fn serialized<R, F: FnOnce(&mut Self) -> R>(&mut self, f: F) -> R {
         f(self)
     }
+
+    /// Runs `f` on the device's [`ContactTracker`] while holding its spin lock. Must not be nested
+    /// inside [`Self::serialized`].
+    fn with_contacts<R, F: FnOnce(&mut ContactTracker) -> R>(&mut self, f: F) -> R;
 }
 
 /// `WdfUsbTargetDeviceAllocAndQueryString` (`GET_STRING`).
@@ -183,6 +189,10 @@ pub trait UsbTargetSetup {
     /// [`crate::pnp::READERS_FAILED_RESULT`]), `NumPendingReads` 0 (framework default), no header/trailer,
     /// no buffer attributes; then `WdfUsbTargetPipeConfigContinuousReader(ctx.InterruptPipe, &cfg)`.
     fn configure_continuous_reader(&mut self, transfer_length: usize) -> NtStatus;
+
+    /// Clears the device's [`ContactTracker`] on `(re)`start (`PrepareHardware`). Default no-op for
+    /// setup-only test doubles.
+    fn reset_contacts(&mut self) {}
 }
 
 /// The I/O target of the interrupt pipe (`WdfUsbTargetPipeGetIoTarget(ctx.InterruptPipe)`).

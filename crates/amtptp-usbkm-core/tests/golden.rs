@@ -1,5 +1,6 @@
 //! The golden vectors of the porting spec (usbkm.md §5, §6.3, §7.4, Appendices A-C), typed in from the
-//! spec independently of the fixture files.
+//! spec independently of the fixture files, updated for Step 2 descriptor cleanup, T2 13-inch descriptor,
+//! `ContactTracker`, and `SET_FEATURE 0x04` mode-0 gating.
 
 #![cfg(test)]
 
@@ -16,17 +17,16 @@ use amtptp_usbkm_core::input::{
 };
 use amtptp_usbkm_core::lifecycle;
 use amtptp_usbkm_core::state::{DeviceState, InputGates, UsbDeviceIds};
-use amtptp_usbkm_core::status::{
-    Completion, STATUS_DATA_ERROR, STATUS_INVALID_BUFFER_SIZE, STATUS_NOT_SUPPORTED,
-};
+use amtptp_usbkm_core::status::{Completion, STATUS_DATA_ERROR, STATUS_INVALID_BUFFER_SIZE};
 use amtptp_usbkm_core::wellspring::{
     ControlTransfer as _, POOL_TAG_PTP_CONTROL, set_wellspring_mode, wellspring_read_setup,
     wellspring_write_setup,
 };
 use common::fake::FakeHw;
 use common::{hex, to_legacy_c_u32};
+use ptp_hid::contact_tracker::ContactTracker;
 
-/// Appendix A, 493 bytes.
+/// Appendix A (legacy C, 493 bytes).
 const APPENDIX_A: &str = "\
 050D0905A10185050922A1022501094709429502750181027501950681039501752027FFFFFFFF09518102050126204E\
 7510550E651109304614059501810246520326E02E09318102450055006500C0050D0922A10225010947094295027501\
@@ -49,12 +49,12 @@ fn report(action: PacketAction) -> [u8; 50] {
     }
 }
 
-/// Spaced hex as printed in the spec → bytes.
+/// Spaced hex as printed in the spec -> bytes.
 fn spaced(s: &str) -> Vec<u8> {
     hex(&s.split_whitespace().collect::<String>())
 }
 
-/// §7.4 B input: two fingers, N = 106.
+/// §7.4 B input: two finger records (finger 0 active, finger 1 hover `major = 20 < 200`), N = 106.
 fn two_finger_packet() -> Vec<u8> {
     spaced(
         "00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
@@ -111,6 +111,7 @@ fn golden_a_header_only_button() {
             &packet,
             InputGates::ON,
             0,
+            &mut ContactTracker::new(),
         ));
         assert_eq!(r, expect);
     }
@@ -120,10 +121,10 @@ fn golden_a_header_only_button() {
 fn golden_b_two_fingers_fallback() {
     let packet = two_finger_packet();
     assert_eq!(packet.len(), 106);
-    // Contact 0: flags 03, ID 0, X 9500, Y 7000. Contact 1: flags 00, ID 1, X 0, Y 0. Count 2, button 0.
+    // Finger 0: flags 03, ID 0, X 9500, Y 7000. Finger 1 is hover (major 20 < 200), ignored on frame 0.
     let want = spaced(
-        "05 03 00 00 00 00 1c 25 58 1b 00 01 00 00 00 00 00 00 00 00 00 00 00 00 00
-         00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 02 00",
+        "05 03 00 00 00 00 1c 25 58 1b 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+         00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 00",
     );
     for pid in [0xffff, 0x027c, 0x027d, 0x0273, 0x1234] {
         let r = report(parse_packet(
@@ -131,6 +132,7 @@ fn golden_b_two_fingers_fallback() {
             &packet,
             InputGates::ON,
             0,
+            &mut ContactTracker::new(),
         ));
         assert_eq!(r.to_vec(), want, "pid {pid:04x}");
     }
@@ -139,10 +141,10 @@ fn golden_b_two_fingers_fallback() {
 #[test]
 fn golden_b_prime_13_inch() {
     let packet = two_finger_packet();
-    // Contact 0: X = -500 + 6243 = 5743, Y = 7685 - 3000 = 4685.
+    // Finger 0: X = -500 + 6243 = 5743, Y = 7685 - 3000 = 4685; hover finger 1 ignored on frame 0.
     let want = spaced(
-        "05 03 00 00 00 00 6f 16 4d 12 00 01 00 00 00 00 00 00 00 00 00 00 00 00 00
-         00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 02 00",
+        "05 03 00 00 00 00 6f 16 4d 12 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+         00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 00",
     );
     for pid in [0x027a, 0x027b] {
         let r = report(parse_packet(
@@ -150,6 +152,7 @@ fn golden_b_prime_13_inch() {
             &packet,
             InputGates::ON,
             0,
+            &mut ContactTracker::new(),
         ));
         assert_eq!(r.to_vec(), want, "pid {pid:04x}");
     }
@@ -158,7 +161,13 @@ fn golden_b_prime_13_inch() {
 #[test]
 fn golden_c_six_fingers_data_error() {
     let packet = vec![0_u8; 226];
-    let action = parse_packet(&FALLBACK_CONFIG, &packet, InputGates::ON, 0);
+    let action = parse_packet(
+        &FALLBACK_CONFIG,
+        &packet,
+        InputGates::ON,
+        0,
+        &mut ContactTracker::new(),
+    );
     assert_eq!(action, PacketAction::Deliver(ReadReportResult::DataError));
     let mut out = [0xa5_u8; 50];
     let PacketAction::Deliver(result) = action else {
@@ -174,7 +183,13 @@ fn golden_c_six_fingers_data_error() {
 #[test]
 fn golden_d_bad_length_dropped() {
     assert_eq!(
-        parse_packet(&FALLBACK_CONFIG, &[0_u8; 47], InputGates::ON, 0),
+        parse_packet(
+            &FALLBACK_CONFIG,
+            &[0_u8; 47],
+            InputGates::ON,
+            0,
+            &mut ContactTracker::new(),
+        ),
         PacketAction::Discard
     );
 }
@@ -188,9 +203,11 @@ fn selective_reporting_shapes_the_input_report() {
     state.on_device_create();
     let mut hw = FakeHw::new(0x027c);
     assert_eq!(lifecycle::prepare_hardware(&state, &mut hw), 0);
+    assert_eq!(lifecycle::d0_entry(&state, &mut hw), 0);
     let mut packet = two_finger_packet();
     packet[31] = 0x01;
-    for (bits, contacts, button) in [(0_u8, 0_u8, 0_u8), (1, 2, 0), (2, 0, 1), (3, 2, 1)] {
+    let mut tracker = ContactTracker::new();
+    for (bits, contacts, button) in [(0_u8, 0_u8, 0_u8), (1, 1, 0), (2, 0, 1), (3, 1, 1)] {
         let switches = [0x06, bits];
         let c = set_feature(
             16,
@@ -204,7 +221,10 @@ fn selective_reporting_shapes_the_input_report() {
             &mut hw,
         );
         assert_eq!(c, Completion::status(0));
-        let r = report(process_packet(&state, &packet, 0));
+        if contacts == 0 {
+            tracker.reset();
+        }
+        let r = report(process_packet(&state, &mut tracker, &packet, 0));
         assert_eq!((r[48], r[49]), (contacts, button), "switch byte {bits}");
         if contacts == 0 {
             assert!(r[1..46].iter().all(|&b| b == 0), "no contact data");
@@ -215,9 +235,6 @@ fn selective_reporting_shapes_the_input_report() {
     assert_eq!(state.input_gates(), InputGates::ON);
 }
 
-/// Windows turns both selective-reporting switches off, then the device is suspended and resumed:
-/// `D0Entry` still switches Wellspring mode on (C gated it on `PtpReportButton`), so turning the switches
-/// back on brings the contacts back.
 #[test]
 fn d0_entry_switches_the_mode_after_selective_reporting_off() {
     let state = DeviceState::new();
@@ -252,11 +269,19 @@ fn d0_entry_switches_the_mode_after_selective_reporting_off() {
     assert_eq!(lifecycle::d0_entry(&state, &mut hw), 0);
     assert!(state.wellspring_mode_on());
     let (_, wire) = hw.take_logs();
-    assert!(wire.contains("out:2109020302000400:02010000"), "mode switch sent: {wire}");
+    assert!(
+        wire.contains("out:2109020302000400:02010000"),
+        "mode switch sent: {wire}"
+    );
 
     assert_eq!(set_switches(&mut hw, 0x03), Completion::status(0));
-    let r = report(process_packet(&state, &two_finger_packet(), 0));
-    assert_eq!(r[48], 2, "contacts reported again");
+    let r = report(process_packet(
+        &state,
+        &mut ContactTracker::new(),
+        &two_finger_packet(),
+        0,
+    ));
+    assert_eq!(r[48], 1, "active contact reported again");
 }
 
 #[test]
@@ -268,22 +293,83 @@ fn input_scan_time_restarts_on_d0_entry() {
     assert_eq!(lifecycle::prepare_hardware(&state, &mut hw), 0);
     assert_eq!(lifecycle::d0_entry(&state, &mut hw), 0);
     let pack = [0_u8; 46];
-    let scan_time = |counter| {
+    let mut contacts = ContactTracker::new();
+    assert_eq!(
+        process_packet(&state, &mut contacts, &[], 0),
+        PacketAction::Discard
+    );
+    let mut scan_time = |counter| {
         let PacketAction::Deliver(ReadReportResult::Report(report)) =
-            process_packet(&state, &pack, counter)
+            process_packet(&state, &mut contacts, &pack, counter)
         else {
             panic!("valid input packet did not produce a report");
         };
         u16::from_le_bytes([report[46], report[47]])
     };
 
-    assert_eq!(process_packet(&state, &[], 0), PacketAction::Discard);
     assert_eq!(scan_time(200_000), 0);
     assert_eq!(scan_time(204_800), 2);
     assert_eq!(lifecycle::d0_exit(&state, &mut hw).status, 0);
     assert_eq!(lifecycle::d0_entry(&state, &mut hw), 0);
     assert_eq!(scan_time(900_000), 0);
     assert_eq!(scan_time(902_400), 1);
+}
+
+#[test]
+fn multi_finger_tracking_liftoff_and_mode0_gate() {
+    let state = DeviceState::new();
+    state.on_device_create();
+    let mut hw = FakeHw::new(0x027a);
+    assert_eq!(lifecycle::prepare_hardware(&state, &mut hw), 0);
+    assert_eq!(lifecycle::d0_entry(&state, &mut hw), 0);
+
+    // Build a 2-finger Type4 packet where both fingers are active (major = 300 >= 200).
+    let mut f0 = vec![0_u8; 46 + 2 * 30];
+    // Finger 0 at (-500, 3000), major 300, minor 200.
+    f0[50..52].copy_from_slice(&(-500_i16).to_le_bytes());
+    f0[52..54].copy_from_slice(&3000_i16.to_le_bytes());
+    f0[64..66].copy_from_slice(&150_i16.to_le_bytes());
+    f0[66..68].copy_from_slice(&100_i16.to_le_bytes());
+    // Finger 1 at (1500, 3000), major 300, minor 0 (still confident: < 2500).
+    f0[80..82].copy_from_slice(&1500_i16.to_le_bytes());
+    f0[82..84].copy_from_slice(&3000_i16.to_le_bytes());
+    f0[94..96].copy_from_slice(&150_i16.to_le_bytes());
+
+    let mut contacts = ContactTracker::new();
+    let r0 = report(process_packet(&state, &mut contacts, &f0, 0));
+    assert_eq!(r0[48], 2);
+    assert_eq!((r0[1], u32::from_le_bytes([r0[2], r0[3], r0[4], r0[5]])), (0x03, 0));
+    assert_eq!((r0[10], u32::from_le_bytes([r0[11], r0[12], r0[13], r0[14]])), (0x03, 1));
+
+    // Finger 0 lifts: 1-finger packet containing only finger 1 near (1510, 3000).
+    let mut f1 = vec![0_u8; 46 + 30];
+    f1[50..52].copy_from_slice(&1510_i16.to_le_bytes());
+    f1[52..54].copy_from_slice(&3000_i16.to_le_bytes());
+    f1[64..66].copy_from_slice(&150_i16.to_le_bytes());
+    let r1 = report(process_packet(&state, &mut contacts, &f1, 100));
+    assert_eq!(r1[48], 2, "slot 0 liftoff + slot 1 active");
+    assert_eq!((r1[1], u32::from_le_bytes([r1[2], r1[3], r1[4], r1[5]])), (0x01, 0));
+    assert_eq!((r1[10], u32::from_le_bytes([r1[11], r1[12], r1[13], r1[14]])), (0x03, 1));
+
+    // Next frame: liftoff finished, only ID 1 remains.
+    let r2 = report(process_packet(&state, &mut contacts, &f1, 200));
+    assert_eq!(r2[48], 1);
+    assert_eq!((r2[1], u32::from_le_bytes([r2[2], r2[3], r2[4], r2[5]])), (0x03, 1));
+
+    // Mode 0 switches Wellspring mode off; packets are discarded and tracker is reset.
+    let mode0 = [0x04_u8, 0x00];
+    assert_eq!(
+        set_feature(
+            16,
+            || Some(SetFeaturePacket { report_id: 0x04, report_buffer: &mode0 }),
+            &state,
+            &mut hw,
+        ),
+        Completion::status(0)
+    );
+    assert!(!state.wellspring_mode_on());
+    assert_eq!(process_packet(&state, &mut contacts, &f1, 300), PacketAction::Discard);
+    assert!(!contacts.has_active_contacts());
 }
 
 #[test]
@@ -319,7 +405,6 @@ fn wellspring_wire_bytes_6_3() {
 
 #[test]
 fn feature_reports_5_5_and_5_6() {
-    // GET 0x07: 07 05 00, Information 0.
     let mut caps = [0xaa_u8; 3];
     let c = get_feature(16, || {
         Some(GetFeaturePacket {
@@ -329,7 +414,7 @@ fn feature_reports_5_5_and_5_6() {
     });
     assert_eq!(c, Completion::status(0));
     assert_eq!(caps, [0x07, 0x05, 0x00]);
-    // GET 0x08: report ID and the full certification blob.
+
     let mut hqa = [0xaa_u8; 257];
     let c = get_feature(16, || {
         Some(GetFeaturePacket {
@@ -348,14 +433,59 @@ fn feature_reports_5_5_and_5_6() {
     });
     assert_eq!(c, Completion::status(STATUS_INVALID_BUFFER_SIZE));
 
-    // SET 0x04 mode 0 → NOT_SUPPORTED; mode 3 while on → success, no transfer; mode 7 → success.
+    // SET 0x04: short report -> INVALID_BUFFER_SIZE; mode 0 while on -> switches Wellspring mode off;
+    // mode 3 while off -> switches Wellspring mode on; mode 3/7 while on -> no transfer.
     let state = DeviceState::new();
     state.on_device_create();
     let mut hw = FakeHw::new(0x027a);
     assert_eq!(lifecycle::prepare_hardware(&state, &mut hw), 0);
     assert_eq!(lifecycle::d0_entry(&state, &mut hw), 0);
     hw.take_logs();
-    for (mode, expect) in [(0_u8, STATUS_NOT_SUPPORTED), (3, 0), (7, 0)] {
+
+    assert_eq!(
+        set_feature(
+            16,
+            || Some(SetFeaturePacket { report_id: 0x04, report_buffer: &[0x04] }),
+            &state,
+            &mut hw,
+        ),
+        Completion::status(STATUS_INVALID_BUFFER_SIZE)
+    );
+    assert_eq!(hw.take_logs().1, "-");
+
+    let mode0 = [0x04_u8, 0x00];
+    assert_eq!(
+        set_feature(
+            16,
+            || Some(SetFeaturePacket { report_id: 0x04, report_buffer: &mode0 }),
+            &state,
+            &mut hw,
+        ),
+        Completion::status(0)
+    );
+    assert!(!state.wellspring_mode_on());
+    assert_eq!(
+        hw.take_logs().1,
+        "in:a101020302000400:0200:00000000;out:2109020302000400:02000000:00000000"
+    );
+
+    let mode3 = [0x04_u8, 0x03];
+    assert_eq!(
+        set_feature(
+            16,
+            || Some(SetFeaturePacket { report_id: 0x04, report_buffer: &mode3 }),
+            &state,
+            &mut hw,
+        ),
+        Completion::status(0)
+    );
+    assert!(state.wellspring_mode_on());
+    assert_eq!(
+        hw.take_logs().1,
+        "in:a101020302000400:0200:00000000;out:2109020302000400:02010000:00000000"
+    );
+
+    for mode in [3_u8, 7] {
         let report = [0x04, mode];
         let c = set_feature(
             16,
@@ -368,10 +498,10 @@ fn feature_reports_5_5_and_5_6() {
             &state,
             &mut hw,
         );
-        assert_eq!(c, Completion::status(expect), "mode {mode}");
+        assert_eq!(c, Completion::status(0), "mode {mode}");
         assert_eq!(hw.take_logs().1, "-");
     }
-    // SET 0x06 [06, bits]: bit 0 Surface Switch -> report_touch, bit 1 Button Switch -> report_button.
+
     for bits in [0_u8, 1, 2, 3] {
         let report = [0x06, bits];
         let c = set_feature(
@@ -395,7 +525,6 @@ fn feature_reports_5_5_and_5_6() {
             "switch byte {bits}"
         );
     }
-    // A report without byte 1 changes nothing.
     let c = set_feature(
         16,
         || {

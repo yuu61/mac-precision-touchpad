@@ -3,7 +3,8 @@
 //! The decoders are shared with the KMDF drivers. [`on_read_complete`] handles the read queue
 //! and control pipe through the [`crate::io`] traits.
 
-use bcm5974::input::{build_usb_report, usb_contact_count};
+use bcm5974::input::{build_tracked_usb_report, usb_contact_count};
+pub use ptp_hid::contact_tracker::ContactTracker;
 use ptp_hid::input::{PTP_REPORT_LEN, PtpContact, PtpReport};
 
 use crate::config::{TrackpadType, WellspringDevice};
@@ -65,15 +66,8 @@ pub const fn classify_packet(
     }
 }
 
-/// Builds input report 0x05 from a validated packet (`AmtPtpServiceTouchInputInterrupt[Type5]` minus the
-/// request handling).
-///
-/// The report starts zero-initialized (UM-B13, P2 FIXED: C leaves unused slots, padding bits and, with
-/// the surface off, `ContactCount` and all contacts as stack garbage). Then:
-/// - `ScanTime = scan_time`;
-/// - if `surface_on`: `ContactCount = min((len - h) / f, 5)` and contacts `0..n` decoded from the finger
-///   block at `h + tp_delta + i * f` (TYPE2-4: [`wellspring_contact`], TYPE5: [`mt2_contact`]);
-/// - if `button_on && packet[tp_button] != 0`: `IsButtonClicked = 1`.
+/// Builds a tracked input report 0x05 from a validated packet using `contacts` for persistent
+/// `ContactID` assignment and 1-frame `TipSwitch = 0` liftoff synthesis.
 #[must_use]
 pub fn build_report(
     cfg: &WellspringDevice,
@@ -81,18 +75,26 @@ pub fn build_report(
     surface_on: bool,
     button_on: bool,
     scan_time: u16,
+    contacts: &mut ContactTracker,
 ) -> PtpReport {
     let format = cfg.profile.tp_type;
-    let mut report = build_usb_report(format, packet, surface_on, button_on, |finger, slot| {
-        if format == TrackpadType::Type5 {
-            let block = finger
-                .first_chunk::<MT2_FINGER_LEN>()
-                .unwrap_or(&[0; MT2_FINGER_LEN]);
-            mt2_contact(cfg, block)
-        } else {
-            wellspring_contact(cfg, finger, slot)
-        }
-    });
+    let mut report = build_tracked_usb_report(
+        format,
+        packet,
+        surface_on,
+        button_on,
+        contacts,
+        |finger, slot| {
+            if format == TrackpadType::Type5 {
+                let block = finger
+                    .first_chunk::<MT2_FINGER_LEN>()
+                    .unwrap_or(&[0; MT2_FINGER_LEN]);
+                mt2_contact(cfg, block)
+            } else {
+                wellspring_contact(cfg, finger, slot)
+            }
+        },
+    );
     report.scan_time = scan_time;
     report
 }
@@ -158,11 +160,15 @@ where
     match classify_packet(cfg, state.is_wellspring_mode_on(), packet.len()) {
         PacketDisposition::Malformed => {
             let reset = emergency_reset(state, cfg, control);
+            control.with_contacts(ContactTracker::reset);
             return ReadCompleteOutcome::EmergencyReset {
                 status: reset.status,
             };
         }
-        PacketDisposition::ModeOff => return ReadCompleteOutcome::DroppedModeOff,
+        PacketDisposition::ModeOff => {
+            control.with_contacts(ContactTracker::reset);
+            return ReadCompleteOutcome::DroppedModeOff;
+        }
         PacketDisposition::Unsupported => return ReadCompleteOutcome::DroppedUnsupported,
         // build_report derives the finger count from the packet length again.
         PacketDisposition::Report { .. } => {}
@@ -187,13 +193,10 @@ where
         Some(scan) => scan,
         None => take_scan_time(),
     };
-    let report = build_report(
-        cfg,
-        packet,
-        state.is_surface_report_on(),
-        state.is_button_report_on(),
-        scan,
-    );
+    let surface_on = state.is_surface_report_on();
+    let button_on = state.is_button_report_on();
+    let report =
+        control.with_contacts(|contacts| build_report(cfg, packet, surface_on, button_on, scan, contacts));
     let bytes: [u8; PTP_REPORT_LEN] = report.to_bytes();
     match request.copy_to_output_memory(&bytes) {
         Ok(()) => {

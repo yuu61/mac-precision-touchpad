@@ -353,6 +353,10 @@ unsafe extern "C" fn evt_io_internal_device_control(
                 &context.state,
                 &mut io,
             );
+            if !context.state.wellspring_mode_on() || !context.state.input_gates().report_touch {
+                // SAFETY: live device context; spinlock created in `create_device`; no WDF calls.
+                unsafe { context.contacts.with(amtptp_usbkm_core::input::ContactTracker::reset) };
+            }
             trace_failure("SetFeature", &completion);
             complete(request, completion);
         }

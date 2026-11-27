@@ -19,6 +19,7 @@
 
 use core::ptr::{self, null_mut};
 
+use amtptp_usbum_core::ContactTracker;
 use amtptp_usbum_core::input;
 use amtptp_usbum_core::io::{
     ControlPipe, InterruptPipeTarget, PipeInfo, PipeType, UsbStringSource, UsbTargetSetup,
@@ -277,6 +278,11 @@ impl UsbTargetSetup for UsbSetup<'_> {
         }
         status
     }
+
+    fn reset_contacts(&mut self) {
+        // SAFETY: `contacts` lock was created in `create_device`; pure state reset.
+        unsafe { self.context.contacts.with(ContactTracker::reset) };
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -304,6 +310,11 @@ impl ControlPipe for DeviceIo<'_> {
         // transfer waits for takes this lock: D0Exit stops the interrupt pipe (waiting for a reader
         // completion that may hold the lock in an emergency reset) before it takes the lock.
         unsafe { context.mode_switch_lock.with(|| f(self)) }
+    }
+
+    fn with_contacts<R, F: FnOnce(&mut ContactTracker) -> R>(&mut self, f: F) -> R {
+        // SAFETY: `contacts` lock was created in `create_device`; never nested with `mode_switch_lock`.
+        unsafe { self.context.contacts.with(f) }
     }
 
     /// `WdfUsbTargetDeviceSendControlTransferSynchronously(UsbDevice, WDF_NO_HANDLE, &options, &setup,

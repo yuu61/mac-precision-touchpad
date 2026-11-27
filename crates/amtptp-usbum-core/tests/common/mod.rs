@@ -344,6 +344,8 @@ pub struct FakeUsb {
     /// How many `serialized` calls are running: every control transfer must run inside exactly one
     /// (the mode-switch lock is not recursive).
     pub serialized_depth: usize,
+    /// Per-device contact lifecycle tracker.
+    pub contacts: amtptp_usbum_core::ContactTracker,
 }
 
 impl Default for FakeUsb {
@@ -368,6 +370,7 @@ impl Default for FakeUsb {
             pipe_name: "pipe0".to_owned(),
             failures: Vec::new(),
             serialized_depth: 0,
+            contacts: amtptp_usbum_core::ContactTracker::new(),
         }
     }
 }
@@ -423,6 +426,17 @@ impl ControlPipe for FakeUsb {
         let result = f(self);
         self.serialized_depth -= 1;
         result
+    }
+
+    fn with_contacts<R, F: FnOnce(&mut amtptp_usbum_core::ContactTracker) -> R>(
+        &mut self,
+        f: F,
+    ) -> R {
+        assert_eq!(
+            self.serialized_depth, 0,
+            "contacts spinlock must never nest inside mode-switch wait lock"
+        );
+        f(&mut self.contacts)
     }
 
     fn send_control_transfer(&mut self, setup: &SetupPacket, data: &mut [u8; 4]) -> NtStatus {
@@ -536,6 +550,14 @@ impl UsbTargetSetup for FakeUsb {
             self.failures.push(self.reader_status);
         }
         self.reader_status
+    }
+
+    fn reset_contacts(&mut self) {
+        assert_eq!(
+            self.serialized_depth, 0,
+            "contacts spinlock must never nest inside mode-switch wait lock"
+        );
+        self.contacts.reset();
     }
 }
 

@@ -9,10 +9,10 @@ use amtptp_usbkm_core::feature::{GetFeaturePacket, SetFeaturePacket, get_feature
 use amtptp_usbkm_core::hid::{InternalIoctl, route_internal_ioctl};
 use amtptp_usbkm_core::lifecycle;
 use amtptp_usbkm_core::state::{DeviceState, InputGates};
-use amtptp_usbkm_core::status::{Completion, STATUS_NOT_SUPPORTED};
+use amtptp_usbkm_core::status::{Completion, STATUS_INVALID_BUFFER_SIZE, STATUS_NOT_SUPPORTED};
 use common::fake::{FakeHw, normalize_ops};
 use common::{Record, Tally, hex, kv, load, num, status, status_str, to_hex};
-use ptp_hid::common::{REPORTID_FUNCSWITCH, REPORTID_PTPHQA};
+use ptp_hid::common::{REPORTID_FUNCSWITCH, REPORTID_PTPHQA, REPORTID_REPORTMODE};
 use ptp_hid::feature::{HQA_REPORT, HQA_REPORT_LEN, SelectiveReportBits};
 
 /// What one replay produced.
@@ -177,14 +177,14 @@ fn feature_fixture() {
     for r in &records {
         let id = r.id();
         if r.has_tag("ub_oob_read") {
-            // SET_FEATURE 0x04 with reportBufferLen < 2: C read reportBuffer[1] past the report. P2: the
-            // byte is outside the report and read as 0 → mode 0 → STATUS_NOT_SUPPORTED, no transfer.
+            // SET_FEATURE 0x04 with reportBufferLen < 2: C read reportBuffer[1] past the report.
+            // Step 2 (B-4): short (< 2-byte) 0x04 reports fail with STATUS_INVALID_BUFFER_SIZE.
             let rblen = num(r.req("report_buffer_len")) as usize;
             assert!(rblen < 2, "{id}");
             let o = run(r, None);
             assert_eq!(
                 o.completion,
-                Completion::status(STATUS_NOT_SUPPORTED),
+                Completion::status(STATUS_INVALID_BUFFER_SIZE),
                 "{id}"
             );
             assert_eq!(o.wire, "-", "{id}");
@@ -193,19 +193,51 @@ fn feature_fixture() {
             if status(r.req("status")) != STATUS_NOT_SUPPORTED {
                 ub_differs_from_c += 1;
             }
-            // The in-report behavior equals C: with byte 1 actually inside a 2-byte report the C
-            // result is reproduced exactly.
+            // With byte 1 actually inside a 2-byte report: mode 3 reproduces C; mode 0 with wsm=0
+            // succeeds without a transfer under Step 2 (B-4).
             let mut longer = Record::parse(
                 r.line_no,
                 &record_line(r)
                     .replace(&format!("report_buffer_len={rblen}"), "report_buffer_len=2"),
             );
             longer.fields.retain(|(k, _)| k != "tags");
-            check(&longer, &run(&longer, None));
-            tally.add("p2_fixed/ub_oob_read");
+            let longer_out = run(&longer, None);
+            if hex(r.req("buf_in"))[1] == 0 {
+                assert_eq!(longer_out.completion, Completion::status(0), "{id}");
+                assert!(!longer_out.wsm_out, "{id}");
+                assert_eq!(longer_out.wire, "-", "{id}");
+            } else {
+                check(&longer, &longer_out);
+            }
+            tally.add("b4_fixed/short_report_0x04");
             continue;
         }
         let o = run(r, None);
+        let is_mode0_set = r.req("kind") == "set_feature"
+            && num(r.req("inlen")) >= 16
+            && r.req("userbuffer") != "null"
+            && num(r.req("report_id")) == u64::from(REPORTID_REPORTMODE)
+            && num(r.req("report_buffer_len")) >= 2
+            && hex(r.req("buf_in"))[1] == 0;
+        if is_mode0_set {
+            // Step 2 (B-4): mode 0 (mouse collection) switches Wellspring mode off when on and
+            // completes with STATUS_SUCCESS (C returned STATUS_NOT_SUPPORTED).
+            assert_eq!(status(r.req("status")), STATUS_NOT_SUPPORTED, "{id}");
+            assert_eq!(o.completion, Completion::status(0), "{id}");
+            assert!(!o.wsm_out, "{id}: mode 0 leaves Wellspring mode off");
+            assert_eq!(to_hex(&o.buf_out), r.req("buf_out"), "{id}");
+            if kv(r.req("st_in"))["wsm"] == "1" {
+                assert_eq!(
+                    o.wire,
+                    "in:a101020302000400:0200:00000000;out:2109020302000400:02000000:00000000",
+                    "{id}"
+                );
+            } else {
+                assert_eq!(o.wire, "-", "{id}");
+            }
+            tally.add("b4_fixed/mode0_switches_off");
+            continue;
+        }
         let null_deletes = check(r, &o);
         let bucket = if r.has_tag("c_bugcheck_B4") {
             // ops identical except the C's WdfObjectDelete(NULL), which the port does not do.
@@ -225,16 +257,17 @@ fn feature_fixture() {
         }
         tally.add(bucket);
     }
-    // Two of the four ub_oob_read records (mode byte 3 past the report) differ from the C record.
+    // Two of the four ub_oob_read records (mode byte 3 past the report) had STATUS_SUCCESS in C.
     assert_eq!(ub_differs_from_c, 2);
     tally.assert_exact(
         "feature.txt",
         140,
         &[
-            ("driver", 128),
+            ("b4_fixed/mode0_switches_off", 4),
+            ("b4_fixed/short_report_0x04", 4),
+            ("driver", 124),
             ("driver/c_pool_overrun_B3_as_written", 6),
             ("p2_fixed/c_bugcheck_B4", 2),
-            ("p2_fixed/ub_oob_read", 4),
         ],
     );
 }

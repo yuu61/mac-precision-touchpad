@@ -15,13 +15,11 @@
 #![cfg(test)]
 
 mod common;
-#[path = "../../bcm5974/tests/support/mt2.rs"]
-mod mt2;
 
 use std::collections::{BTreeMap, HashMap};
 
 use amtptp_usbum_core::NtStatus;
-use amtptp_usbum_core::config::{CONFIG_TABLE, Family, lookup_config_row};
+use amtptp_usbum_core::config::{CONFIG_TABLE, Family, WellspringDevice, lookup_config_row};
 use amtptp_usbum_core::descriptors::{HID_DESCRIPTOR, HidRegistry, REPORT_DESCRIPTOR_LEN};
 use amtptp_usbum_core::hid::{
     IoctlOutcome, IoctlRoute, get_device_attributes, get_feature, get_hid_descriptor,
@@ -637,6 +635,90 @@ fn packets() -> HashMap<String, Vec<u8>> {
     map
 }
 
+/// Independent Step 2 specification for frame-0 `UsbUm` report encoding (both Wellspring TYPE1-4 and
+/// Magic Trackpad 2 TYPE5), plus whether the C single-frame report (after MT2 coordinate clamping)
+/// was unaffected by hover filtering, duplicate-ID filtering, Wellspring `Confidence`, and clamping.
+fn expected_frame0_usbum_report(
+    cfg: &WellspringDevice,
+    packet: &[u8],
+    surf: bool,
+    btn: bool,
+) -> ([u8; 50], bool) {
+    let mut report = [0_u8; 50];
+    report[0] = 0x05;
+    let format = cfg.profile.tp_type;
+    report[49] = u8::from(btn && packet[format.button() as usize] != 0);
+    if !surf {
+        return (report, true);
+    }
+    let header = format.header() as usize;
+    let stride = format.finger_size() as usize;
+    let base = header + format.delta() as usize;
+    let raw_count = ((packet.len() - header) / stride).min(usize::from(MAX_FINGERS));
+    let mut count = 0_usize;
+    let mut matches_c = true;
+
+    if cfg.family == Family::Mt2 {
+        let signed13 = |bits: u32| (bits & 0xfff) as i32 - (bits & 0x1000) as i32;
+        let mut seen_ids = 0_u16;
+        for i in 0..raw_count {
+            let f = &packet[(base + i * 9)..(base + (i + 1) * 9)];
+            assert!(f.len() > 8);
+            let coords = u32::from_le_bytes([f[0], f[1], f[2], f[3]]);
+            let x = (3678 + signed13(coords)).clamp(0, 7612) as u16;
+            let y = (2479 - signed13(coords >> 13)).clamp(0, 5065) as u16;
+            let tip = f[4] > 0;
+            let conf = f[5] <= 172;
+            let id = u32::from(f[8] & 0x0f);
+            if i < 5 && (!tip || (seen_ids & (1 << id)) != 0) {
+                matches_c = false;
+            }
+            if !tip || (seen_ids & (1 << id)) != 0 || count >= 5 {
+                continue;
+            }
+            seen_ids |= 1 << id;
+            let off = 1 + 9 * count;
+            report[off] = u8::from(conf) | 0x02;
+            report[off + 1..off + 5].copy_from_slice(&id.to_le_bytes());
+            report[off + 5..off + 7].copy_from_slice(&x.to_le_bytes());
+            report[off + 7..off + 9].copy_from_slice(&y.to_le_bytes());
+            count += 1;
+        }
+    } else {
+        let x_span = cfg.profile.x.max - cfg.profile.x.min;
+        let y_span = cfg.profile.y.max - cfg.profile.y.min;
+        for i in 0..raw_count {
+            let f = &packet[(base + i * stride)..];
+            assert!(f.len() > 19);
+            let abs_x = i16::from_le_bytes([f[2], f[3]]);
+            let abs_y = i16::from_le_bytes([f[4], f[5]]);
+            let major = i32::from(i16::from_le_bytes([f[16], f[17]])) * 2;
+            let minor = i32::from(i16::from_le_bytes([f[18], f[19]])) * 2;
+            let unclamped_x = (i32::from(abs_x) - cfg.profile.x.min).max(0);
+            let unclamped_y = (cfg.profile.y.max - i32::from(abs_y)).max(0);
+            let tip = major >= 200;
+            let conf = major < 2500 && minor < 2500;
+            let c_conf = minor > 0;
+            if i < 5 && (!tip || conf != c_conf || unclamped_x > x_span || unclamped_y > y_span) {
+                matches_c = false;
+            }
+            if !tip || count >= 5 {
+                continue;
+            }
+            let x = unclamped_x.min(x_span) as u16;
+            let y = unclamped_y.min(y_span) as u16;
+            let off = 1 + 9 * count;
+            report[off] = u8::from(conf) | 0x02;
+            report[off + 1..off + 5].copy_from_slice(&(count as u32).to_le_bytes());
+            report[off + 5..off + 7].copy_from_slice(&x.to_le_bytes());
+            report[off + 7..off + 9].copy_from_slice(&y.to_le_bytes());
+            count += 1;
+        }
+    }
+    report[48] = count as u8;
+    (report, matches_c)
+}
+
 /// Runs one `Input` record (input files and sequences) on `state`/`usb` and checks everything it
 /// records. `lengths` are the pending `READ_REPORT` output lengths.
 fn run_input(
@@ -681,15 +763,20 @@ fn run_input(
             assert_eq!(queue.completed.len(), 1, "{case}: one completion");
             let (req, status, info) = &queue.completed[0];
             assert_eq!((*status, *info), (STATUS_SUCCESS, 50), "{case}: completion");
-            let mut expected = rec.hex("out");
-            // Replays are single frames or use the same QPC sample throughout a sequence.
-            let offset = ptp_hid::input::PTP_REPORT_SCAN_TIME_OFFSET;
-            expected[offset..offset + 2].copy_from_slice(&0_u16.to_le_bytes());
-            if state.config().is_some_and(|cfg| cfg.family == Family::Mt2) {
-                let records = &packet[12..];
-                mt2::correct_coordinates(&mut expected, records);
+            let cfg = state.config().expect("configured family");
+            let (spec_report, matches_c) = expected_frame0_usbum_report(
+                cfg,
+                packet,
+                state.is_surface_report_on(),
+                state.is_button_report_on(),
+            );
+            assert_eq!(&req.out[..50], &spec_report, "{case}: report");
+            if matches_c && cfg.family != Family::Mt2 {
+                let mut c_expected = rec.hex("out");
+                let offset = ptp_hid::input::PTP_REPORT_SCAN_TIME_OFFSET;
+                c_expected[offset..offset + 2].copy_from_slice(&0_u16.to_le_bytes());
+                assert_eq!(&req.out[..50], &c_expected[..50], "{case}: exact C match");
             }
-            assert_eq!(&req.out[..50], expected, "{case}: report");
             assert!(
                 req.out[50..].iter().all(|&b| b == 0xee),
                 "{case}: bytes past 50 written"
