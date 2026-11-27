@@ -9,6 +9,7 @@
 resolver = "3"
 members = [
     "crates/ptp-hid",
+    "crates/bcm5974",
     "crates/amtptp-usbum-core",
     "crates/amtptp-usbkm-core",
     "crates/amtptp-spikm-core",

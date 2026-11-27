@@ -125,7 +125,7 @@ I would like to thank projects like [magictrackpad2-dkms](https://github.com/rob
  
 ## License
 
-- USB drivers are licensed under [GPLv2](LICENSE-GPL.md).
+- USB drivers, the Magic Trackpad 2 HID filter and `crates/bcm5974` are licensed under [GPLv2](LICENSE-GPL.md).
 - SPI driver is licensed under [MIT](LICENSE-MIT.md).
 - The shared building blocks (`crates/ptp-hid`, `drivers/support/wdf-support`, `drivers/support/rc-embed`) are licensed under [MIT](LICENSE-MIT.md).
 

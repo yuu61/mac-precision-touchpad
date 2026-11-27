@@ -24,7 +24,7 @@ use amtptp_usbum_core::usb::{wellspring_mode_read_setup, wellspring_mode_write_s
 use common::{FakeReq, FakeUsb, hex, to_hex};
 use ptp_hid::input::PtpContact;
 
-fn cfg(family: Family) -> &'static amtptp_usbum_core::config::Bcm5974Config {
+fn cfg(family: Family) -> &'static amtptp_usbum_core::config::WellspringDevice {
     CONFIG_TABLE
         .iter()
         .find(|c| c.family == family)

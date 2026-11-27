@@ -23,7 +23,7 @@
 
 use core::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicU16, AtomicU32, Ordering};
 
-use crate::config::{Bcm5974Config, CONFIG_TABLE, FALLBACK_CONFIG, config_by_index};
+use crate::config::{CONFIG_TABLE, FALLBACK_CONFIG, T2Device, config_by_index};
 
 const RELAXED: Ordering = Ordering::Relaxed;
 
@@ -236,7 +236,7 @@ impl DeviceState {
     /// Before the first `PrepareHardware` the C pointer is NULL and every reader of it would crash; that
     /// cannot happen (the reader and the mode switch only run after `PrepareHardware`). This returns the
     /// fallback row in that case instead of failing.
-    pub fn config(&self) -> &'static Bcm5974Config {
+    pub fn config(&self) -> &'static T2Device {
         self.config_index()
             .and_then(config_by_index)
             .unwrap_or(&FALLBACK_CONFIG)

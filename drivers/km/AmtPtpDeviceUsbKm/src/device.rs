@@ -173,7 +173,7 @@ unsafe extern "C" fn evt_device_prepare_hardware(
         level(Informational),
         keyword(KW_DRIVER),
         win_ntstatus("Status", &status),
-        i32_hex("ConfigIdentification", &config.identification),
+        i32_hex("ConfigIdentification", &i32::from(config.identification)),
         i32("InterruptPipe", &pipe)
     );
     status

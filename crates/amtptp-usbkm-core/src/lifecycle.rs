@@ -104,7 +104,7 @@ pub trait UsbHardware: ControlTransfer {
 /// `ContinuousReaderConfig` for the device's config row, or `None` for an unknown trackpad type (C:
 /// `transferLength <= 0` → `STATUS_UNKNOWN_REVISION`, which is masked anyway; no table row has one).
 pub fn continuous_reader_config(state: &DeviceState) -> Option<ContinuousReaderConfig> {
-    let transfer_length = reader_transfer_length(state.config().tp_type);
+    let transfer_length = reader_transfer_length(state.config().profile.tp_type);
     if transfer_length == 0 {
         return None;
     }

@@ -24,17 +24,16 @@ use amtptp_hidfilter_core::{
     self_managed_io_restart, work_item_callback,
 };
 use tracelogging as tlg;
+use wdf_support::hid as wdf_hid;
 use wdf_support::init::{
-    io_queue_config_init, io_queue_config_init_default_queue, object_attributes_init,
-    object_attributes_init_context_type, pnppower_event_callbacks_init, timer_config_init,
-    workitem_config_init,
+    object_attributes_init, object_attributes_init_context_type, pnppower_event_callbacks_init,
+    timer_config_init, workitem_config_init,
 };
 use wdf_support::ntstatus::NT_SUCCESS;
 use wdk_sys::{
-    _POOL_TYPE, _WDF_EXECUTION_LEVEL, _WDF_IO_QUEUE_DISPATCH_TYPE, _WDF_TRI_STATE, BOOLEAN, GUID,
-    NTSTATUS, PWDFDEVICE_INIT, WDF_NO_OBJECT_ATTRIBUTES, WDF_POWER_DEVICE_STATE, WDFCMRESLIST,
-    WDFDEVICE, WDFDRIVER, WDFLOOKASIDE, WDFQUEUE, WDFTIMER, WDFWORKITEM,
-    call_unsafe_wdf_function_binding,
+    _POOL_TYPE, _WDF_EXECUTION_LEVEL, BOOLEAN, GUID, NTSTATUS, PWDFDEVICE_INIT,
+    WDF_NO_OBJECT_ATTRIBUTES, WDF_POWER_DEVICE_STATE, WDFCMRESLIST, WDFDEVICE, WDFDRIVER,
+    WDFLOOKASIDE, WDFQUEUE, WDFTIMER, WDFWORKITEM, call_unsafe_wdf_function_binding,
 };
 
 use crate::context::{
@@ -299,21 +298,19 @@ impl AddDeviceIo for AddDevice {
     fn create_default_queue(&mut self) -> NtStatus {
         // Default parallel queue; PowerManaged = WdfUseDefault, which is "not power-managed" on a
         // filter device (Queue.c:28-41).
-        let mut config = io_queue_config_init_default_queue(
-            _WDF_IO_QUEUE_DISPATCH_TYPE::WdfIoQueueDispatchParallel,
+        let mut config = wdf_hid::default_queue_config(
+            Some(queue::evt_io_internal_device_control),
+            Some(queue::evt_io_stop),
         );
         let mut attributes = object_attributes_init_context_type(&QUEUE_CONTEXT_TYPE_INFO);
-        config.EvtIoInternalDeviceControl = Some(queue::evt_io_internal_device_control);
-        config.EvtIoStop = Some(queue::evt_io_stop);
         let mut queue: WDFQUEUE = null_mut();
         // SAFETY: live device; `config` and `attributes` initialized; valid out pointer.
         let status = unsafe {
-            call_unsafe_wdf_function_binding!(
-                WdfIoQueueCreate,
+            wdf_hid::create_queue(
                 self.device,
-                &raw mut config,
+                &mut config,
                 &raw mut attributes,
-                &raw mut queue
+                &raw mut queue,
             )
         };
         if !NT_SUCCESS(status) {
@@ -334,19 +331,16 @@ impl AddDeviceIo for AddDevice {
         let Some(ctx) = self.context() else {
             return STATUS_INVALID_DEVICE_STATE;
         };
-        let mut config =
-            io_queue_config_init(_WDF_IO_QUEUE_DISPATCH_TYPE::WdfIoQueueDispatchManual);
-        config.PowerManaged = _WDF_TRI_STATE::WdfFalse;
+        let mut config = wdf_hid::read_queue_config();
         let mut queue: WDFQUEUE = null_mut();
         // SAFETY: live device; `config` initialized; default attributes (parent = device); valid
         // out pointer.
         let status = unsafe {
-            call_unsafe_wdf_function_binding!(
-                WdfIoQueueCreate,
+            wdf_hid::create_queue(
                 self.device,
-                &raw mut config,
+                &mut config,
                 WDF_NO_OBJECT_ATTRIBUTES,
-                &raw mut queue
+                &raw mut queue,
             )
         };
         if !NT_SUCCESS(status) {

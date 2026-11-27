@@ -119,7 +119,6 @@ pub fn parse_state(text: &str) -> DeviceSnapshot {
         let axis = |value: &str| {
             let bounds: Vec<i32> = value.split('/').map(|item| num(item) as i32).collect();
             Bcm5974Param {
-                snratio: bounds[0],
                 min: bounds[1],
                 max: bounds[2],
             }
@@ -188,12 +187,10 @@ pub fn started(vid: u16, hdr: usize) -> DeviceSnapshot {
         input_finger_delta: 0,
         input_button_delta: 1,
         x: Bcm5974Param {
-            snratio: 250,
             min: -3678,
             max: 3934,
         },
         y: Bcm5974Param {
-            snratio: 250,
             min: -2479,
             max: 2586,
         },

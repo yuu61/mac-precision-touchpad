@@ -64,6 +64,7 @@ pub mod hidport;
 pub mod input;
 pub mod ioctl;
 pub mod item;
+pub mod status;
 
 /// The caller's buffer is shorter than the report or structure that has to be written into (or read
 /// from) it.

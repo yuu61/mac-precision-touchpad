@@ -7,16 +7,18 @@
 
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU16, AtomicUsize, Ordering};
 
+use bcm5974::config::MAGIC_TRACKPAD_2;
+pub use bcm5974::config::{
+    Bcm5974Param, MAGIC_TRACKPAD_2_PID as HID_PID_MAGIC_TRACKPAD_2,
+    USB_VENDOR_ID_APPLE as HID_VID_APPLE_USB,
+};
+
 use crate::feature::FeatureChange;
 use crate::input::InputLayout;
 use crate::status::{NtStatus, STATUS_NOT_SUPPORTED};
 
-/// `HID_VID_APPLE_USB` (Device.h:14): Apple's USB vendor ID.
-pub const HID_VID_APPLE_USB: u16 = 0x05AC;
 /// `HID_VID_APPLE_BT` (Device.h:15): Apple's Bluetooth vendor ID.
 pub const HID_VID_APPLE_BT: u16 = 0x004C;
-/// `HID_PID_MAGIC_TRACKPAD_2` (Device.h:16).
-pub const HID_PID_MAGIC_TRACKPAD_2: u16 = 0x0265;
 /// `DEVICE_VERSION` (HidCommon.h:43): the version number reported upward in `HID_DEVICE_ATTRIBUTES`.
 pub const DEVICE_VERSION: u16 = 0x0100;
 
@@ -25,17 +27,6 @@ pub const DEVICE_VERSION: u16 = 0x0100;
 #[must_use]
 pub const fn is_apple_vendor(vendor_id: u16) -> bool {
     vendor_id == HID_VID_APPLE_USB || vendor_id == HID_VID_APPLE_BT
-}
-
-/// `BCM5974_PARAM` (Device.h:19-23). Only `min` is ever read; `snratio` and `max` are stored for parity.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Bcm5974Param {
-    /// `snratio` (250, never read).
-    pub snratio: i32,
-    /// `min`: subtracted from the raw coordinate before the lower clamp.
-    pub min: i32,
-    /// `max` (never read; there is no upper clamp, HF-B5).
-    pub max: i32,
 }
 
 /// The parameters `PtpFilterConfigureMultiTouch` writes into the device context (Device.c:322-354).
@@ -49,22 +40,11 @@ pub struct TransportParams {
     pub finger_delta: usize,
     /// `InputButtonDelta`: absolute offset of the button byte (1, `BOFFSET_TYPE5`).
     pub button_delta: usize,
-    /// `X` = {250, -3678, 3934}.
+    /// `X` = [-3678, 3934].
     pub x: Bcm5974Param,
-    /// `Y` = {250, -2479, 2586}.
+    /// `Y` = [-2479, 2586].
     pub y: Bcm5974Param,
 }
-
-const MT2_X: Bcm5974Param = Bcm5974Param {
-    snratio: 250,
-    min: -3678,
-    max: 3934,
-};
-const MT2_Y: Bcm5974Param = Bcm5974Param {
-    snratio: 250,
-    min: -2479,
-    max: 2586,
-};
 
 /// The Magic Trackpad 2 transport, chosen by vendor ID (Device.c:322 / 343).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -99,16 +79,17 @@ impl Transport {
     /// The parsing parameters for this transport. They differ only in the header size.
     #[must_use]
     pub const fn params(self) -> TransportParams {
+        let format = MAGIC_TRACKPAD_2.tp_type;
         TransportParams {
             header_size: match self {
-                Self::Usb => 12,      // HOFFSET_TYPE_USB_5 = 6 * 2
+                Self::Usb => format.header() as usize,
                 Self::Bluetooth => 4, // HOFFSET_TYPE_BTH_5 = 2 * 2
             },
-            finger_size: 9,
-            finger_delta: 0,
-            button_delta: 1,
-            x: MT2_X,
-            y: MT2_Y,
+            finger_size: format.finger_size() as usize,
+            finger_delta: format.delta() as usize,
+            button_delta: format.button() as usize,
+            x: MAGIC_TRACKPAD_2.x,
+            y: MAGIC_TRACKPAD_2.y,
         }
     }
 
@@ -254,7 +235,6 @@ pub struct DeviceSnapshot {
 
 #[derive(Debug)]
 struct AxisState {
-    snratio: AtomicI32,
     min: AtomicI32,
     max: AtomicI32,
 }
@@ -262,7 +242,6 @@ struct AxisState {
 impl AxisState {
     const fn new(p: Bcm5974Param) -> Self {
         Self {
-            snratio: AtomicI32::new(p.snratio),
             min: AtomicI32::new(p.min),
             max: AtomicI32::new(p.max),
         }
@@ -270,14 +249,12 @@ impl AxisState {
 
     fn load(&self) -> Bcm5974Param {
         Bcm5974Param {
-            snratio: self.snratio.load(Ordering::Relaxed),
             min: self.min.load(Ordering::Relaxed),
             max: self.max.load(Ordering::Relaxed),
         }
     }
 
     fn store(&self, p: Bcm5974Param) {
-        self.snratio.store(p.snratio, Ordering::Relaxed);
         self.min.store(p.min, Ordering::Relaxed);
         self.max.store(p.max, Ordering::Relaxed);
     }
@@ -331,16 +308,8 @@ impl DeviceState {
             input_finger_size: 0,
             input_finger_delta: 0,
             input_button_delta: 0,
-            x: Bcm5974Param {
-                snratio: 0,
-                min: 0,
-                max: 0,
-            },
-            y: Bcm5974Param {
-                snratio: 0,
-                min: 0,
-                max: 0,
-            },
+            x: Bcm5974Param { min: 0, max: 0 },
+            y: Bcm5974Param { min: 0, max: 0 },
             device_configured: false,
             detour_completed: false,
             io_target_set: false,
@@ -552,7 +521,7 @@ mod tests {
             vendor_id: 0x4C,
             product_id: 0x265,
             input_header_size: 4,
-            x: MT2_X,
+            x: MAGIC_TRACKPAD_2.x,
             last_report_time: -5,
             ptp_report_touch: true,
             ..DeviceSnapshot::default()

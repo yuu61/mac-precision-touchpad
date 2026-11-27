@@ -27,9 +27,8 @@ doctest = false
 wdk-build = "=0.6.0"
 
 [dependencies]
-# Only the `usb` subset is needed here (WDF_USB_* structs); the workspaces enable
-# the full hid/usb/spb union, which Cargo unifies into a single wdk-sys build.
-wdk-sys = { version = "=0.5.2", features = ["usb"] }
+# USB setup structures and the KMDF HID transfer-packet type.
+wdk-sys = { version = "=0.5.2", features = ["hid", "usb"] }
 
 [lints.clippy]
 cargo = { level = "deny", priority = -1 }

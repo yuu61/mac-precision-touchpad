@@ -93,7 +93,7 @@ pub fn prepare_hardware<T: UsbTargetSetup>(
     let configured_reader = if state.reader_configured() {
         false
     } else {
-        let status = usb.configure_continuous_reader(cfg.tp_type.reader_transfer_length());
+        let status = usb.configure_continuous_reader(cfg.profile.tp_type.reader_transfer_length());
         if !nt_success(status) {
             return PrepareHardwareOutcome::status(status);
         }

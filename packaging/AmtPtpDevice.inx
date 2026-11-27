@@ -28,7 +28,7 @@ AmtPtpHidFilter.sys   = 1,,
 ; Two TargetOSVersion-decorated models sections (Windows picks the highest one <= the running build):
 ;  - 10.0...16299 (Win10 1709, KMDF 1.23 floor): run-from-driver-store (DIRID 13) CopyFiles needs 16299.
 ;    UMDF run-from-driver-store needs 17134, so the AmtPtpDeviceUsbUm_Install lines are omitted here.
-;  - 10.0...17134 (Win10 1803+): the complete original binding list, unchanged and in the original order.
+;  - 10.0...17134 (Win10 1803+): adds UMDF and gives the shared USB IDs to the Wellspring-specific driver.
 %ManufacturerName%=Standard,NT$ARCH$.10.0...16299,NT$ARCH$.10.0...17134
 
 [Standard.NT$ARCH$.10.0...16299]
@@ -57,7 +57,6 @@ AmtPtpHidFilter.sys   = 1,,
 %AmtPtpDeviceSpiKm.DeviceDesc%=AmtPtpDeviceSpiKm_Device, SPI\VID_05ac&PID_0277&MI_02
 %AmtPtpDeviceSpiKm.DeviceDesc%=AmtPtpDeviceSpiKm_Device, SPI\VID_05ac&PID_0278&MI_02
 %AmtPtpDeviceSpiKm.DeviceDesc%=AmtPtpDeviceSpiKm_Device, SPI\VID_05ac&PID_0279&MI_02
-%AmtPtpDeviceSpiKm.DeviceDesc%=AmtPtpDeviceSpiKm_Device, SPI\VID_05ac&PID_0280&MI_02
 %AmtPtpDeviceSpiKm.DeviceDesc%=AmtPtpDeviceSpiKm_Device, SPI\VID_05ac&PID_0290&MI_02
 %AmtPtpDeviceSpiKm.DeviceDesc%=AmtPtpDeviceSpiKm_Device, SPI\VID_05ac&PID_0291&MI_02
 
@@ -68,8 +67,6 @@ AmtPtpHidFilter.sys   = 1,,
 
 [Standard.NT$ARCH$.10.0...17134]
 ; Apple T2
-%AmtPtpDeviceUsbKm.DeviceDesc%=AmtPtpDeviceUsbKm_Device, USB\Vid_05ac&Pid_0273&MI_02
-%AmtPtpDeviceUsbKm.DeviceDesc%=AmtPtpDeviceUsbKm_Device, USB\Vid_05ac&Pid_0274&MI_02
 %AmtPtpDeviceUsbKm.DeviceDesc%=AmtPtpDeviceUsbKm_Device, USB\Vid_05ac&Pid_0277&MI_02
 %AmtPtpDeviceUsbKm.DeviceDesc%=AmtPtpDeviceUsbKm_Device, USB\Vid_05ac&Pid_027A&MI_02
 %AmtPtpDeviceUsbKm.DeviceDesc%=AmtPtpDeviceUsbKm_Device, USB\Vid_05ac&Pid_027B&MI_02
@@ -78,11 +75,9 @@ AmtPtpHidFilter.sys   = 1,,
 %AmtPtpDeviceUsbKm.DeviceDesc%=AmtPtpDeviceUsbKm_Device, USB\Vid_05ac&Pid_027E&MI_02
 %AmtPtpDeviceUsbKm.DeviceDesc%=AmtPtpDeviceUsbKm_Device, USB\Vid_05ac&Pid_027F&MI_02
 %AmtPtpDeviceUsbKm.DeviceDesc%=AmtPtpDeviceUsbKm_Device, USB\Vid_05ac&Pid_0280&MI_02
-%AmtPtpDeviceUsbKm.DeviceDesc%=AmtPtpDeviceUsbKm_Device, USB\Vid_05ac&Pid_0290&MI_02
-%AmtPtpDeviceUsbKm.DeviceDesc%=AmtPtpDeviceUsbKm_Device, USB\Vid_05ac&Pid_0291&MI_02
 %AmtPtpDeviceUsbKm.DeviceDesc%=AmtPtpDeviceUsbKm_Device, USB\Vid_05ac&Pid_0340&MI_02
 
-; Traditional Mac trackpad
+; Traditional Mac trackpad (including the Wellspring 8/9 IDs handled by KMDF on 1709)
 %AmtPtpDeviceUsbUm.DeviceDesc%=AmtPtpDeviceUsbUm_Install, USB\Vid_05ac&Pid_0236&MI_01
 %AmtPtpDeviceUsbUm.DeviceDesc%=AmtPtpDeviceUsbUm_Install, USB\Vid_05ac&Pid_0237&MI_01
 %AmtPtpDeviceUsbUm.DeviceDesc%=AmtPtpDeviceUsbUm_Install, USB\Vid_05ac&Pid_0238&MI_01
@@ -118,7 +113,6 @@ AmtPtpHidFilter.sys   = 1,,
 %AmtPtpDeviceSpiKm.DeviceDesc%=AmtPtpDeviceSpiKm_Device, SPI\VID_05ac&PID_0277&MI_02
 %AmtPtpDeviceSpiKm.DeviceDesc%=AmtPtpDeviceSpiKm_Device, SPI\VID_05ac&PID_0278&MI_02
 %AmtPtpDeviceSpiKm.DeviceDesc%=AmtPtpDeviceSpiKm_Device, SPI\VID_05ac&PID_0279&MI_02
-%AmtPtpDeviceSpiKm.DeviceDesc%=AmtPtpDeviceSpiKm_Device, SPI\VID_05ac&PID_0280&MI_02
 %AmtPtpDeviceSpiKm.DeviceDesc%=AmtPtpDeviceSpiKm_Device, SPI\VID_05ac&PID_0290&MI_02
 %AmtPtpDeviceSpiKm.DeviceDesc%=AmtPtpDeviceSpiKm_Device, SPI\VID_05ac&PID_0291&MI_02
 
