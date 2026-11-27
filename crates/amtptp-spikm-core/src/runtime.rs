@@ -1,15 +1,15 @@
 //! The mutable per-device state the driver shares between its PnP/power callbacks, the IOCTL dispatcher
-//! and the lower-read completion routine: C `DEVICE_CONTEXT.DeviceStatus`, `LastReportTime` and the
-//! three PTP flags. C accessed them without synchronization (SPI-B15); here they are atomics with the
-//! same single-variable semantics (P2).
+//! and the lower-read completion routine: the device status, reporting clock, and three PTP flags.
+//! They use atomic state so callbacks can access them concurrently (SPI-B15).
 
-use core::sync::atomic::{AtomicI64, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use ptp_hid::input::SPI_PTP_REPORT_LEN;
+use ptp_hid::scan_time::ScanClock;
 
 use crate::device::SpiTrackpadInfo;
 use crate::feature::PtpSettings;
-use crate::input::{SpiPacket, lower_read_length, report_bytes, scan_time, valid_prefix};
+use crate::input::{SpiPacket, lower_read_length, report_bytes, valid_prefix};
 use crate::status::{NtStatus, STATUS_CANCELLED, STATUS_SUCCESS, nt_success};
 
 /// `PTP_AAPL_DEVICE_POWER_STATUS` (Device.h:46-50).
@@ -56,11 +56,11 @@ pub struct SelfManagedIoOutcome {
     pub start_recovery_timer: Option<i64>,
 }
 
-/// `DeviceStatus`, `LastReportTime` and the PTP flags of one device.
+/// `DeviceStatus`, the reporting clock and the PTP flags of one device.
 #[derive(Debug)]
 pub struct DeviceRuntime {
     status: AtomicU32,
-    last_report_time: AtomicI64,
+    scan_clock: ScanClock,
     ptp: PtpSettings,
 }
 
@@ -71,13 +71,12 @@ impl Default for DeviceRuntime {
 }
 
 impl DeviceRuntime {
-    /// The state after `AmtPtpDeviceSpiKmCreateDevice`: the zeroed context with `DeviceStatus = D3`,
-    /// `LastReportTime = 0` and all PTP flags FALSE.
+    /// Initial state at device creation: D3, no reporting clock origin, and all PTP flags FALSE.
     #[must_use]
     pub const fn new() -> Self {
         Self {
             status: AtomicU32::new(DeviceStatus::D3 as u32),
-            last_report_time: AtomicI64::new(0),
+            scan_clock: ScanClock::new(),
             ptp: PtpSettings::new(),
         }
     }
@@ -91,9 +90,9 @@ impl DeviceRuntime {
         self.status.store(status as u32, Ordering::SeqCst);
     }
 
-    /// `LastReportTime.QuadPart`.
-    pub fn last_report_time(&self) -> i64 {
-        self.last_report_time.load(Ordering::Relaxed)
+    /// Cached QPC frequency in ticks per second.
+    pub fn qpc_frequency(&self) -> i64 {
+        self.scan_clock.frequency()
     }
 
     /// The write-only PTP flags (`PtpInputOn`, `PtpReportButton`, `PtpReportTouch`).
@@ -101,17 +100,10 @@ impl DeviceRuntime {
         &self.ptp
     }
 
-    /// `AmtPtpEvtDeviceD0Entry` (Device.c:319-351): `DeviceStatus = D0ActiveAndUnconfigured`, then
-    /// `KeQueryPerformanceCounter(&LastReportTime)`.
-    ///
-    /// `qpc_frequency` is the value `KeQueryPerformanceCounter` writes through its **`PerformanceFrequency`**
-    /// out-parameter: C passes `&LastReportTime` there and discards the returned counter (SPI-B8,
-    /// preserved). The glue does the same: `KeQueryPerformanceCounter(&mut freq)` and passes `freq`.
-    /// Returns `STATUS_SUCCESS`; no I/O.
+    /// Marks the device unconfigured and initializes the reporting clock for D0.
     pub fn on_d0_entry(&self, qpc_frequency: i64) -> NtStatus {
         self.set_status(DeviceStatus::D0ActiveAndUnconfigured);
-        self.last_report_time
-            .store(qpc_frequency, Ordering::Relaxed);
+        self.scan_clock.restart(qpc_frequency);
         STATUS_SUCCESS
     }
 
@@ -119,9 +111,8 @@ impl DeviceRuntime {
     /// `SelfManagedIoInit` and `SelfManagedIoRestart`, after the glue ran the mode switch
     /// ([`crate::wire::SetStatePacket`], synchronous `IOCTL_HID_SET_FEATURE`) and got `set_state_status`.
     ///
-    /// - Success: `DeviceStatus = D0ActiveAndConfigured`, then `LastReportTime = qpc_frequency()` (the
-    ///   frequency again, see [`Self::on_d0_entry`]). No lower read is issued, even if requests are already
-    ///   queued (preserved, SPI-B13).
+    /// - Success: restart the reporting clock and mark the device configured. Already queued requests
+    ///   still wait for a lower read (SPI-B13).
     /// - Failure: nothing changes; the outcome asks the glue to start the 5 s recovery timer.
     ///
     /// The callback always returns `STATUS_SUCCESS`.
@@ -131,9 +122,8 @@ impl DeviceRuntime {
         qpc_frequency: F,
     ) -> SelfManagedIoOutcome {
         if nt_success(set_state_status) {
+            self.scan_clock.restart(qpc_frequency());
             self.set_status(DeviceStatus::D0ActiveAndConfigured);
-            self.last_report_time
-                .store(qpc_frequency(), Ordering::Relaxed);
             SelfManagedIoOutcome {
                 status: STATUS_SUCCESS,
                 start_recovery_timer: None,
@@ -151,7 +141,7 @@ impl DeviceRuntime {
     ///
     /// On success it calls `issue_lower_read` **exactly once** (one `AmtPtpSpiInputIssueRequest`, whatever
     /// the number of queued requests), **then** sets `DeviceStatus = D0ActiveAndConfigured`.
-    /// `LastReportTime` is not refreshed. On failure nothing happens and nothing is rescheduled. This runs
+    /// the reporting clock is not refreshed. On failure nothing happens and nothing is rescheduled. This runs
     /// whatever the current `DeviceStatus` is, also in D3 (SPI-B12, preserved). Returns whether the read was
     /// issued.
     pub fn on_recovery_timer<F: FnOnce()>(
@@ -190,14 +180,12 @@ impl DeviceRuntime {
     /// SPI-B11, preserved).
     ///
     /// - `information`: `WdfRequestGetInformation(SpiRequest)`; see [`lower_read_length`]. Below 46
-    ///   returns `Err(STATUS_DEVICE_DATA_ERROR)` without calling `qpc_frequency` or touching
-    ///   `LastReportTime`.
+    ///   returns `Err(STATUS_DEVICE_DATA_ERROR)` without sampling the clock.
     /// - `buffer`: the lower read buffer. Only its first `min((LONG)information, buffer.len())` bytes are
     ///   read; bytes past them read as 0 (P2 fix of SPI-B9). Pass only memory that is initialized.
-    /// - `qpc_frequency`: called once, after the length gate; the glue returns what
-    ///   `KeQueryPerformanceCounter(&x)` writes to `x` (the frequency, SPI-B8 preserved).
+    /// - `query_counter`: samples the QPC counter once after the length gate.
     ///
-    /// On success `LastReportTime` holds the new value and the 30 report bytes are returned. The glue then
+    /// On success the 30 report bytes are returned. The glue then
     /// does `WdfRequestRetrieveOutputMemory` + `WdfMemoryCopyFromBuffer(mem, 0, bytes, 30)` (either failing
     /// completes with that status, Information 0), `WdfRequestSetInformation(30)` and completes with
     /// `STATUS_SUCCESS`. On `Err(status)` it completes with `status`. Either way it then deletes the lower
@@ -211,15 +199,12 @@ impl DeviceRuntime {
         trackpad: &SpiTrackpadInfo,
         information: u64,
         buffer: &[u8],
-        qpc_frequency: F,
+        query_counter: F,
     ) -> Result<[u8; SPI_PTP_REPORT_LEN], NtStatus> {
         let length = lower_read_length(information)?;
         let packet = SpiPacket::new(valid_prefix(buffer, length));
-        let current = qpc_frequency();
-        // delta from the previous value, then store the current one (one atomic step instead of C's racy
-        // load + store; identical when single-threaded).
-        let last = self.last_report_time.swap(current, Ordering::Relaxed);
-        Ok(report_bytes(&packet, trackpad, scan_time(current, last)))
+        let scan_time = self.scan_clock.sample(query_counter());
+        Ok(report_bytes(&packet, trackpad, scan_time))
     }
 
     /// `SET_FEATURE` (see [`PtpSettings::set_feature`]).
@@ -248,7 +233,7 @@ mod tests {
         let out = rt.on_self_managed_io_init_or_restart(STATUS_UNSUCCESSFUL, || 1);
         assert_eq!(out.start_recovery_timer, Some(-50_000_000));
         assert_eq!(out.status, STATUS_SUCCESS);
-        assert_eq!(rt.last_report_time(), 10_000_000);
+        assert_eq!(rt.qpc_frequency(), 10_000_000);
         let mut issued = 0;
         assert!(rt.on_recovery_timer(STATUS_SUCCESS, || issued += 1));
         assert_eq!(issued, 1);
@@ -269,7 +254,7 @@ mod tests {
         let rt = DeviceRuntime::new();
         let tp = SPI_TRACKPAD_CONFIG_TABLE[0];
 
-        // Below 46: STATUS_DEVICE_DATA_ERROR, QPC not queried, LastReportTime untouched.
+        // Below 46: STATUS_DEVICE_DATA_ERROR, reporting clock not sampled.
         let mut queried = false;
         let short = rt.complete_lower_read(&tp, 45, &[], || {
             queried = true;
@@ -277,10 +262,10 @@ mod tests {
         });
         assert_eq!(short, Err(STATUS_DEVICE_DATA_ERROR));
         assert!(!queried);
-        assert_eq!(rt.last_report_time(), 0);
+        assert_eq!(rt.qpc_frequency(), 0);
 
         // >= 46: SUCCESS with the all-zero report (05, no contacts, ContactCount 0, button 0); ScanTime
-        // is computed as usual (0 here: same value as the stored LastReportTime).
+        // starts at zero in this reporting session.
         let report = rt.complete_lower_read(&tp, 46, &[], || 0);
         assert_eq!(report, Ok(SpiPtpReport::EMPTY.to_bytes()));
         assert_eq!(

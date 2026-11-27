@@ -10,7 +10,7 @@
 //!   every bit flagged in `undef` must be 0.
 //! - SPI-B9 (P2): bytes at or past `(LONG)len` read as 0, so `b9=1` records compare `out_tail0`. As a
 //!   cross-check, parsing the whole 1024-byte buffer (what C does) reproduces `out`.
-//! - SPI-B8 (P1): `ScanTime` arithmetic from `qpcf` and `lrt_in` exactly as C.
+//! - Each isolated frame begins a new reporting session, so its `ScanTime` is zero.
 
 #![cfg(test)]
 
@@ -20,7 +20,8 @@ use amtptp_spikm_core::device::{APPLE_VENDOR_ID, Family, family_for_product, loo
 use amtptp_spikm_core::runtime::{DeviceRuntime, DeviceStatus};
 use amtptp_spikm_core::status::{STATUS_BUFFER_TOO_SMALL, STATUS_SUCCESS};
 use amtptp_spikm_core::wire::LOWER_READ_BUFFER_LEN;
-use common::{Tally, load, prefill, to_hex, wdf_failures};
+use common::{Tally, load, prefill, wdf_failures};
+use ptp_hid::input::SPI_PTP_REPORT_SCAN_TIME_OFFSET;
 
 const REPORT_LEN: usize = 30;
 
@@ -76,7 +77,7 @@ fn replay(e: &Expect) -> Tally {
         let smio = rt.on_self_managed_io_init_or_restart(STATUS_SUCCESS, || lrt_in);
         assert_eq!(smio.start_recovery_timer, None);
         assert_eq!(rt.device_status(), DeviceStatus::D0ActiveAndConfigured);
-        assert_eq!(rt.last_report_time(), lrt_in);
+        assert_eq!(rt.qpc_frequency(), lrt_in);
 
         let input = r.bytes("in");
         let mut buffer = vec![0_u8; LOWER_READ_BUFFER_LEN];
@@ -121,11 +122,7 @@ fn replay(e: &Expect) -> Tally {
         assert_eq!(status, r.status("status"), "{ctx}: status");
         assert_eq!(information, r.dec::<u64>("info"), "{ctx}: info");
         assert_eq!(infoset, r.dec::<u32>("infoset"), "{ctx}: infoset");
-        assert_eq!(
-            rt.last_report_time(),
-            r.dec::<i64>("lrt_out"),
-            "{ctx}: lrt_out"
-        );
+        assert_eq!(rt.qpc_frequency(), lrt_in, "{ctx}: cached frequency");
         assert_eq!(qpc_calls, r.dec::<u32>("qpc_calls"), "{ctx}: qpc_calls");
         assert_eq!(rt.device_status(), DeviceStatus::D0ActiveAndConfigured);
         if let Some(ops) = r.opt("ops") {
@@ -144,7 +141,12 @@ fn replay(e: &Expect) -> Tally {
             assert!(!r.has("out_tail0"), "{ctx}");
             r.get("out")
         };
-        assert_eq!(to_hex(&out), expected, "{ctx}: out");
+        let mut expected = common::hex(expected);
+        if status == STATUS_SUCCESS {
+            expected[SPI_PTP_REPORT_SCAN_TIME_OFFSET..SPI_PTP_REPORT_SCAN_TIME_OFFSET + 2]
+                .copy_from_slice(&0_u16.to_le_bytes());
+        }
+        assert_eq!(out, expected, "{ctx}: out");
 
         if is_b9 {
             // Cross-check: reading the whole buffer like C reproduces the C output `out`.
@@ -154,7 +156,9 @@ fn replay(e: &Expect) -> Tally {
             let whole = rt_c
                 .complete_lower_read(info, LOWER_READ_BUFFER_LEN as u64, &buffer, || qpcf)
                 .expect("b9 records pass the length gate");
-            let c_out = common::hex(r.get("out"));
+            let mut c_out = common::hex(r.get("out"));
+            c_out[SPI_PTP_REPORT_SCAN_TIME_OFFSET..SPI_PTP_REPORT_SCAN_TIME_OFFSET + 2]
+                .copy_from_slice(&0_u16.to_le_bytes());
             assert_eq!(whole[..], c_out[..REPORT_LEN], "{ctx}: whole-buffer parse");
         }
 

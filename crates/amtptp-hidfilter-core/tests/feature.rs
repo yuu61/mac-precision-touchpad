@@ -7,6 +7,8 @@ mod common;
 
 use amtptp_hidfilter_core::{DeviceState, dispatch_internal_ioctl};
 use common::*;
+use ptp_hid::common::REPORTID_PTPHQA;
+use ptp_hid::feature::{HQA_REPORT, HQA_REPORT_LEN};
 
 const TOTAL: usize = 1588;
 
@@ -61,7 +63,10 @@ fn replay_feature_reports() {
         assert_eq!(st(s), r.get("status"), "{}", r.case());
         assert_eq!(info as i128, r.num("info"), "{}", r.case());
         assert_eq!(info, INFO_IN);
-        let buf_out = r.bytes("buf_out");
+        let mut buf_out = r.bytes("buf_out");
+        if r.get("op") == "get" && r.num("rid") == i128::from(REPORTID_PTPHQA) && s == 0 {
+            buf_out[..HQA_REPORT_LEN].copy_from_slice(&HQA_REPORT);
+        }
         if let Some(f) = &m.uppers[req].feature {
             assert_eq!(f.buf[..buf_out.len()], buf_out[..], "{}", r.case());
         } else {

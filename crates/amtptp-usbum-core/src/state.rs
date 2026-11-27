@@ -9,7 +9,9 @@
 //!
 //! The context is zero-filled by WDF in C; [`DeviceState::new`] gives the same all-zero state.
 
-use core::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicU16, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU32, Ordering};
+
+use ptp_hid::scan_time::ScanClock;
 
 use crate::config::{WellspringDevice, config_row};
 
@@ -88,8 +90,8 @@ pub struct StateSnapshot {
     pub sg_contact_size_qual_level: u8,
     /// `MuContactSizeQualLevel` (dead state, UM-B15).
     pub mu_contact_size_qual_level: u8,
-    /// `PerfCounter.QuadPart`: QPC value at the last `D0Entry` (`ScanTime` base, UM-B12).
-    pub perf_counter: i64,
+    /// QPC frequency cached at the last `D0Entry`.
+    pub qpc_frequency: i64,
 }
 
 /// Driver state of one device (the non-WDF fields of `DEVICE_CONTEXT`, plus the B16 reader flag).
@@ -112,7 +114,7 @@ pub struct DeviceState {
     is_wellspring_mode_on: AtomicBool,
     is_surface_report_on: AtomicBool,
     is_button_report_on: AtomicBool,
-    perf_counter: AtomicI64,
+    pub(crate) scan_clock: ScanClock,
     reader_configured: AtomicBool,
 }
 
@@ -124,7 +126,7 @@ impl Default for DeviceState {
 
 impl DeviceState {
     /// The zero-filled state of a freshly created WDF device context (no config row, all flags FALSE,
-    /// all levels 0, `PerfCounter` 0, reader not configured).
+    /// all levels 0, reporting clock uninitialized, reader not configured).
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -142,7 +144,7 @@ impl DeviceState {
             is_wellspring_mode_on: AtomicBool::new(false),
             is_surface_report_on: AtomicBool::new(false),
             is_button_report_on: AtomicBool::new(false),
-            perf_counter: AtomicI64::new(0),
+            scan_clock: ScanClock::new(),
             reader_configured: AtomicBool::new(false),
         }
     }
@@ -268,14 +270,14 @@ impl DeviceState {
 
     // --- scan time base -------------------------------------------------------------------------------
 
-    /// `PerfCounter.QuadPart`.
-    pub fn perf_counter(&self) -> i64 {
-        self.perf_counter.load(RELAXED)
+    /// Cached QPC frequency in ticks per second.
+    pub fn qpc_frequency(&self) -> i64 {
+        self.scan_clock.frequency()
     }
 
-    /// Sets `PerfCounter.QuadPart`.
-    pub fn set_perf_counter(&self, value: i64) {
-        self.perf_counter.store(value, RELAXED);
+    /// Caches the QPC frequency and starts a new input-reporting session.
+    pub fn set_qpc_frequency(&self, value: i64) {
+        self.scan_clock.restart(value);
     }
 
     // --- UM-B16 -----------------------------------------------------------------------------------------
@@ -307,7 +309,7 @@ impl DeviceState {
             pressure_qual_level,
             sg_contact_size_qual_level,
             mu_contact_size_qual_level,
-            perf_counter: self.perf_counter(),
+            qpc_frequency: self.qpc_frequency(),
         }
     }
 
@@ -321,6 +323,6 @@ impl DeviceState {
             snapshot.sg_contact_size_qual_level,
             snapshot.mu_contact_size_qual_level,
         );
-        self.set_perf_counter(snapshot.perf_counter);
+        self.set_qpc_frequency(snapshot.qpc_frequency);
     }
 }

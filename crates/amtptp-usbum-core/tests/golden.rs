@@ -16,12 +16,12 @@ use amtptp_usbum_core::descriptors::{
 use amtptp_usbum_core::hid::{
     IoctlOutcome, IoctlRoute, TraceEvent, get_string, route_ioctl, set_feature,
 };
-use amtptp_usbum_core::input::{build_report, mt2_contact, scan_time, wellspring_contact};
+use amtptp_usbum_core::input::{ReadCompleteOutcome, build_report, mt2_contact, on_read_complete, wellspring_contact};
 use amtptp_usbum_core::pnp::{d0_entry, d0_exit, prepare_hardware};
 use amtptp_usbum_core::state::{DeviceState, UsbDeviceDescriptor};
 use amtptp_usbum_core::status::{STATUS_INVALID_DEVICE_STATE, STATUS_SUCCESS};
 use amtptp_usbum_core::usb::{wellspring_mode_read_setup, wellspring_mode_write_setup};
-use common::{FakeReq, FakeUsb, hex, to_hex};
+use common::{FakeQueue, FakeReq, FakeUsb, hex, to_hex};
 use ptp_hid::input::PtpContact;
 
 fn cfg(family: Family) -> &'static amtptp_usbum_core::config::WellspringDevice {
@@ -391,7 +391,7 @@ fn type4_short_response_sends_zero_padding() {
             "out/2109020302000400/02010000/00000000"
         ]
     );
-    assert_eq!(state.perf_counter(), 5);
+    assert_eq!(state.qpc_frequency(), 5);
     assert_eq!(usb.calls, ["IoTargetStart(pipe0)=0x00000000"]);
     assert_eq!(d0_exit(&state, &mut usb), STATUS_SUCCESS);
     assert!(!state.is_wellspring_mode_on());
@@ -500,25 +500,22 @@ fn report_with_surface_off_is_zero() {
 }
 
 #[test]
-fn scan_time_matches_c() {
-    for (now, base, expected) in [
-        (0_i64, 0_i64, 0_u16),
-        (99, 0, 0),
-        (100, 0, 1),
-        (25599, 0, 0xff),
-        (25600, 0, 0xff),
-        (900, 1000, 0xffff),
-        (901, 1000, 0),
-        (0, 1000, 0xfff6),
-        (-25700, 0, 0xfeff),
-        (-25500, 0, 0xff01),
-        (0, i64::MAX, 0xb852),
-        (123_469_134, 123_456_789, 0x7b),
-        // Overflowing difference wraps instead of trapping (excluded fixture case 7).
-        (i64::MAX, i64::MIN, 0),
-        (i64::MIN, i64::MAX, 0),
-    ] {
-        assert_eq!(scan_time(now, base), expected, "{now} {base}");
+fn input_scan_time_uses_the_cached_qpc_frequency() {
+    let state = started(0x0272);
+    let mut usb = FakeUsb::default();
+    let frequency = 24_000_000;
+    assert_eq!(d0_entry(&state, &mut usb, || frequency).status, STATUS_SUCCESS);
+    state.set_wellspring_mode_on(true);
+    let packet = [0_u8; 46];
+    let mut queue = FakeQueue::with_lengths(&[50; 3]);
+
+    for (counter, expected) in [(200_000, 0_u16), (202_400, 1), (819_200, 258)] {
+        assert_eq!(
+            on_read_complete(&state, &packet, &mut queue, &mut usb, || counter),
+            ReadCompleteOutcome::Completed
+        );
+        let (request, _, _) = queue.completed.last().expect("report completed");
+        assert_eq!(request.out[46..48], expected.to_le_bytes());
     }
 }
 

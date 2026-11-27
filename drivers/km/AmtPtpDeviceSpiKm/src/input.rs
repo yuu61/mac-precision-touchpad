@@ -18,7 +18,9 @@ use wdk_sys::{
     WDFMEMORY, WDFOBJECT, WDFREQUEST, call_unsafe_wdf_function_binding,
 };
 
-use crate::device::{DeviceContext, query_performance_counter_as_c};
+use wdf_support::time::query_performance_counter;
+
+use crate::device::DeviceContext;
 use crate::{PROVIDER, keyword};
 
 /// Port of the C `WORKER_REQUEST_CONTEXT` (Device.h:96-101), the context of every driver-created lower
@@ -353,7 +355,7 @@ unsafe fn serve_oldest_read(
         &trackpad,
         information as u64,
         packet,
-        query_performance_counter_as_c,
+        query_performance_counter,
     );
     match result {
         Ok(report) => {

@@ -96,9 +96,8 @@ pub trait UsbHardware: ControlTransfer {
     /// `WdfIoTargetStop(WdfUsbTargetPipeGetIoTarget(pipe), WdfIoTargetCancelSentIo)`.
     fn stop_pipe(&mut self, index: u8);
 
-    /// `KeQueryPerformanceCounter(&x)` and return `x.QuadPart`: the value written to the
-    /// **out-parameter**, i.e. the QPC frequency (the counter, the return value, is discarded as in C).
-    fn query_performance_counter_out(&mut self) -> i64;
+    /// QPC frequency in ticks per second.
+    fn query_performance_frequency(&mut self) -> i64;
 }
 
 /// `ContinuousReaderConfig` for the device's config row, or `None` for an unknown trackpad type (C:
@@ -209,7 +208,7 @@ pub fn prepare_hardware<H: UsbHardware + ?Sized>(state: &DeviceState, hw: &mut H
 ///
 /// 1. if `PtpReportButton || IsWellspringModeOn` (always true): wellspring mode on; a failure is ignored
 ///    (spec B11, preserved: the device then stays in mouse mode);
-/// 2. `LastReportTime` = the `KeQueryPerformanceCounter` out-parameter (the frequency, spec B1);
+/// 2. cache the QPC frequency and restart the reporting clock;
 /// 3. start the interrupt pipe's I/O target (starts the continuous reader) and return its status.
 ///
 /// The mode switch happens before the reader starts. Without an interrupt pipe (impossible: KMDF calls
@@ -220,7 +219,7 @@ pub fn d0_entry<H: UsbHardware + ?Sized>(state: &DeviceState, hw: &mut H) -> NtS
     if gates.report_button || state.wellspring_mode_on() {
         let _ignored = set_wellspring_mode(state, hw, true);
     }
-    state.set_last_report_time(hw.query_performance_counter_out());
+    state.set_qpc_frequency(hw.query_performance_frequency());
     match state.interrupt_pipe() {
         Some(pipe) => hw.start_pipe(pipe),
         None => STATUS_INVALID_DEVICE_STATE,
@@ -442,7 +441,7 @@ mod tests {
             STATUS_SUCCESS
         }
         fn stop_pipe(&mut self, _: u8) {}
-        fn query_performance_counter_out(&mut self) -> i64 {
+        fn query_performance_frequency(&mut self) -> i64 {
             0
         }
     }

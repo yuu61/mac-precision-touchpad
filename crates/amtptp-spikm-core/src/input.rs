@@ -50,10 +50,6 @@ pub const MAX_FILLED_CONTACTS: u8 = 5;
 const _: () = assert!(MAX_FILLED_CONTACTS as usize == PTP_CONTACT_SLOTS);
 /// Confidence threshold (Input.c:242-243): Confidence = `TouchMajor < 2500 && TouchMinor < 2500`, signed.
 pub const CONFIDENCE_TOUCH_LIMIT: i16 = 2500;
-/// Divisor of the QPC delta (Input.c:220).
-pub const SCAN_TIME_DIVISOR: i64 = 100;
-/// `ScanTime` cap (Input.c:257-259): 0xFF, not 0xFFFF.
-pub const SCAN_TIME_CAP: u16 = 0xFF;
 
 /// A read-only view of the valid bytes of a lower read. Every byte at or past the end of the view reads as
 /// 0 (P2 fix of SPI-B9: C read finger bytes past the lower Information from stale lookaside memory).
@@ -145,24 +141,6 @@ pub const fn lower_read_length(information: u64) -> Result<usize, NtStatus> {
     } else {
         // length >= 46 > 0, so the conversion is lossless.
         Ok(length as usize)
-    }
-}
-
-/// `ScanTime` exactly as C computes it (Input.c:216-221, 257-264):
-/// `delta = (current - last) / 100` in i64 (truncating division), then
-/// `delta >= 0xFF ? 0xFF : (USHORT)delta`.
-///
-/// The subtraction wraps (P2: C's signed overflow is UB; MSVC produces the two's-complement result). A
-/// negative delta is truncated to 16 bits like the C cast. In the shipped driver `current` and `last` are
-/// both the QPC **frequency** (SPI-B8, preserved), so the result is always 0.
-#[must_use]
-pub const fn scan_time(current: i64, last: i64) -> u16 {
-    let delta = current.wrapping_sub(last) / SCAN_TIME_DIVISOR;
-    if delta >= SCAN_TIME_CAP as i64 {
-        SCAN_TIME_CAP
-    } else {
-        // (USHORT)CounterDelta: keep the low 16 bits.
-        delta as u16
     }
 }
 
@@ -264,19 +242,4 @@ mod tests {
         assert_eq!(lower_read_length(u64::MAX), Err(STATUS_DEVICE_DATA_ERROR));
     }
 
-    #[test]
-    fn scan_time_arithmetic() {
-        assert_eq!(scan_time(10_000_000, 10_000_000), 0);
-        assert_eq!(scan_time(100, 0), 1);
-        assert_eq!(scan_time(199, 0), 1);
-        assert_eq!(scan_time(25_499, 0), 254);
-        assert_eq!(scan_time(25_500, 0), 255);
-        assert_eq!(scan_time(i64::MAX, 0), 255);
-        // Negative delta: truncating division toward zero, then (USHORT).
-        assert_eq!(scan_time(0, 100), 0xFFFF);
-        assert_eq!(scan_time(0, 99), 0);
-        assert_eq!(scan_time(0, 6_553_600), 0); // -65536 -> 0x0000
-        // Wrapping subtraction (P2) instead of UB: MIN - 1 wraps to MAX.
-        assert_eq!(scan_time(i64::MIN, 1), 255);
-    }
 }

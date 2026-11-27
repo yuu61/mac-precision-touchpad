@@ -18,9 +18,8 @@
 //! | [`pnp`] | Device.c, InputInterrupt.c:6-80 | `PrepareHardware`, `D0Entry`, `D0Exit`, constants |
 //! | [`status`] | ntstatus.h | the NTSTATUS values the driver itself returns |
 //!
-//! Behavior follows the C driver exactly (policy P1/P3 of the port), except where the C code has
-//! undefined behavior, memory-safety bugs or leaks/hangs (P2). Each deviation is documented on the item
-//! that implements it with its spec bug ID (`UM-Bn`) and recorded in `docs/rust-port/usbum.md`.
+//! The core follows the C porting baseline documented in `docs/rust-port/specs/usbum.md`, with
+//! updated Scan Time and HQA reporting.
 //!
 //! # How the driver uses this
 //!
@@ -41,7 +40,7 @@
 //! |---|---|
 //! | `EvtDriverDeviceAdd` | `WdfFdoInitSetFilter`, device + context, `SurpriseRemovalOK`, interface [`pnp::GUID_DEVINTERFACE_AMTPTP_DEVICE`], default parallel queue (not power-managed as a filter) + manual `InputQueue` (`PowerManaged = WdfFalse`) |
 //! | `EvtDevicePrepareHardware` | [`pnp::prepare_hardware`]; write `outcome.event` if any; return `outcome.status` |
-//! | `EvtDeviceD0Entry` | [`pnp::d0_entry`] with `QueryPerformanceCounter`; return `outcome.status` |
+//! | `EvtDeviceD0Entry` | [`pnp::d0_entry`] with `QueryPerformanceFrequency`; return `outcome.status` |
 //! | `EvtDeviceD0Exit` | return [`pnp::d0_exit`] |
 //! | `EvtIoDeviceControl` | [`hid::route_ioctl`], then the handler below; complete with `(status, information)` unless READ_REPORT was forwarded |
 //! | GET_DEVICE_DESCRIPTOR | [`hid::get_hid_descriptor`] (write `outcome.event` if any) |

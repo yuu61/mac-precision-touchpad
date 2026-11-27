@@ -14,6 +14,8 @@ use amtptp_spikm_core::feature::{SET_FEATURE_READ_LEN, check_xfer_packet, get_fe
 use amtptp_spikm_core::runtime::DeviceRuntime;
 use amtptp_spikm_core::status::STATUS_SUCCESS;
 use common::{Record, Tally, chg, load};
+use ptp_hid::common::REPORTID_PTPHQA;
+use ptp_hid::feature::{HQA_REPORT, HQA_REPORT_LEN};
 
 const GET_OK: &str = "GET: bytes written, success";
 const GET_ERR: &str = "GET: driver error status";
@@ -118,7 +120,13 @@ fn feature_reports() {
             other => panic!("{ctx}: op {other}"),
         };
         assert_eq!(status, r.status("status"), "{ctx}: status");
-        assert_eq!(chg(&rbuf, &after), r.get("chg"), "{ctx}: chg");
+        if r.get("op") == "get" && report_id == REPORTID_PTPHQA && status == STATUS_SUCCESS {
+            let mut expected = rbuf;
+            expected[..HQA_REPORT_LEN].copy_from_slice(&HQA_REPORT);
+            assert_eq!(after, expected, "{ctx}: certification report");
+        } else {
+            assert_eq!(chg(&rbuf, &after), r.get("chg"), "{ctx}: chg");
+        }
         let expect_flags = (
             r.get("pio_out") == "1",
             r.get("prb_out") == "1",

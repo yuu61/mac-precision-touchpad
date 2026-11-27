@@ -127,7 +127,7 @@ impl<'a> Rec<'a> {
             pressure_qual_level: self.u(&key("pq")) as u8,
             sg_contact_size_qual_level: self.u(&key("sq")) as u8,
             mu_contact_size_qual_level: self.u(&key("mq")) as u8,
-            perf_counter: perf,
+            qpc_frequency: perf,
         }
     }
 }

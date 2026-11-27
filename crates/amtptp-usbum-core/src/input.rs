@@ -1,6 +1,6 @@
 //! Interrupt-packet parsing and the continuous-reader completion (InputInterrupt.c:82-597).
 //!
-//! The pure building blocks ([`scan_time`], [`wellspring_contact`], [`mt2_contact`], [`build_report`],
+//! The pure building blocks ([`wellspring_contact`], [`mt2_contact`], [`build_report`],
 //! [`classify_packet`]) reproduce the C integer semantics exactly (sign extension, truncation, the MSVC /
 //! `-fwrapv` two's-complement results of the C UB). [`on_read_complete`] strings them together in the C
 //! order, driving the `READ_REPORT` queue and the control pipe through the [`crate::io`] traits.
@@ -15,26 +15,6 @@ use crate::status::{NtStatus, STATUS_SUCCESS};
 use crate::usb::emergency_reset;
 
 pub use bcm5974::input::MT2_FINGER_LEN;
-
-/// `ScanTime` exactly as the C code computes it (InputInterrupt.c:275-287 / :470-482, UM-B12 P3
-/// PRESERVED):
-///
-/// ```c
-/// PerfCounterDelta = (Current.QuadPart - DeviceContext->PerfCounter.QuadPart) / 100;
-/// if (PerfCounterDelta > 0xFF) PerfCounterDelta = 0xFF;
-/// PtpReport.ScanTime = (USHORT) PerfCounterDelta;
-/// ```
-///
-/// The subtraction wraps (two's complement, P2 for the signed-overflow UB), the division truncates toward
-/// zero, only the upper bound is clamped, and a negative delta is truncated to 16 bits (for example a
-/// delta of -1 gives 0xFFFF).
-#[must_use]
-pub const fn scan_time(qpc_now: i64, perf_counter: i64) -> u16 {
-    let delta = qpc_now.wrapping_sub(perf_counter) / 100;
-    let delta = if delta > 0xFF { 0xFF } else { delta };
-    // C: `(USHORT) PerfCounterDelta` (truncation of a LONGLONG).
-    delta as u16
-}
 
 /// Decodes one TYPE2–4 contact using the UMDF tip-switch threshold.
 #[must_use]
@@ -230,7 +210,7 @@ where
     };
     let mut qpc = Some(query_performance_counter);
     let mut take_scan_time = || match qpc.take() {
-        Some(query) => scan_time(query(), state.perf_counter()),
+        Some(query) => state.scan_clock.sample(query()),
         None => 0,
     };
     let type5 = cfg.profile.tp_type == TrackpadType::Type5;

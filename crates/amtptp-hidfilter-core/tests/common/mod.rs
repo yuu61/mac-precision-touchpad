@@ -139,7 +139,7 @@ pub fn parse_state(text: &str) -> DeviceSnapshot {
             "inp_on" => state.ptp_input_on = value == "1",
             "touch" => state.ptp_report_touch = value == "1",
             "btn" => state.ptp_report_button = value == "1",
-            "last" => state.last_report_time = num(value) as i64,
+            "last" => state.qpc_frequency = num(value) as i64,
             _ => panic!("unknown state key {key}"),
         }
     }
@@ -197,7 +197,7 @@ pub fn started(vid: u16, hdr: usize) -> DeviceSnapshot {
         device_configured: true,
         detour_completed: true,
         io_target_set: true,
-        last_report_time: 10_000_000,
+        qpc_frequency: 10_000_000,
         ..DeviceSnapshot::default()
     }
 }
@@ -327,6 +327,7 @@ pub struct Mock {
     pub read_queue: VecDeque<usize>,
     pub faults: Faults,
     pub freq: i64,
+    pub counter: i64,
     pub attr: (u16, u16, u16),
     pub lower_buf: Vec<u8>,
     pub lower_reads_pending: i64,
@@ -349,6 +350,7 @@ impl Mock {
     pub fn new() -> Self {
         Self {
             freq: 10_000_000,
+            counter: 10_000_000,
             lower_buf: vec![0; 1024],
             ..Self::default()
         }
@@ -584,6 +586,11 @@ impl FilterIo for Mock {
 
     fn enqueue_recovery_work_item(&mut self) {
         self.rec("WdfWorkItemEnqueue(item=workitem)".into());
+    }
+
+    fn query_performance_counter(&mut self) -> i64 {
+        self.rec("KeQueryPerformanceCounter(freq_ptr=null)".into());
+        self.counter
     }
 
     fn query_performance_frequency(&mut self) -> i64 {

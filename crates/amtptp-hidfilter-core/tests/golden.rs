@@ -79,12 +79,7 @@ fn d2_whole_bt_packet() {
         classify_lower_read(0x004C, &BT, 58),
         LowerReadClass::Report { length: 58 }
     );
-    // Steady state: LastReportTime already holds the frequency, so ScanTime is 0.
-    let report = build_report(&BT, 58, &buffer, scan_time(10_000_000, 10_000_000));
-    assert_eq!(report.to_vec(), expected);
-    // Never stamped: 0xFF.
-    let report = build_report(&BT, 58, &buffer, scan_time(10_000_000, 0));
-    assert_eq!(report[46..48], [0xFF, 0x00]);
+    assert_eq!(build_report(&BT, 58, &buffer, 0).to_vec(), expected);
 }
 
 #[test]
@@ -112,37 +107,6 @@ fn d3_length_classification() {
     assert_eq!((r[48], r[49]), (0, 1));
 }
 
-#[test]
-fn d4_scan_time() {
-    // Driver level: (LastReportTime before, frequency) -> (ScanTime, LastReportTime after).
-    for (last, freq, t) in [
-        (10_000_000_i64, 10_000_000_i64, 0_u16),
-        (0, 10_000_000, 0xFF),
-        (0, 25_500, 0xFF),
-        (0, 25_499, 254),
-    ] {
-        let state = DeviceState::with(&DeviceSnapshot {
-            last_report_time: last,
-            ..DeviceSnapshot::default()
-        });
-        let previous = state.swap_last_report_time(freq);
-        assert_eq!(scan_time(freq, previous), t);
-        assert_eq!(state.last_report_time(), freq);
-    }
-    // Formula level: delta ticks -> ScanTime.
-    for (delta, t) in [
-        (0_i64, 0_u16),
-        (99, 0),
-        (2550, 25),
-        (25_499, 254),
-        (25_500, 255),
-        (10_000_000, 255),
-        (-50, 0),
-        (-100, 0xFFFF),
-    ] {
-        assert_eq!(scan_time(delta, 0), t, "{delta}");
-    }
-}
 
 #[test]
 fn d5_feature_requests() {
@@ -155,8 +119,7 @@ fn d5_feature_requests() {
     assert_eq!(b, [0xAA; 2]);
     let mut b = [0xAA_u8; 257];
     assert_eq!(get_feature_report(0x08, &mut b), STATUS_SUCCESS);
-    assert_eq!(b[..2], [0x08, 0xFC]);
-    assert!(b[2..].iter().all(|&x| x == 0xAA));
+    assert_eq!(b, ptp_hid::feature::HQA_REPORT);
     assert_eq!(
         get_feature_report(0x08, &mut [0_u8; 256]),
         STATUS_INVALID_BUFFER_SIZE

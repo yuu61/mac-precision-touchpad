@@ -258,7 +258,7 @@ impl UsbHardware for FakeHw {
         self.log(format!("iotarget_stop:pipe={index},action=1"));
     }
 
-    fn query_performance_counter_out(&mut self) -> i64 {
+    fn query_performance_frequency(&mut self) -> i64 {
         self.log("qpc".to_owned());
         self.qpc_freq
     }

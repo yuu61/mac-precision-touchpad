@@ -148,9 +148,9 @@ pub trait FilterIo {
     fn start_recovery_timer(&mut self, due_time: i64);
     /// `WdfWorkItemEnqueue(HidTransportRecoveryWorkItem)`.
     fn enqueue_recovery_work_item(&mut self);
-    /// `KeQueryPerformanceCounter(&value)` **returning `value`**, i.e. what the call writes through its
-    /// `PerformanceFrequency` out-pointer (the QPC frequency). The counter it returns is discarded, as
-    /// in C (HF-B6). Glue: `let mut f = 0i64; KeQueryPerformanceCounter(&mut f as *mut _ as _); f`.
+    /// The current QPC counter in ticks.
+    fn query_performance_counter(&mut self) -> i64;
+    /// The QPC frequency in ticks per second.
     fn query_performance_frequency(&mut self) -> i64;
     /// `WdfIoTargetSendInternalIoctlSynchronously(HidIoTarget, NULL, IOCTL_HID_GET_DEVICE_ATTRIBUTES,
     /// NULL, &descriptor(output, 32), NULL, NULL)`: no timeout (HF-B27). `output` arrives zeroed.

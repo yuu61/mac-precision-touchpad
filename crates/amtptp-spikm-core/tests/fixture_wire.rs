@@ -224,7 +224,7 @@ fn wire_records() {
                     );
                 } else {
                     assert!(!r.has("timer_armed"), "{ctx}");
-                    assert_eq!(rt.last_report_time(), r.dec::<i64>("lrt_out"), "{ctx}");
+                    assert_eq!(rt.qpc_frequency(), r.dec::<i64>("lrt_out"), "{ctx}");
                 }
                 assert_eq!(
                     qpc,

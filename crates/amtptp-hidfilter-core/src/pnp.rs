@@ -46,7 +46,7 @@ pub fn d0_exit<P: FilterIo>(io: &mut P, state: &DeviceState) -> NtStatus {
 /// 2. query `HID_DEVICE_ATTRIBUTES` from the PDO; failure fails the start; store VID, PID, version;
 /// 3. [`configure_multitouch`]; on failure arm the 2 s timer and return SUCCESS with
 ///    `DeviceConfigured` still FALSE;
-/// 4. stamp `LastReportTime` with the QPC frequency (HF-B6) and set `DeviceConfigured`.
+/// 4. cache the QPC frequency, restart the reporting clock and set `DeviceConfigured`.
 pub fn self_managed_io_init<P: FilterIo + DetourIo>(io: &mut P, state: &DeviceState) -> NtStatus {
     let status = detour_hid_stack(io, state);
     if !nt_success(status) {
@@ -78,7 +78,7 @@ pub fn self_managed_io_init<P: FilterIo + DetourIo>(io: &mut P, state: &DeviceSt
 /// - detour done: [`configure_multitouch`]; on failure arm the 2 s timer and return **SUCCESS**
 ///   without touching `DeviceConfigured` (HF-B12);
 /// - detour not done: status `STATUS_INVALID_STATE_TRANSITION`, but fall through (HF-B11);
-/// - then stamp `LastReportTime`, set `DeviceConfigured = TRUE` and return the status.
+/// - then restart the reporting clock, set `DeviceConfigured = TRUE` and return the status.
 pub fn self_managed_io_restart<P: FilterIo>(io: &mut P, state: &DeviceState) -> NtStatus {
     let status = if state.detour_completed() {
         if !nt_success(configure_multitouch(io, state)) {
@@ -93,11 +93,10 @@ pub fn self_managed_io_restart<P: FilterIo>(io: &mut P, state: &DeviceState) -> 
     status
 }
 
-/// `KeQueryPerformanceCounter(&ctx->LastReportTime)` (stores the frequency) and
-/// `DeviceConfigured = TRUE`.
+/// Caches the QPC frequency and starts a new reporting session.
 fn mark_configured<P: FilterIo>(io: &mut P, state: &DeviceState) {
     let frequency = io.query_performance_frequency();
-    state.store_last_report_time(frequency);
+    state.set_qpc_frequency(frequency);
     state.set_device_configured(true);
 }
 

@@ -11,7 +11,7 @@ use ptp_hid::common::{
 use ptp_hid::feature::{
     DEVICE_CAPS_REPORT_LEN, DeviceCapsReport, HQA_REPORT_LEN, INPUT_MODE_REPORT_LEN,
     SELECTIVE_REPORT_LEN, SelectiveReportBits, UMAPP_CONF_REPORT_LEN, UmAppConfReport,
-    write_hqa_report_as_c,
+    write_hqa_report,
 };
 use ptp_hid::hidport::{
     HID_DESCRIPTOR_LEN, HID_DEVICE_ATTRIBUTES_LEN, HID_STRING_ID_IMANUFACTURER,
@@ -280,7 +280,7 @@ pub fn get_string<R: HidRequest, S: UsbStringSource>(
 /// | ID | needs | writes | Information |
 /// |---|---|---|---|
 /// | 0x07 | 3 | `07 05 00` | 3 |
-/// | 0x08 | 257 | `08 FC` only (UM-B2, P3 PRESERVED); bytes 2.. untouched | 257 |
+/// | 0x08 | 257 | Report ID and 256-byte certification blob | 257 |
 /// | 0x09 | 4 | `09 pq sq mq` | 4 |
 /// | other | - | nothing, `STATUS_NOT_SUPPORTED` | 0 |
 ///
@@ -302,7 +302,7 @@ pub fn get_feature<R: HidRequest>(state: &DeviceState, request: &mut R) -> Ioctl
             DeviceCapsReport::PTP.write_to(buffer),
             DEVICE_CAPS_REPORT_LEN,
         ),
-        REPORTID_PTPHQA => (write_hqa_report_as_c(buffer), HQA_REPORT_LEN),
+        REPORTID_PTPHQA => (write_hqa_report(buffer), HQA_REPORT_LEN),
         REPORTID_UMAPP_CONF => {
             let [pressure, single, multiple] = state.qual_levels();
             let report = UmAppConfReport {

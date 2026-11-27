@@ -39,7 +39,7 @@ use wdf_support::request::Request;
 use wdf_support::wdm::{request_wdm_get_irp, set_irp_user_buffer};
 use wdk_sys::{
     _WDF_DEVICE_FAILED_ACTION, _WDF_REQUEST_SEND_OPTIONS_FLAGS, HID_DEVICE_ATTRIBUTES,
-    HID_XFER_PACKET, LARGE_INTEGER, PWDF_REQUEST_COMPLETION_PARAMS, ULONG, ULONG_PTR,
+    HID_XFER_PACKET, PWDF_REQUEST_COMPLETION_PARAMS, ULONG, ULONG_PTR,
     WDF_NO_OBJECT_ATTRIBUTES, WDFCONTEXT, WDFIOTARGET, WDFMEMORY, WDFREQUEST,
     call_unsafe_wdf_function_binding,
 };
@@ -514,14 +514,12 @@ impl FilterIo for Filter<'_> {
         };
     }
 
+    fn query_performance_counter(&mut self) -> i64 {
+        wdf_support::time::query_performance_counter()
+    }
+
     fn query_performance_frequency(&mut self) -> i64 {
-        let mut frequency = LARGE_INTEGER::default();
-        // SAFETY: `frequency` is a valid out pointer; callable at any IRQL. As in C
-        // (Device.c:237, 276; Input.c:187), the argument is the `PerformanceFrequency` output and
-        // the returned counter is discarded (HF-B6, preserved: ScanTime is effectively 0).
-        let _counter = unsafe { wdk_sys::ntddk::KeQueryPerformanceCounter(&raw mut frequency) };
-        // SAFETY: every bit pattern of the union is a valid LONGLONG.
-        unsafe { frequency.QuadPart }
+        wdf_support::time::query_performance_frequency()
     }
 
     fn query_device_attributes(

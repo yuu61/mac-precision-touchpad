@@ -174,8 +174,8 @@ fn read_xfer_packet(request: &Request, get: bool) -> Result<HID_XFER_PACKET, NTS
 
 /// `AmtPtpReportFeatures` (Hid.c:581-725), `IOCTL_HID_GET_FEATURE`.
 ///
-/// Report 7 (device caps) writes `07 05 00`; report 8 (HQA) writes only `08 FC` (the C comma-operator
-/// bug, SPI-B1, preserved); both need `reportBufferLen` >= 3 / 257, else `STATUS_INVALID_BUFFER_SIZE`.
+/// Report 7 (device caps) writes `07 05 00`. Report 8 (HQA) writes its ID and 256-byte blob. The
+/// respective minimum buffer lengths are 3 and 257, with `STATUS_INVALID_BUFFER_SIZE` for short buffers.
 /// Any other report ID: `STATUS_NOT_SUPPORTED`. Information is never set (stays 0, SPI-B4).
 pub(crate) fn report_features(request: &Request) -> NTSTATUS {
     let packet = match read_xfer_packet(request, true) {

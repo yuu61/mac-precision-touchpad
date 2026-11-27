@@ -99,23 +99,6 @@ pub fn contact_count(layout: &InputLayout, length: usize) -> u8 {
     raw.min(PTP_CONTACT_SLOTS) as u8
 }
 
-/// `ScanTime` exactly as Input.c:187-189 computes it, given the value `KeQueryPerformanceCounter`
-/// wrote through its *frequency* pointer (`now`) and the previous `LastReportTime` (`last`):
-/// `delta = (now - last) / 100` (LONGLONG, truncating), then `delta >= 0xFF ? 0xFF : (USHORT)delta`.
-///
-/// Because `now` is always the QPC frequency, the driver emits 0 except for 0xFF on a report while
-/// `LastReportTime` was never stamped (HF-B6, preserved). A negative delta truncates
-/// (`-100 / 100 = -1` gives 0xFFFF). The subtraction wraps like MSVC instead of overflowing.
-#[must_use]
-pub const fn scan_time(now: i64, last: i64) -> u16 {
-    let delta = now.wrapping_sub(last) / 100;
-    if delta >= 0xFF {
-        0xFF
-    } else {
-        delta as u16 // (USHORT) truncation of a LONGLONG
-    }
-}
-
 /// Reads `buffer[base + offset]`, or 0 if that is outside `buffer` (port policy P2). With the 1024-byte
 /// lookaside buffer every byte C reads is inside it.
 fn byte_at(buffer: &[u8], base: Option<usize>, offset: usize) -> u8 {
@@ -208,22 +191,6 @@ mod tests {
             classify_lower_read(0x4C, &zero, 5),
             LowerReadClass::Malformed
         );
-    }
-
-    #[test]
-    fn scan_time_formula() {
-        for (d, t) in [
-            (0_i64, 0_u16),
-            (99, 0),
-            (2550, 25),
-            (25499, 254),
-            (25500, 255),
-            (10_000_000, 255),
-            (-50, 0),
-            (-100, 0xFFFF),
-        ] {
-            assert_eq!(scan_time(d, 0), t, "delta {d}");
-        }
     }
 
     #[test]

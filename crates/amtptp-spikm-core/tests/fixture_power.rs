@@ -50,7 +50,7 @@ impl Framework {
             "{ctx}: {prefix}_ds"
         );
         assert_eq!(
-            rt.last_report_time(),
+            rt.qpc_frequency(),
             r.dec::<i64>(&format!("{prefix}_lrt")),
             "{ctx}: {prefix}_lrt"
         );

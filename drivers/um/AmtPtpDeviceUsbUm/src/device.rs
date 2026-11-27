@@ -337,7 +337,7 @@ unsafe extern "C" fn evt_device_d0_entry(
     let outcome = pnp::d0_entry(
         &context.state,
         &mut io,
-        crate::usb::query_performance_counter,
+        wdf_support::time::query_performance_frequency,
     );
     if let Some(mode_status) = outcome.mode_switch_status
         && !NT_SUCCESS(mode_status)
