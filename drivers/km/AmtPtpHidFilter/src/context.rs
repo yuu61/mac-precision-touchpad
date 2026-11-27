@@ -9,9 +9,10 @@ use core::sync::atomic::{AtomicPtr, Ordering};
 
 use amtptp_hidfilter_core::DeviceState;
 use wdf_support::declare_context_type;
+use wdf_support::handle::{ContextPtr, WdfHandle};
 use wdk_sys::{
     _DEVICE_OBJECT, PDEVICE_OBJECT, WDFDEVICE, WDFDEVICE__, WDFIOTARGET, WDFIOTARGET__,
-    WDFLOOKASIDE, WDFLOOKASIDE__, WDFMEMORY, WDFQUEUE, WDFQUEUE__, WDFTIMER, WDFTIMER__,
+    WDFLOOKASIDE, WDFLOOKASIDE__, WDFMEMORY__, WDFQUEUE, WDFQUEUE__, WDFTIMER, WDFTIMER__,
     WDFWORKITEM, WDFWORKITEM__,
 };
 
@@ -139,7 +140,7 @@ pub(crate) unsafe fn device_context<'a>(device: WDFDEVICE) -> &'a DeviceContext 
 /// `HidIoTarget` into it while it is still NULL and never reads it (HF-B19).
 pub(crate) struct QueueContext {
     /// `Device`: the queue's WDFDEVICE.
-    pub(crate) device: WDFDEVICE,
+    pub(crate) device: WdfHandle<WDFDEVICE__>,
 }
 
 declare_context_type!(pub(crate) QueueContext, QUEUE_CONTEXT_TYPE_INFO, queue_get_context, name = "QUEUE_CONTEXT");
@@ -148,9 +149,9 @@ declare_context_type!(pub(crate) QueueContext, QUEUE_CONTEXT_TYPE_INFO, queue_ge
 /// request; its address is also the completion routine's context (Input.c:100).
 pub(crate) struct WorkerRequestContext {
     /// `DeviceContext`: back pointer to the device context (the request is a child of the device).
-    pub(crate) device_context: *const DeviceContext,
+    pub(crate) device_context: ContextPtr<DeviceContext>,
     /// `RequestMemory`: the lookaside buffer formatted as the request's output buffer.
-    pub(crate) request_memory: WDFMEMORY,
+    pub(crate) request_memory: WdfHandle<WDFMEMORY__>,
 }
 
 declare_context_type!(

@@ -59,13 +59,6 @@ pub(crate) struct DeviceContext {
     pub(crate) state: DeviceState,
 }
 
-// Concurrent callbacks (parallel queue, reader completions, PnP/power) share the context through
-// `&DeviceContext`, so it must be `Sync` (all fields are atomics).
-const _: fn() = || {
-    const fn assert_sync<T: Sync>() {}
-    assert_sync::<DeviceContext>();
-};
-
 // C: WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(DEVICE_CONTEXT, DeviceGetContext). Same ContextName, so
 // `!wdfkd.wdfobject` shows "DEVICE_CONTEXT" as for the C driver.
 declare_context_type!(

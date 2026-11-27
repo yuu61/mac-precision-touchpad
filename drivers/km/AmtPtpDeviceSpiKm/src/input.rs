@@ -15,12 +15,13 @@ use amtptp_spikm_core::wire::LOWER_READ_IOCTL;
 use ptp_hid::input::SPI_PTP_REPORT_LEN;
 use tracelogging as tlg;
 use wdf_support::declare_context_type;
+use wdf_support::handle::{ContextPtr, WdfHandle};
 use wdf_support::init::object_attributes_init_context_type;
 use wdf_support::ntstatus::{NT_SUCCESS, STATUS_SUCCESS};
 use wdf_support::request::Request;
 use wdk_sys::{
     NTSTATUS, PWDF_REQUEST_COMPLETION_PARAMS, ULONG, ULONG_PTR, WDFCONTEXT, WDFDEVICE, WDFIOTARGET,
-    WDFMEMORY, WDFOBJECT, WDFREQUEST, call_unsafe_wdf_function_binding,
+    WDFMEMORY, WDFMEMORY__, WDFOBJECT, WDFREQUEST, call_unsafe_wdf_function_binding,
 };
 
 use wdf_support::time::query_performance_counter;
@@ -32,9 +33,9 @@ use crate::{PROVIDER, keyword};
 /// read request. Named `WORKER_REQUEST_CONTEXT` for `!wdfkd`.
 pub(crate) struct WorkerRequestContext {
     /// `DeviceContext`: the context of the device that issued the read (the request's parent).
-    device_context: *const DeviceContext,
+    device_context: ContextPtr<DeviceContext>,
     /// `RequestMemory`: the lookaside buffer used as the read's output; deleted by the completion routine.
-    request_memory: WDFMEMORY,
+    request_memory: WdfHandle<WDFMEMORY__>,
     /// The epoch the read was claimed in (not in C).
     ticket: ReadTicket,
 }
@@ -61,7 +62,7 @@ pub(crate) unsafe fn spi_input_routine_worker(
     request: Request,
 ) {
     // SAFETY: `hid_queue` is the device's manual queue, created in AddDevice.
-    if let Err(rejected) = unsafe { request.forward_to_io_queue(context.hid_queue) } {
+    if let Err(rejected) = unsafe { request.forward_to_io_queue(context.hid_queue.get()) } {
         tlg::write_event!(
             PROVIDER,
             "ForwardToHidQueueFailed",
@@ -99,7 +100,7 @@ pub(crate) unsafe fn issue_backlog_reads(device: WDFDEVICE, context: &DeviceCont
     let _state = unsafe {
         call_unsafe_wdf_function_binding!(
             WdfIoQueueGetState,
-            context.hid_queue,
+            context.hid_queue.get(),
             &raw mut queued,
             null_mut()
         )
@@ -148,7 +149,7 @@ fn trace_issue_failure(step: &[u8], status: NTSTATUS) {
 /// # Safety
 /// `device` is a live device of this driver and `context` its context; IRQL <= `DISPATCH_LEVEL`.
 pub(crate) unsafe fn spi_input_issue_request(device: WDFDEVICE, context: &DeviceContext) {
-    let target: WDFIOTARGET = context.spi_trackpad_io_target;
+    let target: WDFIOTARGET = context.spi_trackpad_io_target.get();
 
     let mut attributes = object_attributes_init_context_type(&WORKER_REQUEST_CONTEXT_TYPE_INFO);
     attributes.ParentObject = device.cast();
@@ -172,7 +173,7 @@ pub(crate) unsafe fn spi_input_issue_request(device: WDFDEVICE, context: &Device
     let status = unsafe {
         call_unsafe_wdf_function_binding!(
             WdfMemoryCreateFromLookaside,
-            context.hid_read_buffer_lookaside,
+            context.hid_read_buffer_lookaside.get(),
             &raw mut memory
         )
     };
@@ -244,7 +245,9 @@ pub(crate) unsafe fn spi_input_issue_request(device: WDFDEVICE, context: &Device
 
     // SAFETY: caller contract; the closure only touches the tracker.
     let claim = unsafe {
-        context.with_reads(|runtime, reads| runtime.claim_lower_read(reads, lower_request))
+        context.with_reads(|runtime, reads| {
+            runtime.claim_lower_read(reads, WdfHandle::new(lower_request))
+        })
     };
     let ticket = match claim {
         Ok(ticket) => ticket,
@@ -268,8 +271,8 @@ pub(crate) unsafe fn spi_input_issue_request(device: WDFDEVICE, context: &Device
     // routine (the request is not sent yet).
     unsafe {
         worker_context.write(WorkerRequestContext {
-            device_context: context,
-            request_memory: memory,
+            device_context: ContextPtr::new(context),
+            request_memory: WdfHandle::new(memory),
             ticket,
         });
     }
@@ -288,7 +291,7 @@ pub(crate) unsafe fn spi_input_issue_request(device: WDFDEVICE, context: &Device
         // SAFETY: caller contract; the closure only touches the tracker.
         let _origin = unsafe {
             context.with_reads(|runtime, reads| {
-                runtime.finish_lower_read(reads, lower_request, ticket)
+                runtime.finish_lower_read(reads, WdfHandle::new(lower_request), ticket)
             })
         };
         // SAFETY: the send failed, so the completion routine will not run and
@@ -327,7 +330,11 @@ unsafe extern "C" fn request_completion_routine(
     // deleted below. Both fields are copied out now, before that delete.
     let (device_context, request_memory, ticket) = unsafe {
         match worker_context.as_ref() {
-            Some(worker) => (worker.device_context, worker.request_memory, worker.ticket),
+            Some(worker) => (
+                worker.device_context.get(),
+                worker.request_memory.get(),
+                worker.ticket,
+            ),
             // Unreachable: spi_input_issue_request never registers a NULL
             // context. The memory handle lives only in that context, so it
             // cannot be deleted here (accepted for an impossible state, SPI-X12).
@@ -341,7 +348,9 @@ unsafe extern "C" fn request_completion_routine(
         // SAFETY: the context of a live device; completion routines run at IRQL <= DISPATCH_LEVEL. The
         // closure only touches the tracker.
         let origin = unsafe {
-            device.with_reads(|runtime, reads| runtime.finish_lower_read(reads, spi_request, ticket))
+            device.with_reads(|runtime, reads| {
+                runtime.finish_lower_read(reads, WdfHandle::new(spi_request), ticket)
+            })
         };
         if origin == LowerReadOrigin::Current {
             // SAFETY: `spi_request` is the completed lower request; `params` its
@@ -381,7 +390,7 @@ unsafe fn serve_oldest_read(
     let status = unsafe {
         call_unsafe_wdf_function_binding!(
             WdfIoQueueRetrieveNextRequest,
-            context.hid_queue,
+            context.hid_queue.get(),
             &raw mut ptp_request
         )
     };

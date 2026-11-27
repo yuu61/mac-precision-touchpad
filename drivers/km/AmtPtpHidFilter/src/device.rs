@@ -24,6 +24,7 @@ use amtptp_hidfilter_core::{
     self_managed_io_restart, work_item_callback,
 };
 use tracelogging as tlg;
+use wdf_support::handle::WdfHandle;
 use wdf_support::hid as wdf_hid;
 use wdf_support::init::{
     object_attributes_init, object_attributes_init_context_type, pnppower_event_callbacks_init,
@@ -321,7 +322,7 @@ impl AddDeviceIo for AddDevice {
         // not referenced yet (the device is not started, so no request can be dispatched).
         unsafe {
             queue_get_context(queue).write(QueueContext {
-                device: self.device,
+                device: WdfHandle::new(self.device),
             });
         };
         status

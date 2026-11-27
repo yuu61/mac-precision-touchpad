@@ -136,6 +136,15 @@ pub unsafe fn get_typed_context(
 /// The context type must be `Sized`; its alignment must not exceed what WDF
 /// guarantees for context memory (`MEMORY_ALLOCATION_ALIGNMENT`, 16 bytes on
 /// x64/ARM64), which is checked at compile time.
+///
+/// The context type must also be `Sync`, which is checked at compile time too:
+/// the framework runs a device's callbacks concurrently (a parallel queue, I/O
+/// completions at `DISPATCH_LEVEL`, timers, work items, PnP/power), and they
+/// all reach the context through a shared reference. Store WDF handles as
+/// [`crate::handle::WdfHandle`] (or `AtomicPtr` when they change after the
+/// context is published), pointers to other contexts as
+/// [`crate::handle::ContextPtr`], and mutable state in atomics or behind a lock
+/// such as `sync::SpinLocked` (KMDF).
 #[macro_export]
 macro_rules! declare_context_type {
     ($vis:vis $ctx:ident, $info:ident, $getter:ident $(,)?) => {
@@ -170,6 +179,12 @@ macro_rules! declare_context_type {
             ::core::mem::align_of::<$ctx>() <= 16,
             "WDF context memory is only MEMORY_ALLOCATION_ALIGNMENT (16) aligned"
         );
+
+        // Concurrent callbacks share the context through `&$ctx`: it must be `Sync`.
+        const _: () = {
+            const fn assert_context_is_sync<T: ::core::marker::Sync>() {}
+            assert_context_is_sync::<$ctx>();
+        };
 
         /// Returns the
         #[doc = ::core::concat!("[`", ::core::stringify!($ctx), "`]")]

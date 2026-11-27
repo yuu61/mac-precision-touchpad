@@ -29,6 +29,7 @@ use ptp_hid::ioctl::{
     IOCTL_HID_GET_DEVICE_ATTRIBUTES, IOCTL_HID_READ_REPORT, IOCTL_HID_SET_FEATURE,
 };
 use tracelogging as tlg;
+use wdf_support::handle::{ContextPtr, WdfHandle};
 use wdf_support::hid as wdf_hid;
 use wdf_support::init::{
     memory_descriptor_init_buffer, object_attributes_init, object_attributes_init_context_type,
@@ -388,8 +389,8 @@ impl FilterIo for Filter<'_> {
         // context exists and nothing else references it yet (the request is not sent).
         unsafe {
             worker_request_get_context(read).write(WorkerRequestContext {
-                device_context: self.ctx,
-                request_memory: memory,
+                device_context: ContextPtr::new(self.ctx),
+                request_memory: WdfHandle::new(memory),
             });
         }
         Ok(memory)
@@ -788,8 +789,8 @@ unsafe extern "C" fn evt_lower_read_completion(
     // and alive until the request is deleted (below, inside the core).
     let (device_context, request_memory) = unsafe {
         (
-            (*request_context).device_context,
-            (*request_context).request_memory,
+            (*request_context).device_context.get(),
+            (*request_context).request_memory.get(),
         )
     };
     // SAFETY: the completed request is still ours until we delete it.

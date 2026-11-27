@@ -19,6 +19,14 @@ pub struct SpinLocked<T> {
     value: UnsafeCell<T>,
 }
 
+// SAFETY: the value is only reached through `with`, which holds the spin lock for the whole exclusive
+// borrow, so at most one thread uses it at a time (like `Mutex<T>`: `Sync` when `T: Send`). The lock
+// handle is written once by `create` before any concurrent use and read-only afterwards.
+unsafe impl<T: Send> Sync for SpinLocked<T> {}
+// SAFETY: moving the guard moves the value and the lock handle, an opaque framework handle that is
+// valid on any thread.
+unsafe impl<T: Send> Send for SpinLocked<T> {}
+
 impl<T> SpinLocked<T> {
     /// The value, with no lock yet.
     pub const fn new(value: T) -> Self {
