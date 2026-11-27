@@ -4,7 +4,7 @@
 
 use crate::config::lookup_config_row;
 use crate::hid::TraceEvent;
-use crate::io::{ControlPipe, InterruptPipeTarget, PipeType, UsbTargetSetup};
+use crate::io::{ControlPipe, InterruptPipeTarget, UsbTargetSetup};
 use crate::state::DeviceState;
 use crate::status::{
     NtStatus, STATUS_INVALID_DEVICE_STATE, STATUS_SUCCESS, STATUS_UNSUCCESSFUL, nt_success,
@@ -55,8 +55,9 @@ impl PrepareHardwareOutcome {
 ///    `STATUS_INVALID_DEVICE_STATE` + [`TraceEvent::DeviceNotFound`], `DeviceInfo = NULL`).
 /// 3. Retrieve the USB traits (failure → traits 0; write-only state).
 /// 4. `SelectInterruptInterface`: interface 0 (`NULL` → `STATUS_UNSUCCESSFUL`); visit configured pipes in
-///    order (each gets `SetNoMaximumPacketSizeCheck`) until the first **interrupt** pipe, whatever its
-///    direction (UM-B21, P3 PRESERVED); no interrupt pipe (and no stale one) → `STATUS_INVALID_DEVICE_STATE`.
+///    order (each gets `SetNoMaximumPacketSizeCheck`) until the first **interrupt IN** pipe (P3 fix of
+///    UM-B21: C took the first interrupt pipe whatever its direction); none → `STATUS_INVALID_DEVICE_STATE`
+///    (C also accepted the handle a previous start had selected).
 /// 5. Configure the continuous reader with the row's transfer length — **only once** (UM-B16, P2 FIXED:
 ///    the C code reconfigures it on every `PrepareHardware`, which WDF rejects with
 ///    `STATUS_INVALID_DEVICE_STATE`, so the device never restarts after a PnP stop/start). Failure: that
@@ -117,16 +118,12 @@ fn select_interrupt_interface<T: UsbTargetSetup>(usb: &mut T) -> NtStatus {
         return STATUS_UNSUCCESSFUL;
     };
     for index in 0..pipe_count {
-        if usb.visit_configured_pipe(index) == PipeType::Interrupt {
+        if usb.visit_configured_pipe(index).is_interrupt_in() {
             usb.select_interrupt_pipe(index);
-            break;
+            return STATUS_SUCCESS;
         }
     }
-    if usb.has_interrupt_pipe() {
-        STATUS_SUCCESS
-    } else {
-        STATUS_INVALID_DEVICE_STATE
-    }
+    STATUS_INVALID_DEVICE_STATE
 }
 
 /// Outcome of [`d0_entry`].

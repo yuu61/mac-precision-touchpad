@@ -28,6 +28,23 @@ pub enum UsbPipeType {
     Interrupt = 4,
 }
 
+/// The fields of `WDF_USB_PIPE_INFORMATION` the pipe selection reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UsbPipeInfo {
+    /// `PipeType`.
+    pub pipe_type: UsbPipeType,
+    /// `EndpointAddress`: bit 7 set for an IN (device-to-host) endpoint.
+    pub endpoint_address: u8,
+}
+
+impl UsbPipeInfo {
+    /// An interrupt IN pipe, the only kind a continuous reader can read from.
+    #[must_use]
+    pub const fn is_interrupt_in(self) -> bool {
+        matches!(self.pipe_type, UsbPipeType::Interrupt) && self.endpoint_address & 0x80 != 0
+    }
+}
+
 /// The fields of `WDF_USB_CONTINUOUS_READER_CONFIG` the C sets (via `WDF_USB_CONTINUOUS_READER_CONFIG_INIT`
 /// plus `EvtUsbTargetPipeReadersFailed`). The glue adds the callbacks: `EvtUsbTargetPipeReadComplete`
 /// (context = the device), and `EvtUsbTargetPipeReadersFailed` returning [`readers_failed`].
@@ -69,21 +86,21 @@ pub trait UsbHardware: ControlTransfer {
     /// Returns the WDF failure status if the interface cannot be selected.
     fn select_single_interface(&mut self) -> Result<u8, NtStatus>;
 
-    /// `WdfUsbInterfaceGetConfiguredPipe(UsbInterface, index, &PipeInfo)`: the pipe's `PipeType`.
-    fn configured_pipe_type(&mut self, index: u8) -> UsbPipeType;
+    /// `WdfUsbInterfaceGetConfiguredPipe(UsbInterface, index, &PipeInfo)`: the pipe's `PipeType` and
+    /// `EndpointAddress`.
+    fn configured_pipe(&mut self, index: u8) -> UsbPipeInfo;
 
     /// `WdfUsbTargetPipeSetNoMaximumPacketSizeCheck` on pipe `index`.
     fn set_no_maximum_packet_size_check(&mut self, index: u8);
 
     /// The C assignment `InterruptPipe = pipe` (`Some(index)`, made right after
-    /// [`UsbHardware::configured_pipe_type`] and [`UsbHardware::set_no_maximum_packet_size_check`] of that
+    /// [`UsbHardware::configured_pipe`] and [`UsbHardware::set_no_maximum_packet_size_check`] of that
     /// pipe), or the reset of `InterruptPipe` to NULL at the start of a selection (`None`, the B20 P2 fix).
     /// The glue keeps its `WDFUSBPIPE` handle in sync with [`DeviceState::interrupt_pipe`] here: the handle
     /// is the one `WdfUsbInterfaceGetConfiguredPipe` returned for `index`. Default: nothing.
     fn interrupt_pipe_selected(&mut self, _index: Option<u8>) {}
 
-    /// `WdfUsbTargetPipeConfigContinuousReader` on pipe `index`. The caller ignores the status (spec B9):
-    /// trace failures here.
+    /// `WdfUsbTargetPipeConfigContinuousReader` on pipe `index`. A failure fails `PrepareHardware`.
     fn configure_continuous_reader(
         &mut self,
         index: u8,
@@ -118,9 +135,10 @@ pub fn continuous_reader_config(state: &DeviceState) -> Option<ContinuousReaderC
 /// `SelectInterruptInterface`: selects the single interface, then walks the configured pipes in order,
 /// calling `SetNoMaximumPacketSizeCheck` on **every visited pipe** (it must precede the reader
 /// configuration: 526 is not a multiple of any realistic `MaxPacketSize`, spec B28), and takes the first
-/// interrupt pipe regardless of direction (`tp_ep` is ignored, spec B20, preserved).
+/// interrupt **IN** pipe (P3 fix: C took the first interrupt pipe whatever its direction, and a continuous
+/// reader on an OUT pipe cannot work).
 ///
-/// Returns the select-config failure, `STATUS_INVALID_DEVICE_STATE` if there is no interrupt pipe, or
+/// Returns the select-config failure, `STATUS_INVALID_DEVICE_STATE` if there is no interrupt IN pipe, or
 /// success.
 ///
 /// P2 (spec B20): `InterruptPipe` is reset before the selection. The C keeps the previous handle, which
@@ -137,9 +155,9 @@ pub fn select_interrupt_interface<H: UsbHardware + ?Sized>(
         Err(status) => return status,
     };
     for index in 0..pipes {
-        let pipe_type = hw.configured_pipe_type(index);
+        let pipe = hw.configured_pipe(index);
         hw.set_no_maximum_packet_size_check(index);
-        if pipe_type == UsbPipeType::Interrupt {
+        if pipe.is_interrupt_in() {
             state.set_interrupt_pipe(Some(index));
             hw.interrupt_pipe_selected(Some(index));
             break;
@@ -152,17 +170,18 @@ pub fn select_interrupt_interface<H: UsbHardware + ?Sized>(
 }
 
 /// `AmtPtpConfigContReaderForInterruptEndPoint`: configures the continuous reader on the interrupt pipe
-/// and **always returns `STATUS_SUCCESS`** (spec B9, preserved: a failed configuration leaves the device
-/// without input but `PrepareHardware` succeeds).
+/// and returns its status (P3 fix of spec B9: C always returned `STATUS_SUCCESS`, so a failed
+/// configuration left a started device without input). Without a reader configuration or an interrupt
+/// pipe (unreachable after [`select_interrupt_interface`] succeeded) it returns
+/// `STATUS_INVALID_DEVICE_STATE`.
 pub fn configure_continuous_reader<H: UsbHardware + ?Sized>(
     state: &DeviceState,
     hw: &mut H,
 ) -> NtStatus {
-    if let (Some(config), Some(pipe)) = (continuous_reader_config(state), state.interrupt_pipe()) {
-        // The status is masked, as in C (Interrupt.c:86). The glue traces it.
-        let _masked = hw.configure_continuous_reader(pipe, &config);
+    match (continuous_reader_config(state), state.interrupt_pipe()) {
+        (Some(config), Some(pipe)) => hw.configure_continuous_reader(pipe, &config),
+        _ => STATUS_INVALID_DEVICE_STATE,
     }
-    STATUS_SUCCESS
 }
 
 /// `AmtPtpDeviceUsbKmEvtDevicePrepareHardware`.
@@ -171,7 +190,7 @@ pub fn configure_continuous_reader<H: UsbHardware + ?Sized>(
 /// 2. read the device descriptor and select the config row by `idProduct` (unknown → fallback row);
 /// 3. retrieve the USB traits (failure ignored, traits = 0);
 /// 4. [`select_interrupt_interface`]; failure → return it;
-/// 5. [`configure_continuous_reader`] (always success);
+/// 5. [`configure_continuous_reader`]; failure → return it;
 /// 6. `PtpReportButton = PtpReportTouch = TRUE`.
 pub fn prepare_hardware<H: UsbHardware + ?Sized>(state: &DeviceState, hw: &mut H) -> NtStatus {
     if !state.usb_device_created() {
@@ -354,25 +373,37 @@ mod tests {
     use super::*;
     use crate::wellspring::{UsbSetupPacket, WELLSPRING_DATA_LEN};
 
-    /// Pipes: Bulk, Interrupt, Interrupt. Records the selection hook and the pipe calls.
+    const fn pipe(pipe_type: UsbPipeType, endpoint_address: u8) -> UsbPipeInfo {
+        UsbPipeInfo {
+            pipe_type,
+            endpoint_address,
+        }
+    }
+
+    /// Pipes: bulk IN, interrupt IN, interrupt IN. Records the selection hook and the pipe calls.
     struct PipeHw {
-        pipe_types: [UsbPipeType; 3],
-        log: [Option<(&'static str, Option<u8>)>; 16],
+        pipes: [UsbPipeInfo; 3],
+        log: [Option<(&'static str, Option<u8>)>; 32],
         len: usize,
         fail_select: bool,
+        reader_status: NtStatus,
     }
 
     impl PipeHw {
         fn new() -> Self {
+            Self::with_pipes([
+                pipe(UsbPipeType::Bulk, 0x81),
+                pipe(UsbPipeType::Interrupt, 0x83),
+                pipe(UsbPipeType::Interrupt, 0x84),
+            ])
+        }
+        const fn with_pipes(pipes: [UsbPipeInfo; 3]) -> Self {
             Self {
-                pipe_types: [
-                    UsbPipeType::Bulk,
-                    UsbPipeType::Interrupt,
-                    UsbPipeType::Interrupt,
-                ],
-                log: [None; 16],
+                pipes,
+                log: [None; 32],
                 len: 0,
                 fail_select: false,
+                reader_status: STATUS_SUCCESS,
             }
         }
         fn push(&mut self, name: &'static str, index: Option<u8>) {
@@ -419,9 +450,9 @@ mod tests {
             self.push("select", None);
             if self.fail_select { Err(-1) } else { Ok(3) }
         }
-        fn configured_pipe_type(&mut self, index: u8) -> UsbPipeType {
+        fn configured_pipe(&mut self, index: u8) -> UsbPipeInfo {
             self.push("pipe_type", Some(index));
-            self.pipe_types[usize::from(index)]
+            self.pipes[usize::from(index)]
         }
         fn set_no_maximum_packet_size_check(&mut self, index: u8) {
             self.push("no_max", Some(index));
@@ -435,7 +466,7 @@ mod tests {
             _: &ContinuousReaderConfig,
         ) -> NtStatus {
             self.push("reader", Some(index));
-            STATUS_SUCCESS
+            self.reader_status
         }
         fn start_pipe(&mut self, _: u8) -> NtStatus {
             STATUS_SUCCESS
@@ -472,6 +503,74 @@ mod tests {
         assert_eq!(select_interrupt_interface(&state, &mut hw), -1);
         assert_eq!(hw.log(), [Some(("selected", None)), Some(("select", None))]);
         assert_eq!(state.interrupt_pipe(), None);
+    }
+
+    /// Interrupt OUT first: the reader goes on the interrupt IN pipe after it.
+    #[test]
+    fn interrupt_out_pipe_is_skipped() {
+        let state = DeviceState::new();
+        let mut hw = PipeHw::with_pipes([
+            pipe(UsbPipeType::Interrupt, 0x03),
+            pipe(UsbPipeType::Interrupt, 0x83),
+            pipe(UsbPipeType::Bulk, 0x02),
+        ]);
+        assert_eq!(prepare_hardware(&state, &mut hw), STATUS_SUCCESS);
+        assert_eq!(state.interrupt_pipe(), Some(1));
+        assert_eq!(hw.log().last(), Some(&Some(("reader", Some(1)))));
+    }
+
+    /// Only an interrupt OUT pipe: no reader can be configured, so `PrepareHardware` fails.
+    #[test]
+    fn interrupt_out_only_fails_prepare_hardware() {
+        let state = DeviceState::new();
+        let mut hw = PipeHw::with_pipes([
+            pipe(UsbPipeType::Interrupt, 0x03),
+            pipe(UsbPipeType::Bulk, 0x81),
+            pipe(UsbPipeType::Control, 0x00),
+        ]);
+        assert_eq!(
+            prepare_hardware(&state, &mut hw),
+            STATUS_INVALID_DEVICE_STATE
+        );
+        assert_eq!(state.interrupt_pipe(), None);
+        assert!(!hw.log().contains(&Some(("reader", Some(0)))));
+    }
+
+    /// The reader configuration fails after the IN pipe was selected: `PrepareHardware` returns that
+    /// status and does not turn the input gates on.
+    #[test]
+    fn reader_configuration_failure_fails_prepare_hardware() {
+        const STATUS_INSUFFICIENT_RESOURCES: NtStatus = 0xC000_009A_u32 as i32;
+        let state = DeviceState::new();
+        let mut hw = PipeHw::with_pipes([
+            pipe(UsbPipeType::Interrupt, 0x03),
+            pipe(UsbPipeType::Interrupt, 0x83),
+            pipe(UsbPipeType::Bulk, 0x02),
+        ]);
+        hw.reader_status = STATUS_INSUFFICIENT_RESOURCES;
+        let gates = state.input_gates();
+        assert_eq!(
+            prepare_hardware(&state, &mut hw),
+            STATUS_INSUFFICIENT_RESOURCES
+        );
+        assert_eq!(state.interrupt_pipe(), Some(1));
+        assert_eq!(state.input_gates(), gates);
+    }
+
+    /// A restart selects the configuration again (new pipe objects), so the reader is configured again
+    /// and its status checked again.
+    #[test]
+    fn prepare_hardware_twice_configures_the_reader_twice() {
+        let state = DeviceState::new();
+        let mut hw = PipeHw::new();
+        assert_eq!(prepare_hardware(&state, &mut hw), STATUS_SUCCESS);
+        assert_eq!(prepare_hardware(&state, &mut hw), STATUS_SUCCESS);
+        let readers = hw
+            .log()
+            .iter()
+            .filter(|entry| matches!(entry, Some(("reader", Some(1)))))
+            .count();
+        assert_eq!(readers, 2);
     }
 
     #[test]

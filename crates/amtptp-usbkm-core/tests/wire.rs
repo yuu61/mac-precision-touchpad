@@ -209,6 +209,32 @@ fn step(s: &mut Scenario, r: &Record) -> &'static str {
                 assert_eq!(ctx_string(s), c_ctx, "{id}: ctx");
                 return "p2_fixed/c_stale_handle_B20";
             }
+            if id.starts_with("fail-cont-reader-masked#") {
+                // B9 (P3): C masked the failed reader configuration and succeeded; the port returns it.
+                assert_eq!(expected_status, "0x00000000", "{id}: C record");
+                assert_eq!(status_str(st), "0xc0000206", "{id}");
+                assert_eq!(ops, expected_ops, "{id}: ops");
+                assert_eq!(ctx_string(s), r.req("ctx_out"), "{id}: ctx_out");
+                return "p3_fixed/reader_error_returned";
+            }
+            if id.starts_with("pipes-int-out-first#") {
+                // P3: C configured the reader on the interrupt OUT pipe 0; the port skips it and takes the
+                // interrupt IN pipe 1.
+                assert_eq!(status_str(st), expected_status, "{id}");
+                let c_reader = expected_ops.last().expect("reader configuration").clone();
+                assert!(c_reader.starts_with("pipe_config_cont_reader:pipe=0,"), "{id}");
+                let mut port_ops = expected_ops[..expected_ops.len() - 1].to_vec();
+                port_ops.push("usbif_get_pipe:idx=1".to_owned());
+                port_ops.push("pipe_no_max_pkt_check:pipe=1".to_owned());
+                port_ops.push(c_reader.replacen("pipe=0,", "pipe=1,", 1));
+                assert_eq!(ops, port_ops, "{id}: ops");
+                assert_eq!(
+                    ctx_string(s),
+                    r.req("ctx_out").replace("pipe:0", "pipe:1"),
+                    "{id}: ctx_out"
+                );
+                return "p3_fixed/interrupt_in_pipe";
+            }
             assert_eq!(status_str(st), expected_status, "{id}");
             assert_eq!(ops, expected_ops, "{id}: ops");
             "driver/prepare_hardware"
@@ -292,13 +318,15 @@ fn wire_fixture() {
             ("driver/cleanup_noop", 7),
             ("driver/d0_entry", 45),
             ("driver/d0_exit", 26),
-            ("driver/prepare_hardware", 39),
+            ("driver/prepare_hardware", 37),
             ("framework/device_add", 41),
             ("framework/driver_entry", 42),
             ("harness_directive", 32),
             ("harness_note", 5),
             ("p2_fixed/c_bugcheck_B4", 2),
             ("p2_fixed/c_stale_handle_B20", 1),
+            ("p3_fixed/interrupt_in_pipe", 1),
+            ("p3_fixed/reader_error_returned", 1),
         ],
     );
 }

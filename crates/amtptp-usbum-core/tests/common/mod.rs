@@ -10,7 +10,7 @@ use core::fmt::Write as _;
 use std::collections::VecDeque;
 
 use amtptp_usbum_core::io::{
-    ControlPipe, HidRequest, InterruptPipeTarget, PipeType, ReadQueue, UsbStringSource,
+    ControlPipe, HidRequest, InterruptPipeTarget, PipeInfo, PipeType, ReadQueue, UsbStringSource,
     UsbTargetSetup,
 };
 use amtptp_usbum_core::state::{StateSnapshot, UsbDeviceDescriptor};
@@ -296,6 +296,22 @@ impl ReadQueue for FakeQueue {
 // Fake USB device
 // ------------------------------------------------------------------------------------------------
 
+/// An interrupt IN pipe at `endpoint_address` (bit 7 set).
+pub const fn interrupt_in(endpoint_address: u8) -> PipeInfo {
+    PipeInfo {
+        pipe_type: PipeType::Interrupt,
+        endpoint_address,
+    }
+}
+
+/// A pipe of `pipe_type` at `endpoint_address`.
+pub const fn pipe(pipe_type: PipeType, endpoint_address: u8) -> PipeInfo {
+    PipeInfo {
+        pipe_type,
+        endpoint_address,
+    }
+}
+
 /// The README device model plus the PnP-side framework objects.
 pub struct FakeUsb {
     /// 8-byte mode register.
@@ -315,7 +331,7 @@ pub struct FakeUsb {
     pub descriptor: UsbDeviceDescriptor,
     pub traits: Result<u32, NtStatus>,
     /// `None` = interface 0 is NULL.
-    pub pipes: Option<Vec<PipeType>>,
+    pub pipes: Option<Vec<PipeInfo>>,
     pub visited: Vec<bool>,
     pub interrupt_pipe: Option<u8>,
     pub reader_status: NtStatus,
@@ -340,7 +356,7 @@ impl Default for FakeUsb {
             create_status: 0,
             descriptor: UsbDeviceDescriptor::default(),
             traits: Ok(2),
-            pipes: Some(vec![PipeType::Interrupt]),
+            pipes: Some(vec![interrupt_in(0x81)]),
             visited: vec![false],
             interrupt_pipe: None,
             reader_status: 0,
@@ -390,7 +406,7 @@ impl FakeUsb {
         }
     }
 
-    pub fn set_pipes(&mut self, pipes: Option<Vec<PipeType>>) {
+    pub fn set_pipes(&mut self, pipes: Option<Vec<PipeInfo>>) {
         self.visited = vec![false; pipes.as_ref().map_or(1, std::vec::Vec::len)];
         self.pipes = pipes;
     }
@@ -485,7 +501,7 @@ impl UsbTargetSetup for FakeUsb {
         self.pipes.as_ref().map(|p| p.len() as u8)
     }
 
-    fn visit_configured_pipe(&mut self, index: u8) -> PipeType {
+    fn visit_configured_pipe(&mut self, index: u8) -> PipeInfo {
         self.calls.push(format!("GetConfiguredPipe({index})"));
         self.calls.push(format!("SetNoMaxPktCheck({index})"));
         self.visited[usize::from(index)] = true;
@@ -494,10 +510,6 @@ impl UsbTargetSetup for FakeUsb {
 
     fn select_interrupt_pipe(&mut self, index: u8) {
         self.interrupt_pipe = Some(index);
-    }
-
-    fn has_interrupt_pipe(&self) -> bool {
-        self.interrupt_pipe.is_some()
     }
 
     fn configure_continuous_reader(&mut self, transfer_length: usize) -> NtStatus {

@@ -21,6 +21,7 @@ use amtptp_usbum_core::pnp::{d0_entry, d0_exit, prepare_hardware};
 use amtptp_usbum_core::state::{DeviceState, UsbDeviceDescriptor};
 use amtptp_usbum_core::status::{STATUS_INVALID_DEVICE_STATE, STATUS_SUCCESS};
 use amtptp_usbum_core::usb::{wellspring_mode_read_setup, wellspring_mode_write_setup};
+use amtptp_usbum_core::io::{PipeInfo, PipeType};
 use common::{FakeQueue, FakeReq, FakeUsb, hex, to_hex};
 use ptp_hid::input::PtpContact;
 
@@ -340,6 +341,55 @@ fn reader_is_configured_once() {
         ]
     );
     assert!(state.is_surface_report_on());
+}
+
+/// A Magic Trackpad 2 whose interface 0 has the given pipes.
+fn mt2_with_pipes(pipes: Vec<PipeInfo>) -> (DeviceState, FakeUsb) {
+    let mut usb = FakeUsb::default();
+    usb.descriptor.id_product = 0x0265;
+    usb.set_pipes(Some(pipes));
+    (DeviceState::new(), usb)
+}
+
+#[test]
+fn reader_goes_on_the_interrupt_in_pipe_after_an_out_pipe() {
+    // B21 (P3): interrupt OUT 0x03, then interrupt IN 0x83.
+    let (state, mut usb) = mt2_with_pipes(vec![
+        common::pipe(PipeType::Interrupt, 0x03),
+        common::interrupt_in(0x83),
+    ]);
+    let outcome = prepare_hardware(&state, &mut usb);
+    assert_eq!(outcome.status, STATUS_SUCCESS);
+    assert_eq!(usb.interrupt_pipe, Some(1));
+    assert_eq!(usb.calls.last().map(String::as_str), Some("ConfigContinuousReader(1)=0x00000000"));
+}
+
+#[test]
+fn interrupt_out_pipe_alone_fails_prepare_hardware() {
+    let (state, mut usb) = mt2_with_pipes(vec![
+        common::pipe(PipeType::Bulk, 0x81),
+        common::pipe(PipeType::Interrupt, 0x03),
+    ]);
+    let outcome = prepare_hardware(&state, &mut usb);
+    assert_eq!(outcome.status, STATUS_INVALID_DEVICE_STATE);
+    assert_eq!(usb.interrupt_pipe, None);
+    assert!(!usb.calls.iter().any(|c| c.starts_with("ConfigContinuousReader")));
+    assert!(!state.reader_configured());
+}
+
+#[test]
+fn reader_failure_after_the_in_pipe_fails_prepare_hardware() {
+    const STATUS_INSUFFICIENT_RESOURCES: i32 = 0xC000_009A_u32 as i32;
+    let (state, mut usb) = mt2_with_pipes(vec![
+        common::pipe(PipeType::Interrupt, 0x03),
+        common::interrupt_in(0x83),
+    ]);
+    usb.reader_status = STATUS_INSUFFICIENT_RESOURCES;
+    let outcome = prepare_hardware(&state, &mut usb);
+    assert_eq!(outcome.status, STATUS_INSUFFICIENT_RESOURCES);
+    assert_eq!(usb.interrupt_pipe, Some(1));
+    assert!(!state.reader_configured());
+    assert!(!state.is_surface_report_on());
 }
 
 // ------------------------------------------------------------------------------------------------

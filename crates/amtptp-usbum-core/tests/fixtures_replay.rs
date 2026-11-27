@@ -25,7 +25,7 @@ use amtptp_usbum_core::hid::{
     get_report_descriptor, get_string, route_ioctl, set_feature,
 };
 use amtptp_usbum_core::input::on_read_complete;
-use amtptp_usbum_core::io::PipeType;
+use amtptp_usbum_core::io::{PipeInfo, PipeType};
 use amtptp_usbum_core::pnp::{
     CONTINUOUS_READER_NUM_PENDING_READS, GUID_DEVINTERFACE_AMTPTP_DEVICE, READERS_FAILED_RESULT,
     d0_entry, d0_exit, prepare_hardware,
@@ -41,6 +41,7 @@ const B1_UMASK: &str = "B1 TYPE4/5 SET payload bytes past a short GET are 00 (um
 const B6_LEAK: &str = "B6 failed READ_REPORT is completed with the error instead of leaked";
 const B7_STRING: &str = "B7 GET_STRING copies the string to the caller's buffer";
 const B16_RESTART: &str = "B16 restart does not reconfigure the continuous reader";
+const B21_INTERRUPT_IN: &str = "B21 the reader goes on the first interrupt IN pipe, not the OUT one";
 const GLUE_ONLY: &str = "glue-only (WDF driver object / tracing / no-op EvtIoStop)";
 
 /// Per-file bookkeeping: total records, records that assert P2-fixed behavior (by reason), records
@@ -772,15 +773,25 @@ fn prepare_usb(rec: &Rec<'_>, restart: bool) -> FakeUsb {
         },
         ..FakeUsb::default()
     };
+    // Endpoints 0x81, 0x82, ... (IN), except the OUT endpoint 0x03 of `prep-intout-then-intin`.
+    let ins = |types: &[PipeType]| -> Vec<PipeInfo> {
+        (0_u8..)
+            .zip(types)
+            .map(|(i, &t)| common::pipe(t, 0x81 + i))
+            .collect()
+    };
     let pipes = match case {
         "prep-iface-null" => None,
         "prep-no-pipes" => Some(vec![]),
-        "prep-bulk-only" => Some(vec![Bulk, Bulk]),
-        "prep-bulk-then-int" => Some(vec![Bulk, Interrupt]),
-        "prep-intout-then-intin" => Some(vec![Interrupt, Interrupt]),
-        "prep-int-then-bulk" => Some(vec![Interrupt, Bulk, Bulk]),
-        "prep-control-iso-int" => Some(vec![Control, Isochronous, Interrupt]),
-        _ => Some(vec![Interrupt]),
+        "prep-bulk-only" => Some(ins(&[Bulk, Bulk])),
+        "prep-bulk-then-int" => Some(ins(&[Bulk, Interrupt])),
+        "prep-intout-then-intin" => Some(vec![
+            common::pipe(Interrupt, 0x03),
+            common::pipe(Interrupt, 0x83),
+        ]),
+        "prep-int-then-bulk" => Some(ins(&[Interrupt, Bulk, Bulk])),
+        "prep-control-iso-int" => Some(ins(&[Control, Isochronous, Interrupt])),
+        _ => Some(ins(&[Interrupt])),
     };
     usb.set_pipes(pipes);
     if case == "prep-info-fail" {
@@ -845,6 +856,21 @@ fn lifecycle() {
                     after.button_report_on = true;
                     assert_eq!(state.snapshot(), after, "{case}: state after");
                     tally.p2(B16_RESTART);
+                } else if case == "prep-intout-then-intin" {
+                    // B21 (P3): C configured the reader on the interrupt OUT pipe 0.
+                    assert_eq!(rec.i("pipe"), 0, "{case}: C pipe");
+                    assert_eq!(rec.s("nomaxpkt"), "1,0", "{case}: C visits");
+                    assert_eq!(outcome.status, rec.status("status"), "{case}: status");
+                    let expected = rec.s("calls").replace(
+                        "SetNoMaxPktCheck(0),ConfigContinuousReader(0)",
+                        "SetNoMaxPktCheck(0),GetConfiguredPipe(1),SetNoMaxPktCheck(1),ConfigContinuousReader(1)",
+                    );
+                    assert_eq!(calls, expected, "{case}: calls");
+                    assert_eq!(state.snapshot(), rec.state_after(), "{case}: state after");
+                    assert_eq!(usb.interrupt_pipe, Some(1), "{case}: interrupt pipe");
+                    assert_eq!(usb.visited, [true, true], "{case}: visits");
+                    tally.p2(B21_INTERRUPT_IN);
+                    continue;
                 } else {
                     assert_eq!(
                         status_hex(outcome.status),
@@ -933,7 +959,7 @@ fn lifecycle() {
     tally.assert(
         "wire.txt",
         259,
-        &[(B1_UMASK, 16), (B16_RESTART, 16)],
+        &[(B1_UMASK, 16), (B16_RESTART, 16), (B21_INTERRUPT_IN, 1)],
         &[(GLUE_ONLY, 5)],
         20,
     );
