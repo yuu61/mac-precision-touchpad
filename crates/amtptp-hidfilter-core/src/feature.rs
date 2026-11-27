@@ -13,7 +13,7 @@ use ptp_hid::common::{
 };
 use ptp_hid::feature::{
     DeviceCapsReport, INPUT_MODE_OFFSET, SELECTIVE_REPORT_BITS_OFFSET, SelectiveReportBits,
-    write_hqa_report_as_c,
+    write_hqa_report,
 };
 
 use crate::device::HID_XFER_PACKET_LEN;
@@ -39,14 +39,13 @@ pub const fn check_xfer_length(transfer_length: usize) -> Result<(), NtStatus> {
 /// `GET_FEATURE` for `report_id` into `report_buffer` (the `reportBufferLen` bytes at `reportBuffer`).
 ///
 /// - 0x07 (device caps): needs 3 bytes, else `STATUS_INVALID_BUFFER_SIZE`; writes `07 05 00`.
-/// - 0x08 (HQA): needs 257 bytes, else `STATUS_INVALID_BUFFER_SIZE`; writes `buf[0] = 0x08` and
-///   `buf[1] = 0xFC` only, the rest of the caller's buffer is untouched (comma-operator bug, HF-B1,
-///   preserved).
+/// - 0x08 (HQA): needs 257 bytes, else `STATUS_INVALID_BUFFER_SIZE`; writes the report ID and
+///   256-byte certification blob.
 /// - anything else: `STATUS_NOT_SUPPORTED`, nothing written.
 pub fn get_feature_report(report_id: u8, report_buffer: &mut [u8]) -> NtStatus {
     let written = match report_id {
         REPORTID_DEVICE_CAPS => DeviceCapsReport::PTP.write_to(report_buffer),
-        REPORTID_PTPHQA => write_hqa_report_as_c(report_buffer),
+        REPORTID_PTPHQA => write_hqa_report(report_buffer),
         _ => return STATUS_NOT_SUPPORTED,
     };
     match written {
@@ -124,7 +123,7 @@ mod tests {
         assert_eq!(b, [0xAA; 2]);
         let mut b = [0xAA_u8; 257];
         assert_eq!(get_feature_report(8, &mut b), STATUS_SUCCESS);
-        assert_eq!(b[..3], [8, 0xFC, 0xAA]);
+        assert_eq!(b, ptp_hid::feature::HQA_REPORT);
         let mut b = [0xAA_u8; 256];
         assert_eq!(get_feature_report(8, &mut b), STATUS_INVALID_BUFFER_SIZE);
         for id in [4_u8, 6, 9] {

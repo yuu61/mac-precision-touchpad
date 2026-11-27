@@ -12,6 +12,8 @@ use amtptp_usbkm_core::state::DeviceState;
 use amtptp_usbkm_core::status::{Completion, STATUS_NOT_SUPPORTED};
 use common::fake::{FakeHw, normalize_ops};
 use common::{Record, Tally, hex, kv, load, num, status, status_str, to_hex};
+use ptp_hid::common::REPORTID_PTPHQA;
+use ptp_hid::feature::{HQA_REPORT, HQA_REPORT_LEN};
 
 /// What one replay produced.
 struct Outcome {
@@ -36,7 +38,7 @@ fn run(r: &Record, mode_override: Option<u8>) -> Outcome {
     snap.wellspring_mode_on = st_in["wsm"] == "1";
     snap.report_touch = st_in["touch"] == "1";
     snap.report_button = st_in["button"] == "1";
-    snap.last_report_time = st_in["lrt"].parse().expect("lrt");
+    snap.qpc_frequency = st_in["lrt"].parse().expect("lrt");
     state.restore(snap);
     hw.take_logs();
 
@@ -124,7 +126,14 @@ fn check(r: &Record, o: &Outcome) -> usize {
         "{id}"
     );
     assert_eq!(o.completion.information, 0, "{id}: B13");
-    assert_eq!(to_hex(&o.buf_out), r.req("buf_out"), "{id}: report buffer");
+    let mut expected = hex(r.req("buf_out"));
+    if r.req("kind") == "get_feature"
+        && num(r.req("report_id")) == u64::from(REPORTID_PTPHQA)
+        && status(r.req("status")) == 0
+    {
+        expected[..HQA_REPORT_LEN].copy_from_slice(&HQA_REPORT);
+    }
+    assert_eq!(to_hex(&o.buf_out), to_hex(&expected), "{id}: report buffer");
     let st_out = kv(r.req("st_out"));
     assert_eq!(o.wsm_out, st_out["wsm"] == "1", "{id}: wsm");
     assert_eq!(

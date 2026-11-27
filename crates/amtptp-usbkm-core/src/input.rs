@@ -11,14 +11,13 @@
 //! | `WdfMemoryCopyFromBuffer` (< 50 bytes) fails → return **without completing** (B7) | [`complete_read_report_to`]: completed with the copy status, `STATUS_BUFFER_TOO_SMALL` (P2) |
 //! | `SetInformation(50)`, `Complete(SUCCESS)` | [`complete_read_report_to`]: success, 50 |
 //!
-//! [`process_packet`] is pure, so calling it before dequeuing the request is observably identical to the
-//! C order. The precedence the C order implies is kept by [`complete_read_report`]: a failed output-memory
-//! retrieval wins over `DATA_ERROR`, and `DATA_ERROR` wins over a too-small output buffer.
+//! [`process_packet`] builds the report and samples the clock before the glue dequeues a request.
+//! [`complete_read_report`] preserves the completion precedence: an output-memory retrieval failure
+//! takes priority over `DATA_ERROR`, which takes priority over a short output buffer.
 //!
 //! Arithmetic mirrors the C exactly: coordinates are `(int)(signed short)` values, X/Y are clamped below at
 //! 0 but not above (B19), Y is inverted, contact IDs are slot indices (B18), more than 5 contacts fail the
-//! read (B8), Tip = `major*2 >= 200 || minor*2 >= 150`, Confidence = `minor*2 > 0`, and `ScanTime` is
-//! [`scan_time_as_c`] (always 0 in the real driver, B1).
+//! read (B8), Tip = `major*2 >= 200 || minor*2 >= 150`, Confidence = `minor*2 > 0`.
 
 use bcm5974::input::wellspring_contact;
 use ptp_hid::common::PTP_CONTACT_SLOTS;
@@ -30,30 +29,6 @@ use crate::state::{DeviceState, InputGates};
 use crate::status::{Completion, NtStatus, STATUS_DATA_ERROR, nt_success};
 
 pub use bcm5974::input::TRACKPAD_FINGER_LEN;
-
-/// `ScanTime` exactly as the C computes it (Interrupt.c:177-183):
-///
-/// ```c
-/// KeQueryPerformanceCounter(&CurrentPerfCounter);   // stores the QPC *frequency*
-/// PerfCounterDelta = (CurrentPerfCounter.QuadPart - LastReportTime.QuadPart) / 100;
-/// if (PerfCounterDelta > 0xFF) PerfCounterDelta = 0xFF;
-/// ScanTime = (USHORT)PerfCounterDelta;
-/// ```
-///
-/// `perf_counter_out` is the value `KeQueryPerformanceCounter` writes to its out-parameter (the
-/// frequency) and `last_report_time` is what `D0Entry` stored the same way, so in the real driver both are
-/// the QPC frequency and the result is always 0 (spec B1, preserved). The clamp is signed only: a negative
-/// delta passes through and the `(USHORT)` cast wraps it (-1 → 0xFFFF). The subtraction wraps on
-/// overflow (two's complement, as MSVC does; P2 for the signed-overflow UB).
-#[must_use]
-pub const fn scan_time_as_c(perf_counter_out: i64, last_report_time: i64) -> u16 {
-    // LONGLONG arithmetic; `/` truncates toward zero like C, and 100 is never 0 or -1.
-    let mut delta = perf_counter_out.wrapping_sub(last_report_time) / 100;
-    if delta > 0xFF {
-        delta = 0xFF;
-    }
-    delta as u16 // (USHORT) truncation
-}
 
 /// What the reader completion does with one report built from a valid packet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,6 +60,15 @@ pub fn parse_packet(
     gates: InputGates,
     scan_time: u16,
 ) -> PacketAction {
+    parse_packet_with_clock(cfg, packet, gates, || scan_time)
+}
+
+fn parse_packet_with_clock<F: FnOnce() -> u16>(
+    cfg: &T2Device,
+    packet: &[u8],
+    gates: InputGates,
+    scan_time: F,
+) -> PacketAction {
     let n = packet.len();
     let format = cfg.profile.tp_type;
     let header = format.header() as usize;
@@ -101,7 +85,6 @@ pub fn parse_packet(
     let mut raw_n = payload.checked_div(fsize).unwrap_or(0);
 
     let mut report = PtpReport::EMPTY; // RtlZeroMemory + ReportID 0x05
-    report.scan_time = scan_time;
 
     if gates.report_touch {
         // if (raw_n >= PTP_MAX_CONTACT_POINTS) raw_n = PTP_MAX_CONTACT_POINTS;
@@ -129,21 +112,15 @@ pub fn parse_packet(
         }
     }
 
+    report.scan_time = scan_time();
     PacketAction::Deliver(ReadReportResult::Report(report.to_bytes()))
 }
 
-/// [`parse_packet`] with the device's selected config row, its input gates and
-/// `ScanTime = scan_time_as_c(perf_counter_out, LastReportTime)`.
-///
-/// `perf_counter_out` is the value `KeQueryPerformanceCounter(&x)` stores in `x` (the QPC frequency), as
-/// the C computes it.
-pub fn process_packet(state: &DeviceState, packet: &[u8], perf_counter_out: i64) -> PacketAction {
-    parse_packet(
-        state.config(),
-        packet,
-        state.input_gates(),
-        scan_time_as_c(perf_counter_out, state.last_report_time()),
-    )
+/// Parses a packet using the device's selected config, input gates and reporting clock.
+pub fn process_packet(state: &DeviceState, packet: &[u8], counter: i64) -> PacketAction {
+    parse_packet_with_clock(state.config(), packet, state.input_gates(), || {
+        state.scan_clock.sample(counter)
+    })
 }
 
 /// Completes a dequeued `READ_REPORT`.
@@ -222,17 +199,6 @@ mod tests {
             complete_read_report_to(&ReadReportResult::DataError, Ok(&mut memory)),
             Completion::status(STATUS_DATA_ERROR)
         );
-    }
-
-    #[test]
-    fn scan_time_matches_c() {
-        assert_eq!(scan_time_as_c(10_000_000, 10_000_000), 0);
-        assert_eq!(scan_time_as_c(10_000_000, 0), 0xFF);
-        assert_eq!(scan_time_as_c(10_000_000, 10_000_100), 0xFFFF);
-        assert_eq!(scan_time_as_c(10_000_000, 10_000_250), 0xFFFE);
-        assert_eq!(scan_time_as_c(10_000_000, 9_999_901), 0);
-        assert_eq!(scan_time_as_c(10_000_000, 9_999_900), 1);
-        assert_eq!(scan_time_as_c(i64::MIN, 1), 0xFF); // wraps like MSVC
     }
 
     #[test]

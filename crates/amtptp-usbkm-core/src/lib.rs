@@ -17,10 +17,9 @@
 //! - [`status`]: the NTSTATUS values and the [`status::Completion`] (status + Information) type.
 //! - [`output`]: the request output buffer as written by `WdfMemoryCopyFromBuffer` ([`output::OutputMemory`]).
 //!
-//! Behavior follows the C exactly, including its observable bugs (`ScanTime` always 0, only one HQA byte
-//! written, wLength 4, `DATA_ERROR` for 6+ fingers, Information 0 for `GET/SET_FEATURE`, ...). Undefined
-//! behavior, leaks and memory-safety bugs are fixed (port policy P2). `docs/rust-port/usbkm.md` lists every
-//! decision with its spec bug ID.
+//! The Rust port originally preserved observable C behaviors such as wLength 4, `DATA_ERROR` for 6+
+//! fingers, and Information 0 for `GET/SET_FEATURE`. The reporting code now uses the PTP Scan Time
+//! units and returns the complete HQA feature report.
 //!
 //! # How the driver uses this
 //!
@@ -53,18 +52,15 @@
 //!   `information` is non-zero (the C calls it exactly on those paths), then `WdfRequestComplete(status)`.
 //!   (`WdfRequestCompleteWithInformation(status, 0)` would overwrite an incoming non-zero Information
 //!   that the C leaves in place.)
-//! - **Continuous reader completion** (≤ `DISPATCH_LEVEL`): `KeQueryPerformanceCounter(&x)`, then
-//!   call [`input::process_packet`] with `state`, `&buffer[..NumBytesTransferred]`, and `x`. On
+//! - **Continuous reader completion** (≤ `DISPATCH_LEVEL`): sample the QPC counter, then
+//!   call [`input::process_packet`] with `state`, `&buffer[..NumBytesTransferred]`, and the counter. On
 //!   [`input::PacketAction::Deliver`], `WdfIoQueueRetrieveNextRequest(InputQueue)`; if there is none, drop
 //!   the packet; otherwise retrieve its output memory and complete it with
 //!   [`input::complete_read_report_to`] (this completes it on every path, fixing the C leaks B6/B7).
 //! - **`EvtUsbTargetPipeReadersFailed`**: return [`lifecycle::readers_failed`] (always TRUE).
 //! - **`EvtIoStop`**: [`lifecycle::io_stop`] (nothing to do).
 //!
-//! `ScanTime`: the C passes the value `KeQueryPerformanceCounter` writes to its out-parameter (the
-//! frequency), both in `D0Entry` and in the reader completion, so `ScanTime` is always 0. The glue does the
-//! same ([`lifecycle::UsbHardware::query_performance_counter_out`] and the `perf_counter_out` argument of
-//! [`input::process_packet`]).
+//! Scan Time uses the counter sampled in the reader callback and the frequency cached at D0 entry.
 
 #![no_std]
 #![forbid(unsafe_code)]

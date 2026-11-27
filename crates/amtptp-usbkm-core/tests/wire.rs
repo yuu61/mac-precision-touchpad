@@ -48,7 +48,7 @@ fn ctx_string(s: &Scenario) -> String {
         u8::from(snap.wellspring_mode_on),
         u8::from(snap.report_touch),
         u8::from(snap.report_button),
-        snap.last_report_time,
+        snap.qpc_frequency,
         snap.usb_device_traits,
         u8::from(snap.usb_device_created),
         u8::from(s.hw.iface),

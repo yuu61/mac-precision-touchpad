@@ -171,7 +171,15 @@ fn check_ioctl(
         rec.u("info"),
         "{case}: information"
     );
-    if let Some(expected) = expected_out {
+    if let Some(mut expected) = expected_out {
+        // The C recorded only the first blob byte for successful HQA reads.
+        use ptp_hid::feature::{HQA_REPORT, HQA_REPORT_LEN};
+        if rec.get("in").is_some_and(|input| input.starts_with("08"))
+            && outcome.status == STATUS_SUCCESS
+            && outcome.information == HQA_REPORT_LEN
+        {
+            expected[..HQA_REPORT_LEN].copy_from_slice(&HQA_REPORT);
+        }
         assert_eq!(to_hex(&req.out), to_hex(&expected), "{case}: output buffer");
     }
 }
@@ -474,15 +482,15 @@ fn run_input(
     let mut queue = FakeQueue::with_lengths(lengths);
     let qpc = rec.i("qpc");
     let mut qpc_calls = 0;
-    let perf_before = state.perf_counter();
+    let frequency = state.qpc_frequency();
     on_read_complete(state, packet, &mut queue, usb, || {
         qpc_calls += 1;
         qpc
     });
     assert_eq!(
-        state.perf_counter(),
-        perf_before,
-        "{case}: perf never changes"
+        state.qpc_frequency(),
+        frequency,
+        "{case}: cached QPC frequency never changes"
     );
     assert_eq!(
         qpc_calls,
@@ -504,7 +512,11 @@ fn run_input(
             assert_eq!(queue.completed.len(), 1, "{case}: one completion");
             let (req, status, info) = &queue.completed[0];
             assert_eq!((*status, *info), (STATUS_SUCCESS, 50), "{case}: completion");
-            assert_eq!(to_hex(&req.out[..50]), rec.s("out"), "{case}: report");
+            let mut expected = rec.hex("out");
+            // Replays are single frames or use the same QPC sample throughout a sequence.
+            let offset = ptp_hid::input::PTP_REPORT_SCAN_TIME_OFFSET;
+            expected[offset..offset + 2].copy_from_slice(&0_u16.to_le_bytes());
+            assert_eq!(&req.out[..50], expected, "{case}: report");
             assert!(
                 req.out[50..].iter().all(|&b| b == 0xee),
                 "{case}: bytes past 50 written"
@@ -614,7 +626,7 @@ fn input_reports() {
             state.set_wellspring_mode_on(wsm);
             state.set_surface_report_on(surf);
             state.set_button_report_on(btn);
-            state.set_perf_counter(rec.i("perf"));
+            state.set_qpc_frequency(rec.i("perf"));
             let mut usb = FakeUsb::from_rec(&rec);
             let lengths: Vec<usize> = match rec.s("req") {
                 "-" => Vec::new(),

@@ -11,7 +11,7 @@ use amtptp_usbkm_core::hid::{
     HID_DESCRIPTOR, REPORT_DESCRIPTOR, get_device_attributes, get_report_descriptor,
 };
 use amtptp_usbkm_core::input::{
-    PacketAction, ReadReportResult, complete_read_report, parse_packet, scan_time_as_c,
+    PacketAction, ReadReportResult, complete_read_report, parse_packet, process_packet,
 };
 use amtptp_usbkm_core::lifecycle;
 use amtptp_usbkm_core::state::{DeviceState, InputGates, UsbDeviceIds};
@@ -166,11 +166,30 @@ fn golden_d_bad_length_dropped() {
 }
 
 #[test]
-fn scan_time_is_zero_in_the_real_driver() {
-    // §7.2 step 8: both values are the QPC frequency.
-    for freq in [1, 3_579_545, 10_000_000, 24_000_000] {
-        assert_eq!(scan_time_as_c(freq, freq), 0);
-    }
+fn input_scan_time_restarts_on_d0_entry() {
+    let state = DeviceState::new();
+    state.on_device_create();
+    let mut hw = FakeHw::new(0x027a);
+    hw.qpc_freq = 24_000_000;
+    assert_eq!(lifecycle::prepare_hardware(&state, &mut hw), 0);
+    assert_eq!(lifecycle::d0_entry(&state, &mut hw), 0);
+    let pack = [0_u8; 46];
+    let scan_time = |counter| {
+        let PacketAction::Deliver(ReadReportResult::Report(report)) =
+            process_packet(&state, &pack, counter)
+        else {
+            panic!("valid input packet did not produce a report");
+        };
+        u16::from_le_bytes([report[46], report[47]])
+    };
+
+    assert_eq!(process_packet(&state, &[], 0), PacketAction::Discard);
+    assert_eq!(scan_time(200_000), 0);
+    assert_eq!(scan_time(204_800), 2);
+    assert_eq!(lifecycle::d0_exit(&state, &mut hw), 0);
+    assert_eq!(lifecycle::d0_entry(&state, &mut hw), 0);
+    assert_eq!(scan_time(900_000), 0);
+    assert_eq!(scan_time(902_400), 1);
 }
 
 #[test]
@@ -216,7 +235,7 @@ fn feature_reports_5_5_and_5_6() {
     });
     assert_eq!(c, Completion::status(0));
     assert_eq!(caps, [0x07, 0x05, 0x00]);
-    // GET 0x08: only [0]=08 [1]=fc.
+    // GET 0x08: report ID and the full certification blob.
     let mut hqa = [0xaa_u8; 257];
     let c = get_feature(16, || {
         Some(GetFeaturePacket {
@@ -225,7 +244,7 @@ fn feature_reports_5_5_and_5_6() {
         })
     });
     assert_eq!(c, Completion::status(0));
-    assert_eq!(hqa[..4], [0x08, 0xfc, 0xaa, 0xaa]);
+    assert_eq!(hqa, ptp_hid::feature::HQA_REPORT);
     let mut short = [0_u8; 256];
     let c = get_feature(16, || {
         Some(GetFeaturePacket {

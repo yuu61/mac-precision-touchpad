@@ -12,7 +12,7 @@
 //! | `interrupt_pipe_selected` | the assignment `InterruptPipe = pipe` (Device.c:479) |
 //! | `configure_continuous_reader` | `WDF_USB_CONTINUOUS_READER_CONFIG_INIT` + `WdfUsbTargetPipeConfigContinuousReader` (Interrupt.c:54-65) |
 //! | `start_pipe` / `stop_pipe` | `WdfIoTargetStart` / `WdfIoTargetStop(.., WdfIoTargetCancelSentIo)` on `WdfUsbTargetPipeGetIoTarget` (Device.c:325, 383) |
-//! | `query_performance_counter_out` | `KeQueryPerformanceCounter(&x)`, returning `x` (the frequency, spec B1) |
+//! | `query_performance_frequency` | Cache the QPC frequency at D0 entry |
 //! | `allocate_transfer_buffer` | `WdfMemoryCreate(WDF_NO_OBJECT_ATTRIBUTES, NonPagedPoolNx, 'PTPC', 4, ..)` (Device.c:530; P2 B3/B27) |
 //! | `control_transfer` | `WdfUsbTargetDeviceSendControlTransferSynchronously(UsbDevice, WDF_NO_HANDLE, NULL, ..)` (Device.c:566, 607) |
 //!
@@ -39,9 +39,9 @@ use wdf_support::ntstatus::{
 };
 use wdk_sys::{
     _POOL_TYPE, _WDF_IO_TARGET_SENT_IO_ACTION, _WDF_USB_DEVICE_TRAITS, _WDF_USB_PIPE_TYPE,
-    LARGE_INTEGER, PVOID, ULONG, USB_DEVICE_DESCRIPTOR, WDF_NO_HANDLE, WDF_NO_OBJECT_ATTRIBUTES,
+    PVOID, ULONG, USB_DEVICE_DESCRIPTOR, WDF_NO_HANDLE, WDF_NO_OBJECT_ATTRIBUTES,
     WDF_USB_CONTROL_SETUP_PACKET, WDFDEVICE, WDFIOTARGET, WDFIOTARGET__, WDFMEMORY, WDFREQUEST__,
-    WDFUSBPIPE, call_unsafe_wdf_function_binding, ntddk::KeQueryPerformanceCounter,
+    WDFUSBPIPE, call_unsafe_wdf_function_binding,
 };
 
 use crate::PROVIDER;
@@ -501,8 +501,8 @@ impl UsbHardware for UsbIo<'_> {
         }
     }
 
-    fn query_performance_counter_out(&mut self) -> i64 {
-        query_performance_counter_out()
+    fn query_performance_frequency(&mut self) -> i64 {
+        wdf_support::time::query_performance_frequency()
     }
 }
 
@@ -510,15 +510,4 @@ impl UsbHardware for UsbIo<'_> {
 /// whose body is `return (WDFIOTARGET) Pipe;`.
 const fn pipe_io_target(pipe: WDFUSBPIPE) -> WDFIOTARGET {
     pipe.cast::<WDFIOTARGET__>()
-}
-
-/// `KeQueryPerformanceCounter(&x)` as the C calls it (Device.c:319, Interrupt.c:177): the return value
-/// (the counter) is discarded and `x` (the **frequency** out-parameter) is used. Spec B1, preserved: this
-/// is why `ScanTime` is always 0. Callable at any IRQL.
-pub(crate) fn query_performance_counter_out() -> i64 {
-    let mut frequency = LARGE_INTEGER::default();
-    // SAFETY: `frequency` is a valid out-parameter; KeQueryPerformanceCounter is callable at any IRQL.
-    let _counter = unsafe { KeQueryPerformanceCounter(&raw mut frequency) };
-    // SAFETY: LARGE_INTEGER is a union of plain integers; QuadPart covers all 8 bytes written above.
-    unsafe { frequency.QuadPart }
 }

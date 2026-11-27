@@ -18,7 +18,7 @@
 //! - [`ioctl`]: internal-IOCTL routing.
 //! - [`feature`]: the `GET/SET_FEATURE` handlers.
 //! - [`input`]: packet parsing, `ScanTime` arithmetic and report construction.
-//! - [`runtime`]: the shared mutable state (`DeviceStatus`, `LastReportTime`, PTP flags, all atomics)
+//! - [`runtime`]: the shared mutable state (`DeviceStatus`, the reporting clock, PTP flags, all atomics)
 //!   and the power/read state machine.
 //! - [`wire`]: the bytes and parameters of the requests sent to the lower device, and `AddDevice` constants.
 //!
@@ -51,7 +51,7 @@
 //!    `config.apply_desired_report_type(value)`, `shared.store(&config)` and return `STATUS_SUCCESS`.
 //!
 //! **`D0Entry`**: `runtime.on_d0_entry(freq)`, where `freq` is what `KeQueryPerformanceCounter(&mut freq)`
-//! writes (the frequency, as C does).
+//! writes to its frequency output.
 //!
 //! **`SelfManagedIoInit` / `SelfManagedIoRestart`** (one function): fill a [`wire::SetStatePacket`] in place
 //! (`fill(true)`), then send its 255 bytes with `WdfIoTargetSendInternalIoctlSynchronously`

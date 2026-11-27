@@ -18,10 +18,12 @@
 //! | `InterruptPipe` | [`DeviceState::interrupt_pipe`] (pipe index) |
 //! | `IsWellspringModeOn` | [`DeviceState::wellspring_mode_on`] |
 //! | `PtpReportTouch`, `PtpReportButton` | [`DeviceState::input_gates`] (always TRUE in the real driver) |
-//! | `LastReportTime` | [`DeviceState::last_report_time`] (always the QPC frequency, spec B1) |
+//! | Reporting clock | [`DeviceState::qpc_frequency`] plus the reporting-session origin |
 //! | `PtpInputOn` | dropped: never read or written |
 
-use core::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicU16, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU32, Ordering};
+
+use ptp_hid::scan_time::ScanClock;
 
 use crate::config::{CONFIG_TABLE, FALLBACK_CONFIG, T2Device, config_by_index};
 
@@ -79,8 +81,8 @@ pub struct DeviceStateSnapshot {
     pub report_touch: bool,
     /// `PtpReportButton`.
     pub report_button: bool,
-    /// `LastReportTime.QuadPart`.
-    pub last_report_time: i64,
+    /// Cached QPC frequency in ticks per second.
+    pub qpc_frequency: i64,
 }
 
 /// Shared per-device state. Place one in the WDF device context (`ptr.write(DeviceState::new())`) and
@@ -99,7 +101,7 @@ pub struct DeviceState {
     wellspring_mode_on: AtomicBool,
     report_touch: AtomicBool,
     report_button: AtomicBool,
-    last_report_time: AtomicI64,
+    pub(crate) scan_clock: ScanClock,
 }
 
 const _: () = assert!(CONFIG_TABLE.len() < u8::MAX as usize);
@@ -119,7 +121,7 @@ impl DeviceState {
             wellspring_mode_on: AtomicBool::new(false),
             report_touch: AtomicBool::new(false),
             report_button: AtomicBool::new(false),
-            last_report_time: AtomicI64::new(0),
+            scan_clock: ScanClock::new(),
         }
     }
 
@@ -148,7 +150,7 @@ impl DeviceState {
         self.wellspring_mode_on.store(s.wellspring_mode_on, RELAXED);
         self.report_touch.store(s.report_touch, RELAXED);
         self.report_button.store(s.report_button, RELAXED);
-        self.last_report_time.store(s.last_report_time, RELAXED);
+        self.scan_clock.restart(s.qpc_frequency);
     }
 
     /// A plain copy of every field.
@@ -162,7 +164,7 @@ impl DeviceState {
             wellspring_mode_on: self.wellspring_mode_on(),
             report_touch: self.report_touch.load(RELAXED),
             report_button: self.report_button.load(RELAXED),
-            last_report_time: self.last_report_time(),
+            qpc_frequency: self.qpc_frequency(),
         }
     }
 
@@ -274,14 +276,13 @@ impl DeviceState {
         }
     }
 
-    /// `LastReportTime.QuadPart`: written only by `D0Entry`, with the value `KeQueryPerformanceCounter`
-    /// stores in its out-parameter (the QPC *frequency*, spec B1).
-    pub fn last_report_time(&self) -> i64 {
-        self.last_report_time.load(RELAXED)
+    /// Cached QPC frequency in ticks per second.
+    pub fn qpc_frequency(&self) -> i64 {
+        self.scan_clock.frequency()
     }
 
-    pub(crate) fn set_last_report_time(&self, value: i64) {
-        self.last_report_time.store(value, RELAXED);
+    pub(crate) fn set_qpc_frequency(&self, value: i64) {
+        self.scan_clock.restart(value);
     }
 }
 
@@ -313,7 +314,7 @@ mod tests {
             wellspring_mode_on: true,
             report_touch: false,
             report_button: true,
-            last_report_time: -5,
+            qpc_frequency: -5,
         };
         let s = DeviceState::from_snapshot(snap);
         assert_eq!(s.snapshot(), snap);

@@ -48,6 +48,7 @@ pub mod hid;
 pub mod init;
 pub mod ntstatus;
 pub mod request;
+pub mod time;
 #[cfg(driver_model__driver_type = "KMDF")]
 pub mod wdm;
 

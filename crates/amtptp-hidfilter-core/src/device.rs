@@ -5,13 +5,14 @@
 //! the vendor ID must be Apple USB (0x05AC) or Apple Bluetooth (0x004C) and the product ID must be the
 //! Magic Trackpad 2 (0x0265). [`Transport::from_ids`] reproduces those checks.
 
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU16, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicUsize, Ordering};
 
 use bcm5974::config::MAGIC_TRACKPAD_2;
 pub use bcm5974::config::{
     Bcm5974Param, MAGIC_TRACKPAD_2_PID as HID_PID_MAGIC_TRACKPAD_2,
     USB_VENDOR_ID_APPLE as HID_VID_APPLE_USB,
 };
+use ptp_hid::scan_time::ScanClock;
 
 use crate::feature::FeatureChange;
 use crate::input::InputLayout;
@@ -229,8 +230,8 @@ pub struct DeviceSnapshot {
     pub ptp_report_touch: bool,
     /// `PtpReportButton` (written by `SET_FEATURE` 0x06, never read: HF-B20).
     pub ptp_report_button: bool,
-    /// `LastReportTime.QuadPart`: 0 or the QPC frequency (HF-B6).
-    pub last_report_time: i64,
+    /// Cached QPC frequency in ticks per second.
+    pub qpc_frequency: i64,
 }
 
 #[derive(Debug)]
@@ -286,7 +287,7 @@ pub struct DeviceState {
     ptp_input_on: AtomicBool,
     ptp_report_touch: AtomicBool,
     ptp_report_button: AtomicBool,
-    last_report_time: AtomicI64,
+    pub(crate) scan_clock: ScanClock,
 }
 
 impl Default for DeviceState {
@@ -316,11 +317,11 @@ impl DeviceState {
             ptp_input_on: false,
             ptp_report_touch: false,
             ptp_report_button: false,
-            last_report_time: 0,
+            qpc_frequency: 0,
         })
     }
 
-    /// A state holding exactly the values of `s` (tests, and glue diagnostics).
+    /// Initializes device state from a snapshot and starts a fresh reporting clock.
     #[must_use]
     pub const fn with(s: &DeviceSnapshot) -> Self {
         Self {
@@ -339,7 +340,7 @@ impl DeviceState {
             ptp_input_on: AtomicBool::new(s.ptp_input_on),
             ptp_report_touch: AtomicBool::new(s.ptp_report_touch),
             ptp_report_button: AtomicBool::new(s.ptp_report_button),
-            last_report_time: AtomicI64::new(s.last_report_time),
+            scan_clock: ScanClock::with_frequency(s.qpc_frequency),
         }
     }
 
@@ -361,7 +362,7 @@ impl DeviceState {
             ptp_input_on: self.ptp_input_on.load(Ordering::Relaxed),
             ptp_report_touch: self.ptp_report_touch.load(Ordering::Relaxed),
             ptp_report_button: self.ptp_report_button.load(Ordering::Relaxed),
-            last_report_time: self.last_report_time(),
+            qpc_frequency: self.qpc_frequency(),
         }
     }
 
@@ -439,20 +440,14 @@ impl DeviceState {
         self.io_target_set.store(true, Ordering::Relaxed);
     }
 
-    /// `LastReportTime.QuadPart`.
-    pub fn last_report_time(&self) -> i64 {
-        self.last_report_time.load(Ordering::Relaxed)
+    /// Cached QPC frequency in ticks per second.
+    pub fn qpc_frequency(&self) -> i64 {
+        self.scan_clock.frequency()
     }
 
-    /// `KeQueryPerformanceCounter(&ctx->LastReportTime)`: stores the value written through the
-    /// frequency pointer (Device.c:237, 276).
-    pub fn store_last_report_time(&self, value: i64) {
-        self.last_report_time.store(value, Ordering::Relaxed);
-    }
-
-    /// Stores `value` and returns the previous `LastReportTime` (the read-then-write of Input.c:188-190).
-    pub fn swap_last_report_time(&self, value: i64) -> i64 {
-        self.last_report_time.swap(value, Ordering::Relaxed)
+    /// Caches the QPC frequency and starts a new input-reporting session.
+    pub(crate) fn set_qpc_frequency(&self, value: i64) {
+        self.scan_clock.restart(value);
     }
 
     /// Applies a decoded `SET_FEATURE` ([`crate::decode_set_feature`]).
@@ -522,7 +517,7 @@ mod tests {
             product_id: 0x265,
             input_header_size: 4,
             x: MAGIC_TRACKPAD_2.x,
-            last_report_time: -5,
+            qpc_frequency: -5,
             ptp_report_touch: true,
             ..DeviceSnapshot::default()
         };

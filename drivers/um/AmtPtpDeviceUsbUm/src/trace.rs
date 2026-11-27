@@ -202,11 +202,11 @@ pub(crate) fn mode_switch_failed(routine: &str, enable: bool, status: NTSTATUS) 
 /// `DeviceStateEvent` (level Informational): the driver state (flags, qualification levels) changed in
 /// `routine`. `PerfCounter` (reset by every `D0Entry`) is not compared.
 pub(crate) fn state_changed(routine: &str, before: &StateSnapshot, after: &StateSnapshot) {
-    let without_perf_counter = |snapshot: &StateSnapshot| StateSnapshot {
-        perf_counter: 0,
+    let without_qpc_frequency = |snapshot: &StateSnapshot| StateSnapshot {
+        qpc_frequency: 0,
         ..*snapshot
     };
-    if without_perf_counter(before) == without_perf_counter(after) {
+    if without_qpc_frequency(before) == without_qpc_frequency(after) {
         return;
     }
     tlg::write_event!(

@@ -20,8 +20,9 @@ use wdf_support::init::{
 };
 use wdf_support::ntstatus::{NT_SUCCESS, STATUS_INVALID_DEVICE_STATE, STATUS_SUCCESS};
 use wdf_support::request::Request;
+use wdf_support::time::query_performance_frequency;
 use wdk_sys::{
-    _POOL_TYPE, _WDF_EXECUTION_LEVEL, GUID, LARGE_INTEGER, NTSTATUS, PWDFDEVICE_INIT, ULONG,
+    _POOL_TYPE, _WDF_EXECUTION_LEVEL, GUID, NTSTATUS, PWDFDEVICE_INIT, ULONG,
     UNICODE_STRING, WDF_NO_OBJECT_ATTRIBUTES, WDF_POWER_DEVICE_STATE, WDFCMRESLIST, WDFDEVICE,
     WDFIOTARGET, WDFKEY, WDFLOOKASIDE, WDFQUEUE, WDFREQUEST, WDFTIMER,
     call_unsafe_wdf_function_binding,
@@ -37,7 +38,7 @@ use crate::{PROVIDER, input, keyword, queue};
 /// callbacks at up to `DISPATCH_LEVEL` never race on plain fields (P2 for SPI-B15).
 ///
 /// Dropped C fields (dead): `SpiDevice`, `InputPollThreadHandle`. `HidVendorID`, `HidProductID`,
-/// `HidVersionNumber`, `TrackpadInfo` and `ReportType` are in `config`; `DeviceStatus`, `LastReportTime`,
+/// `HidVersionNumber`, `TrackpadInfo` and `ReportType` are in `config`; `DeviceStatus`, the reporting clock,
 /// `PtpInputOn`, `PtpReportButton` and `PtpReportTouch` are in `runtime`.
 pub(crate) struct DeviceContext {
     /// `SpiTrackpadIoTarget`: the local (default) I/O target, i.e. the Apple SPI PDO below us.
@@ -50,7 +51,7 @@ pub(crate) struct DeviceContext {
     pub(crate) hid_read_buffer_lookaside: WDFLOOKASIDE,
     /// What `PrepareHardware` found out about the device.
     pub(crate) config: SharedDeviceConfig,
-    /// `DeviceStatus`, `LastReportTime` and the PTP feature flags.
+    /// `DeviceStatus`, the reporting clock and the PTP feature flags.
     pub(crate) runtime: DeviceRuntime,
 }
 
@@ -87,20 +88,6 @@ pub(crate) unsafe fn device_context<'a>(device: WDFDEVICE) -> Option<&'a DeviceC
     // `create_device` before the device was published, is never mutated through
     // a `&mut` afterwards, and lives as long as the device.
     unsafe { context.as_ref() }
-}
-
-/// `KeQueryPerformanceCounter(&x)` exactly as the C driver calls it: the variable is passed as the
-/// optional **`PerformanceFrequency`** out-parameter and the returned counter is discarded, so this returns
-/// the QPC frequency, a boot-time constant (SPI-B8, preserved: `ScanTime` is therefore always 0).
-pub(crate) fn query_performance_counter_as_c() -> i64 {
-    let mut frequency = LARGE_INTEGER { QuadPart: 0 };
-    // SAFETY: `frequency` is a valid out-parameter; KeQueryPerformanceCounter
-    // may be called at any IRQL.
-    let _discarded_counter =
-        unsafe { wdk_sys::ntddk::KeQueryPerformanceCounter(&raw mut frequency) };
-    // SAFETY: `QuadPart` covers the whole 8-byte union, which was initialized
-    // above and then written by the call.
-    unsafe { frequency.QuadPart }
 }
 
 /// `GUID_DEVINTERFACE_AmtPtpDeviceSpiKm` {f271e39d-d211-4a6e-a439-63e51940d210} (Public.h:22-24).
@@ -461,7 +448,7 @@ unsafe fn query_desired_report_type(device: WDFDEVICE) -> Option<u32> {
 }
 
 /// `AmtPtpEvtDeviceD0Entry` (Device.c:319-351): `DeviceStatus = D0ActiveAndUnconfigured` and
-/// `LastReportTime` = the QPC frequency (see [`query_performance_counter_as_c`]). No I/O.
+/// initializes the reporting clock with the cached QPC frequency. No device I/O.
 unsafe extern "C" fn evt_device_d0_entry(
     device: WDFDEVICE,
     previous_state: WDF_POWER_DEVICE_STATE,
@@ -479,7 +466,7 @@ unsafe extern "C" fn evt_device_d0_entry(
     };
     context
         .runtime
-        .on_d0_entry(query_performance_counter_as_c())
+        .on_d0_entry(query_performance_frequency())
 }
 
 /// `AmtPtpEvtDeviceD0Exit` (Device.c:353-395): `DeviceStatus = D3`, then every request still in
@@ -531,8 +518,7 @@ unsafe extern "C" fn evt_device_d0_exit(
 /// `AmtPtpEvtDeviceSelfManagedIoInitOrRestart` (Device.c:397-427), registered for both
 /// `SelfManagedIoInit` and `SelfManagedIoRestart`; `PASSIVE_LEVEL`.
 ///
-/// Runs the mode switch. Success: `DeviceStatus = D0ActiveAndConfigured` and `LastReportTime` = the QPC
-/// frequency; no lower read is issued for already-queued requests (SPI-B13, preserved). Failure: start the
+/// Runs the mode switch. Success: `DeviceStatus = D0ActiveAndConfigured` and a new reporting session; no lower read is issued for already-queued requests (SPI-B13, preserved). Failure: start the
 /// 5 s recovery timer (re-arming it if it is still pending). Always `STATUS_SUCCESS`.
 unsafe extern "C" fn evt_device_self_managed_io_init_or_restart(device: WDFDEVICE) -> NTSTATUS {
     // SAFETY: framework callback for one of our devices, at PASSIVE_LEVEL.
@@ -543,7 +529,7 @@ unsafe extern "C" fn evt_device_self_managed_io_init_or_restart(device: WDFDEVIC
     let set_state = unsafe { spi_set_state(context, true) };
     let outcome = context
         .runtime
-        .on_self_managed_io_init_or_restart(set_state, query_performance_counter_as_c);
+        .on_self_managed_io_init_or_restart(set_state, query_performance_frequency);
     if let Some(due_time) = outcome.start_recovery_timer {
         tlg::write_event!(
             PROVIDER,
@@ -626,7 +612,7 @@ const SET_STATE_PACKET_DESCRIPTOR_LEN: ULONG = {
 /// work item), 5 s after a failed SelfManagedIoInit/Restart.
 ///
 /// Runs the mode switch again. Success: issue exactly one lower read, then
-/// `DeviceStatus = D0ActiveAndConfigured` (`LastReportTime` is not refreshed). Failure: nothing, no
+/// `DeviceStatus = D0ActiveAndConfigured` (the reporting clock is not refreshed). Failure: nothing, no
 /// reschedule. It runs whatever the current power state is, also after `D0Exit` (SPI-B12, preserved).
 unsafe extern "C" fn power_recovery_timer_callback(timer: WDFTIMER) {
     // SAFETY: `timer` is the framework's timer handle for this callback.

@@ -20,7 +20,7 @@ use ptp_hid::common::{
     REPORTID_PTPHQA, REPORTID_REPORTMODE,
 };
 use ptp_hid::feature::{
-    DEVICE_CAPS_REPORT, DEVICE_CAPS_REPORT_LEN, HQA_BLOB_FIRST_BYTE, HQA_REPORT_LEN,
+    DEVICE_CAPS_REPORT, DEVICE_CAPS_REPORT_LEN, HQA_REPORT, HQA_REPORT_LEN,
     INPUT_MODE_OFFSET, SELECTIVE_REPORT_DEVICE_MODE_BITS_OFFSET, SelectiveReportBits,
 };
 
@@ -69,18 +69,14 @@ pub struct GetFeatureReply {
     pub write: &'static [u8],
 }
 
-/// The bytes C writes for `GET_FEATURE` 0x08: `08 FC`. The comma-operator bug writes only the first blob
-/// byte (preserved known issue SPI-B1, same as `ptp_hid::feature::write_hqa_report_as_c`).
-pub static HQA_REPORT_AS_C: [u8; 2] = [REPORTID_PTPHQA, HQA_BLOB_FIRST_BYTE];
-
 /// The bytes C writes for `GET_FEATURE` 0x07: `07 05 00` (5 contacts, click pad).
 pub static DEVICE_CAPS_REPLY: [u8; DEVICE_CAPS_REPORT_LEN] = DEVICE_CAPS_REPORT;
 
 /// `AmtPtpReportFeatures` after [`check_xfer_packet`] passed.
 ///
 /// - 0x07: `reportBufferLen < 3` gives `STATUS_INVALID_BUFFER_SIZE`; otherwise `07 05 00` is written.
-/// - 0x08: `reportBufferLen < 257` gives `STATUS_INVALID_BUFFER_SIZE`; otherwise only `08 FC` is written
-///   (SPI-B1, preserved).
+/// - 0x08: `reportBufferLen < 257` gives `STATUS_INVALID_BUFFER_SIZE`; otherwise the report ID and
+///   256-byte certification blob are written.
 /// - Every other ID (including 0x04, 0x06 and the declared 0x09): `STATUS_NOT_SUPPORTED`.
 ///
 /// `report_buffer_present` is false when `reportBuffer` is NULL. C would dereference it once the length
@@ -94,7 +90,7 @@ pub fn get_feature(
 ) -> GetFeatureReply {
     let (required, bytes): (usize, &'static [u8]) = match report_id {
         REPORTID_DEVICE_CAPS => (DEVICE_CAPS_REPORT_LEN, &DEVICE_CAPS_REPLY),
-        REPORTID_PTPHQA => (HQA_REPORT_LEN, &HQA_REPORT_AS_C),
+        REPORTID_PTPHQA => (HQA_REPORT_LEN, &HQA_REPORT),
         _ => {
             return GetFeatureReply {
                 status: STATUS_NOT_SUPPORTED,
@@ -239,14 +235,6 @@ impl PtpSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn hqa_as_c_matches_ptp_hid() {
-        let mut buf = [0xAA_u8; HQA_REPORT_LEN];
-        assert_eq!(ptp_hid::feature::write_hqa_report_as_c(&mut buf), Ok(()));
-        assert_eq!(buf[..2], HQA_REPORT_AS_C);
-        assert!(buf[2..].iter().all(|&b| b == 0xAA));
-    }
 
     #[test]
     fn null_report_buffer_paths() {

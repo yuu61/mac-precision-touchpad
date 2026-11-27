@@ -11,7 +11,7 @@
 //! - A buffer that is too short for the bytes the decoder reads gives `None`. What a driver does in that
 //!   case (the C code often reads past the end) is decided by its core crate.
 //!
-//! Encoders that write into a caller's buffer (`write_to`, [`write_hqa_report_as_c`]) write exactly the
+//! Encoders that write into a caller's buffer (`write_to`, [`write_hqa_report`]) write exactly the
 //! bytes the C code writes and leave every other byte of the buffer untouched.
 
 use crate::BufferTooSmall;
@@ -94,8 +94,6 @@ pub const HQA_REPORT_LEN: usize = 1 + HQA_BLOB_LEN;
 
 /// `DEFAULT_PTP_HQA_BLOB`, the 256-byte PTP certification blob. Byte-identical in all four drivers'
 /// headers (SHA-256 `b57b851d567808906f61a0122273da05c972140f1007355390aaf5dda8a072af`).
-///
-/// Preserved known issue: no C driver actually sends this blob. See [`write_hqa_report_as_c`].
 #[rustfmt::skip]
 pub const HQA_BLOB: [u8; HQA_BLOB_LEN] = [
     0xfc, 0x28, 0xfe, 0x84, 0x40, 0xcb, 0x9a, 0x87, 0x0d, 0xbe, 0x57, 0x3c, 0xb6, 0x70, 0x09, 0x88,
@@ -116,35 +114,17 @@ pub const HQA_BLOB: [u8; HQA_BLOB_LEN] = [
     0xcf, 0x17, 0xb7, 0xb8, 0xf4, 0xe1, 0x33, 0x08, 0x24, 0x8b, 0xc4, 0x43, 0xa5, 0xe5, 0x24, 0xc2,
 ];
 
-/// The first byte of [`HQA_BLOB`] (0xFC): the only blob byte the C drivers write.
-pub const HQA_BLOB_FIRST_BYTE: u8 = match HQA_BLOB.first() {
-    Some(b) => *b,
-    None => 0,
-};
-const _: () = assert!(HQA_BLOB_FIRST_BYTE == 0xfc);
-
-/// The *intended* feature report 0x08: report ID 0x08 followed by the whole [`HQA_BLOB`] (257 bytes).
-///
-/// No C driver sends this (see [`write_hqa_report_as_c`]). It is provided for completeness and tests.
+/// Feature report 0x08: the report ID followed by the 256-byte [`HQA_BLOB`].
 pub const HQA_REPORT: [u8; HQA_REPORT_LEN] = concat(&[REPORTID_PTPHQA], &HQA_BLOB);
 
-/// Writes feature report 0x08 exactly as all four C drivers do.
-///
-/// The C code is `*certReport->CertificationBlob = DEFAULT_PTP_HQA_BLOB;`. Because the macro is a comma
-/// list, this assigns only the first blob byte (comma operator; spec A7.1, preserved known issue P3). So:
-/// - if `buf` is shorter than [`HQA_REPORT_LEN`] (257), nothing is written and [`BufferTooSmall`] is
-///   returned (the C drivers: `STATUS_INVALID_BUFFER_SIZE`);
-/// - otherwise `buf[0] = 0x08` and `buf[1] = 0xFC` are written, and `buf[2..]` is left untouched.
+/// Writes all 257 bytes of feature report 0x08, leaving any trailing bytes untouched.
 ///
 /// The `Information` value differs per driver (`UsbUm` 257, the KMDF drivers 0) and is the caller's job.
 ///
 /// # Errors
 /// Returns [`BufferTooSmall`] if the buffer cannot hold the report.
-pub fn write_hqa_report_as_c(buf: &mut [u8]) -> Result<(), BufferTooSmall> {
-    if buf.len() < HQA_REPORT_LEN {
-        return Err(BufferTooSmall);
-    }
-    write_prefix(buf, &[REPORTID_PTPHQA, HQA_BLOB_FIRST_BYTE])
+pub fn write_hqa_report(buf: &mut [u8]) -> Result<(), BufferTooSmall> {
+    write_prefix(buf, &HQA_REPORT)
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -362,21 +342,18 @@ mod tests {
     }
 
     #[test]
-    fn hqa_as_c_writes_two_bytes_only() {
-        // HidFilter spec D.5: length 257 prefilled with AA -> `08 FC AA AA ... AA`.
+    fn hqa_writes_the_full_report() {
         let mut buf = [0xAA_u8; HQA_REPORT_LEN];
-        assert_eq!(write_hqa_report_as_c(&mut buf), Ok(()));
-        assert_eq!(buf[..2], [0x08, 0xFC]);
-        assert!(buf[2..].iter().all(|&b| b == 0xAA));
+        assert_eq!(write_hqa_report(&mut buf), Ok(()));
+        assert_eq!(buf, HQA_REPORT);
         // Length 256 -> rejected, untouched.
         let mut short = [0xAA_u8; HQA_REPORT_LEN - 1];
-        assert_eq!(write_hqa_report_as_c(&mut short), Err(BufferTooSmall));
+        assert_eq!(write_hqa_report(&mut short), Err(BufferTooSmall));
         assert!(short.iter().all(|&b| b == 0xAA));
-        // A longer buffer is accepted; only the first two bytes change.
         let mut long = [0x55_u8; 300];
-        assert_eq!(write_hqa_report_as_c(&mut long), Ok(()));
-        assert_eq!(long[..2], [0x08, 0xFC]);
-        assert!(long[2..].iter().all(|&b| b == 0x55));
+        assert_eq!(write_hqa_report(&mut long), Ok(()));
+        assert_eq!(long[..HQA_REPORT_LEN], HQA_REPORT);
+        assert!(long[HQA_REPORT_LEN..].iter().all(|&b| b == 0x55));
     }
 
     #[test]

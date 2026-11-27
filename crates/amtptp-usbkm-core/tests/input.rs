@@ -54,7 +54,7 @@ fn state_for(case: &Case<'_>) -> DeviceState {
     snap.wellspring_mode_on = st["wsm"] == "1";
     snap.report_touch = st["touch"] == "1";
     snap.report_button = st["button"] == "1";
-    snap.last_report_time = st["lrt"].parse().expect("lrt");
+    snap.qpc_frequency = st["lrt"].parse().expect("lrt");
     state.restore(snap);
     state
 }
@@ -66,7 +66,7 @@ fn st_string(state: &DeviceState) -> String {
         u8::from(s.wellspring_mode_on),
         u8::from(s.report_touch),
         u8::from(s.report_button),
-        s.last_report_time
+        s.qpc_frequency
     )
 }
 
@@ -106,8 +106,8 @@ fn replay(case: &Case<'_>, prev_out: Option<&str>) -> &'static str {
     let mut first: Option<PendedRead> = None;
 
     // The reader completion, in the order the glue runs it.
-    let qpc_out = num(case.get("qpc_freq")) as i64;
-    let action = process_packet(&state, &packet, qpc_out);
+    let counter = num(case.get("qpc_freq")) as i64;
+    let action = process_packet(&state, &packet, counter);
     let res = case.get("res");
     let mut no_request = false;
     match action {
@@ -200,10 +200,14 @@ fn replay(case: &Case<'_>, prev_out: Option<&str>) -> &'static str {
 
     // The first request's buffer after the call.
     if !no_request {
-        let expected = match case.get("out") {
+        let mut expected = match case.get("out") {
             "unchanged" => vec![prefill; outlen],
             out => hex(out),
         };
+        if completion.is_some_and(|c| c.status == 0) {
+            let offset = ptp_hid::input::PTP_REPORT_SCAN_TIME_OFFSET;
+            expected[offset..offset + 2].copy_from_slice(&0_u16.to_le_bytes());
+        }
         assert_eq!(
             first_buf.map(|b| to_hex(&b)),
             Some(to_hex(&expected)),
@@ -221,7 +225,7 @@ fn replay(case: &Case<'_>, prev_out: Option<&str>) -> &'static str {
     );
     assert_eq!(queue.len(), npend - dequeued, "{id}");
 
-    // The completion routine writes no context field.
+    // Sampling the reporting clock does not change the fields captured by the fixture.
     let st_out = case.get("st_out");
     let st_after = st_string(&state);
     assert_eq!(st_after, st_before, "{id}: state unchanged");
@@ -230,8 +234,7 @@ fn replay(case: &Case<'_>, prev_out: Option<&str>) -> &'static str {
     }
 
     if r.has_tag("unreachable_state") {
-        // Gates off or LastReportTime != frequency: asserted, not skipped (the core keeps the gates and
-        // the ScanTime arithmetic as inputs).
+        // The C fixture uses unusual gate or clock state here. Replay the same input and gates.
         assert!(bucket == "driver/edge", "{id}");
         bucket = "driver/unreachable_state";
     }

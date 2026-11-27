@@ -10,8 +10,7 @@
 //! 3. `WdfIoQueueRetrieveNextRequest(InputQueue)`; none → the packet is lost;
 //! 4. `WdfRequestRetrieveOutputMemory`; failure → C leaks the request (B6), here it is completed with
 //!    that status (P2);
-//! 5. `KeQueryPerformanceCounter(&x)` → `ScanTime` (always 0, B1). The call is made before step 1 here
-//!    (`process_packet` needs it); it has no observable effect;
+//! 5. `ScanTime` uses the current performance counter and the frequency cached at D0 entry;
 //! 6. more than 5 fingers → `WdfRequestComplete(STATUS_DATA_ERROR)` (B8);
 //! 7. `WdfMemoryCopyFromBuffer(mem, 0, report, 50)`; failure → C leaks the request (B7), here it is
 //!    completed with the copy status (P2);
@@ -25,6 +24,7 @@ use amtptp_usbkm_core::lifecycle;
 use tracelogging as tlg;
 use wdf_support::ntstatus::{NT_SUCCESS, STATUS_UNSUCCESSFUL};
 use wdf_support::request::Request;
+use wdf_support::time::query_performance_counter;
 use wdk_sys::{
     BOOLEAN, NTSTATUS, USBD_STATUS, WDFCONTEXT, WDFMEMORY, WDFREQUEST, WDFUSBPIPE,
     call_unsafe_wdf_function_binding,
@@ -34,7 +34,6 @@ use crate::PROVIDER;
 use crate::context::DeviceContext;
 use crate::queue::{as_output, complete, retrieve_output_memory};
 use crate::trace::KW_INPUT;
-use crate::usb::query_performance_counter_out;
 
 /// `AmtPtpEvtUsbInterruptPipeReadComplete` (Interrupt.c:89-250): `EvtUsbTargetPipeReadComplete` of the
 /// continuous reader. `context` is the device context given at reader configuration. IRQL <=
@@ -81,7 +80,7 @@ pub(crate) unsafe extern "C" fn evt_usb_interrupt_pipe_read_complete(
     };
 
     let result =
-        match input::process_packet(&context.state, packet, query_performance_counter_out()) {
+        match input::process_packet(&context.state, packet, query_performance_counter()) {
             PacketAction::Discard => {
                 tlg::write_event!(
                     PROVIDER,

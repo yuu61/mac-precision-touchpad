@@ -7,6 +7,7 @@ mod common;
 
 use amtptp_hidfilter_core::{Bcm5974Param, DeviceSnapshot, DeviceState, complete_lower_read};
 use common::*;
+use ptp_hid::input::{PTP_REPORT_LEN, PTP_REPORT_SCAN_TIME_OFFSET};
 
 const OUTMEM_P2: &str = "P2-fixed: upper completed with RetrieveOutputMemory status (HF-B9)";
 const COPY_P2: &str = "P2-fixed: upper completed with CopyFromBuffer status (HF-B9)";
@@ -20,7 +21,7 @@ fn ev_for_act(act: &str) -> Vec<String> {
     let head: &[&str] = match act {
         "complete" => &[
             "WdfIoQueueRetrieveNextRequest(queue=queue_read)=0x00000000:upper1",
-            "KeQueryPerformanceCounter(freq_ptr=nonnull)",
+            "KeQueryPerformanceCounter(freq_ptr=null)",
             "WdfRequestRetrieveOutputMemory(req=upper1)=0x00000000",
             "WdfMemoryCopyFromBuffer(mem=upper_mem,off=0,len=50)=0x00000000",
             "WdfRequestSetInformation(req=upper1,info=50)",
@@ -62,7 +63,7 @@ struct Outcome {
 fn run(r: &Rec, snap: &DeviceSnapshot, tail: u8) -> Outcome {
     let state = DeviceState::with(snap);
     let mut m = Mock::new();
-    m.freq = r.num("freq") as i64;
+    m.counter = r.num("freq") as i64;
     let packet = r.bytes("in");
     m.lower_buf = vec![tail; 1024];
     m.lower_buf[..packet.len()].copy_from_slice(&packet);
@@ -103,7 +104,7 @@ fn replay(file: &str, fam: &str, total: usize, acts: &[(&str, usize)]) {
             min: r.num("ymin") as i32,
             ..snap.y
         };
-        snap.last_report_time = r.num("last_in") as i64;
+        snap.qpc_frequency = r.num("last_in") as i64;
 
         // The 1024-byte lookaside buffer after `in` is filled with 0x00 and then 0xFF: the port must
         // read nothing past `in` (README 3.1), so both runs must agree.
@@ -116,6 +117,9 @@ fn replay(file: &str, fam: &str, total: usize, acts: &[(&str, usize)]) {
         let act = r.get("act");
         let c_ev = if r.get("kind") == "edge" {
             events(r)
+                .into_iter()
+                .map(|event| event.replace("freq_ptr=nonnull", "freq_ptr=null"))
+                .collect()
         } else {
             ev_for_act(act)
         };
@@ -132,7 +136,10 @@ fn replay(file: &str, fam: &str, total: usize, acts: &[(&str, usize)]) {
                 assert_eq!(st(s), r.get("status"), "{}", r.case());
                 assert_eq!(info as i128, r.num("info"), "{}", r.case());
                 // `out` has the C-uninitialised bits as 0; the port zero-initialises (HF-B4).
-                assert_eq!(to_hex(&a.buf[..50]), r.get("out"), "{}", r.case());
+                let mut expected = r.bytes("out");
+                expected[PTP_REPORT_SCAN_TIME_OFFSET..PTP_REPORT_SCAN_TIME_OFFSET + 2]
+                    .copy_from_slice(&0_u16.to_le_bytes());
+                assert_eq!(a.buf[..PTP_REPORT_LEN], expected, "{}", r.case());
                 assert!(a.buf[50..].iter().all(|&x| x == 0xEE), "{}", r.case());
                 if r.get("undef").bytes().any(|c| c != b'0') {
                     undef_records += 1;
@@ -155,16 +162,7 @@ fn replay(file: &str, fam: &str, total: usize, acts: &[(&str, usize)]) {
             ub_records += 1;
         }
 
-        // LastReportTime, and nothing else, may change.
-        assert_eq!(
-            i128::from(a.state.last_report_time),
-            r.num("last_out"),
-            "{}",
-            r.case()
-        );
-        let mut rest = a.state;
-        rest.last_report_time = snap.last_report_time;
-        assert_eq!(rest, snap, "{}", r.case());
+        assert_eq!(a.state, snap, "{}", r.case());
 
         tally.add(match act {
             "outmem_fail" => OUTMEM_P2,
@@ -214,4 +212,22 @@ fn replay_input_usb() {
             (COPY_P2, 1),
         ],
     );
+}
+
+#[test]
+fn lower_read_scan_time_uses_counter_instead_of_frequency() {
+    let mut snap = started(0x004C, 4);
+    snap.qpc_frequency = 24_000_000;
+    let state = DeviceState::with(&snap);
+    let mut m = Mock::new();
+    m.lower_buf = vec![0x31, 0, 0, 0];
+    for (counter, expected) in [(100_000, 0_u16), (102_400, 1), (716_800, 257)] {
+        m.counter = counter;
+        let req = m.add_upper(Upper::with_output(PTP_REPORT_LEN, 0xEE));
+        m.read_queue.push_back(req);
+        complete_lower_read(&mut m, &state, (), (), 4);
+        assert_eq!(m.uppers[req].completed, Some((0, PTP_REPORT_LEN)));
+        let offset = PTP_REPORT_SCAN_TIME_OFFSET;
+        assert_eq!(m.uppers[req].buf[offset..offset + 2], expected.to_le_bytes());
+    }
 }

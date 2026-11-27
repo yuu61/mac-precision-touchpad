@@ -25,7 +25,7 @@ use ptp_hid::common::{
     REPORTID_PTPHQA, REPORTID_REPORTMODE,
 };
 use ptp_hid::feature::{
-    DeviceCapsReport, INPUT_MODE_OFFSET, SelectiveReportBits, write_hqa_report_as_c,
+    DeviceCapsReport, INPUT_MODE_OFFSET, SelectiveReportBits, write_hqa_report,
 };
 
 use crate::state::DeviceState;
@@ -60,9 +60,8 @@ pub struct SetFeaturePacket<'a> {
 ///
 /// - 0x07 (device caps): `reportBufferLen < 3` → `STATUS_INVALID_BUFFER_SIZE`; else writes `07 05 00`
 ///   to bytes 0..3 → success.
-/// - 0x08 (HQA): `reportBufferLen < 257` → `STATUS_INVALID_BUFFER_SIZE`; else writes only `[0] = 0x08`
-///   and `[1] = 0xFC` (the comma-operator bug, spec B2, preserved) and leaves bytes 2..257 untouched →
-///   success.
+/// - 0x08 (HQA): `reportBufferLen < 257` → `STATUS_INVALID_BUFFER_SIZE`; otherwise writes the report ID
+///   and 256-byte certification blob.
 /// - any other ID → `STATUS_NOT_SUPPORTED`.
 ///
 /// `output_buffer_length` is `Parameters.DeviceIoControl.OutputBufferLength`; `packet` is called only when
@@ -79,7 +78,7 @@ pub fn get_feature<'a, F: FnOnce() -> Option<GetFeaturePacket<'a>>>(
     };
     let written = match packet.report_id {
         REPORTID_DEVICE_CAPS => DeviceCapsReport::PTP.write_to(packet.report_buffer),
-        REPORTID_PTPHQA => write_hqa_report_as_c(packet.report_buffer),
+        REPORTID_PTPHQA => write_hqa_report(packet.report_buffer),
         _ => return Completion::status(STATUS_NOT_SUPPORTED),
     };
     match written {
@@ -193,8 +192,7 @@ mod tests {
             })
         });
         assert_eq!(c, Completion::status(STATUS_SUCCESS));
-        assert_eq!(hqa[..3], [0x08, 0xfc, 0xa5]);
-        assert!(hqa[2..].iter().all(|&b| b == 0xa5));
+        assert_eq!(hqa, ptp_hid::feature::HQA_REPORT);
 
         // NULL reportBuffer (B16): treated as zero-length.
         let c = get_feature(16, || {

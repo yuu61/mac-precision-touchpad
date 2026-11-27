@@ -142,12 +142,12 @@ pub struct D0EntryOutcome {
 ///
 /// 1. If `IsButtonReportOn || IsWellspringModeOn`: `SetWellspringMode(TRUE)`; a failure is ignored
 ///    (UM-B10, P3 PRESERVED gate).
-/// 2. `PerfCounter = QueryPerformanceCounter()` (the only place the `ScanTime` base is set, UM-B12).
+/// 2. `Cache the QPC frequency and restart the reporting clock`.
 /// 3. `WdfIoTargetStart` on the interrupt pipe; its status is the return value.
 pub fn d0_entry<T, F>(
     state: &DeviceState,
     io: &mut T,
-    query_performance_counter: F,
+    query_performance_frequency: F,
 ) -> D0EntryOutcome
 where
     T: ControlPipe + InterruptPipeTarget,
@@ -161,7 +161,7 @@ where
                 None => STATUS_INVALID_DEVICE_STATE,
             }
         });
-    state.set_perf_counter(query_performance_counter());
+    state.set_qpc_frequency(query_performance_frequency());
     let status = io.start();
     D0EntryOutcome {
         status,

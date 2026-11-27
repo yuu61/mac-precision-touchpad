@@ -9,7 +9,7 @@ use ptp_hid::input::PTP_REPORT_LEN;
 
 use crate::config::TRANSPORT_RETRY_DUE_TIME;
 use crate::device::DeviceState;
-use crate::input::{InputLayout, LowerReadClass, build_report, classify_lower_read, scan_time};
+use crate::input::{InputLayout, LowerReadClass, build_report, classify_lower_read};
 use crate::io::{FailedAction, FilterIo};
 use crate::status::nt_success;
 
@@ -102,14 +102,12 @@ fn deliver_report<P: FilterIo>(
     let Ok(upper) = io.retrieve_next_parked_read() else {
         return;
     };
-    // KeQueryPerformanceCounter(&currentTSC) stores the frequency (HF-B6).
-    let now = io.query_performance_frequency();
-    let last = state.swap_last_report_time(now);
+    let scan_time = state.scan_clock.sample(io.query_performance_counter());
     let report: [u8; PTP_REPORT_LEN] = build_report(
         layout,
         length,
         io.lower_read_buffer(memory),
-        scan_time(now, last),
+        scan_time,
     );
     let upper_memory = match io.retrieve_output_memory(upper) {
         Ok(m) => m,

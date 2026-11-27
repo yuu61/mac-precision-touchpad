@@ -44,7 +44,7 @@
 //! mode-switch buffer ([`XferBuffer::as_mut_ptr`]).
 //!
 //! The pure pieces are public too, for tracing and tests: [`classify_lower_read`], [`build_report`],
-//! [`parse_finger`], [`scan_time`], [`get_feature_report`], [`decode_set_feature`],
+//! [`parse_finger`], [`get_feature_report`], [`decode_set_feature`],
 //! [`hid_descriptor_for`], [`report_descriptor_for`], [`device_attributes`], [`InternalIoctl`].
 
 #![no_std]
@@ -89,7 +89,7 @@ pub use dispatch::{InternalIoctl, dispatch_internal_ioctl};
 pub use feature::{FeatureChange, check_xfer_length, decode_set_feature, get_feature_report};
 pub use input::{
     FINGER_RECORD_LEN, InputLayout, LowerReadClass, REPORT_BUFFER_SIZE, build_report,
-    classify_lower_read, contact_count, parse_finger, response_length, scan_time,
+    classify_lower_read, contact_count, parse_finger, response_length,
 };
 pub use io::{FailedAction, FilterIo, XferPacket, XferPacketMut};
 pub use pipeline::{complete_lower_read, issue_lower_read, work_item_callback};

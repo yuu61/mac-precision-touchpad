@@ -11,9 +11,9 @@ use amtptp_spikm_core::device::{
     APPLE_VENDOR_ID, DeviceConfig, Family, ReportType, family_for_product, lookup_trackpad,
 };
 use amtptp_spikm_core::feature::{
-    DEVICE_CAPS_REPLY, HQA_REPORT_AS_C, check_xfer_packet, get_feature,
+    DEVICE_CAPS_REPLY, check_xfer_packet, get_feature,
 };
-use amtptp_spikm_core::input::{SpiPacket, build_report, lower_read_length, scan_time};
+use amtptp_spikm_core::input::{SpiPacket, build_report, lower_read_length};
 use amtptp_spikm_core::runtime::DeviceRuntime;
 use amtptp_spikm_core::status::*;
 use amtptp_spikm_core::wire::{POOL_TAG, SetStatePacket};
@@ -200,12 +200,11 @@ fn report_descriptor_hashes_spec_5_1() {
 }
 
 #[test]
-fn hqa_blob_hash_and_as_c_bytes() {
+fn hqa_blob_hash() {
     assert_eq!(
         sha256(&ptp_hid::feature::HQA_BLOB),
         "b57b851d567808906f61a0122273da05c972140f1007355390aaf5dda8a072af"
     );
-    assert_eq!(HQA_REPORT_AS_C, [0x08, 0xFC]);
     assert_eq!(DEVICE_CAPS_REPLY, [0x07, 0x05, 0x00]);
 }
 
@@ -345,20 +344,24 @@ fn contact_flags_and_quirks() {
 }
 
 #[test]
-fn scan_time_is_zero_in_the_shipped_driver() {
-    // SPI-B8: every LastReportTime writer stores the QPC frequency, so delta is always 0.
+fn scan_time_advances_and_wraps_in_spi_reports() {
     let rt = DeviceRuntime::new();
-    rt.on_d0_entry(10_000_000);
-    let _status = rt.on_self_managed_io_init_or_restart(STATUS_SUCCESS, || 10_000_000);
+    let frequency = 10_000_000;
+    rt.on_d0_entry(frequency);
+    let _status = rt.on_self_managed_io_init_or_restart(STATUS_SUCCESS, || frequency);
     let info = lookup_trackpad(APPLE_VENDOR_ID, 0x0272).unwrap();
     let pkt = packet_with_fingers(1, 1, &[(100, 2000, 800, 600, 30)]);
-    for _ in 0..3 {
-        let r = rt
-            .complete_lower_read(info, 76, &pkt, || 10_000_000)
-            .unwrap();
-        assert_eq!(r[26..28], [0, 0]);
-    }
-    assert_eq!(scan_time(10_000_000 + 25_500, 10_000_000), 0xFF);
+    let scan_time = |counter| {
+        let report = rt.complete_lower_read(info, 76, &pkt, || counter).unwrap();
+        u16::from_le_bytes([report[26], report[27]])
+    };
+    let start = 20_000_000;
+    assert_eq!(scan_time(start), 0);
+    assert_eq!(scan_time(start + 256_000), 256);
+    assert_eq!(scan_time(start + 65_535_000), u16::MAX);
+    assert_eq!(scan_time(start + 65_536_000), 0);
+    let _status = rt.on_self_managed_io_init_or_restart(STATUS_SUCCESS, || frequency);
+    assert_eq!(scan_time(start + 70_000_000), 0);
 }
 
 #[test]
@@ -393,7 +396,7 @@ fn feature_checks_spec_4_6() {
     assert_eq!(check_xfer_packet(16, true), Ok(()));
     assert_eq!(get_feature(9, 4, true).status, STATUS_NOT_SUPPORTED);
     assert_eq!(get_feature(8, 256, true).status, STATUS_INVALID_BUFFER_SIZE);
-    assert_eq!(get_feature(8, 257, true).write, [0x08, 0xFC]);
+    assert_eq!(get_feature(8, 257, true).write, ptp_hid::feature::HQA_REPORT);
     let rt = DeviceRuntime::new();
     assert_eq!(rt.set_feature(9, 4, Some(&[9, 1, 2])), STATUS_NOT_SUPPORTED);
 }

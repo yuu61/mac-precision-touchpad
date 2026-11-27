@@ -32,8 +32,9 @@ use wdf_support::init::{
     usb_pipe_information_init,
 };
 use wdf_support::ntstatus::{NT_SUCCESS, STATUS_INVALID_DEVICE_STATE};
+use wdf_support::time::query_performance_counter;
 use wdk_sys::{
-    _WDF_IO_TARGET_SENT_IO_ACTION, _WDF_USB_PIPE_TYPE, BOOLEAN, LARGE_INTEGER, NTSTATUS, ULONG,
+    _WDF_IO_TARGET_SENT_IO_ACTION, _WDF_USB_PIPE_TYPE, BOOLEAN, NTSTATUS, ULONG,
     USB_DEVICE_DESCRIPTOR, USBD_STATUS, USHORT, WDF_NO_OBJECT_ATTRIBUTES,
     WDF_USB_CONTROL_SETUP_PACKET, WDFCONTEXT, WDFDEVICE, WDFIOTARGET, WDFMEMORY, WDFUSBDEVICE,
     WDFUSBPIPE, call_unsafe_wdf_function_binding,
@@ -43,17 +44,6 @@ use crate::device::DeviceContext;
 use crate::queue::InputQueue;
 use crate::request::{memory_buffer, slice_or_empty};
 use crate::trace;
-
-/// `QueryPerformanceCounter(&value)` → `value.QuadPart` (the C code ignores the BOOL result; QPC cannot
-/// fail on Windows XP and later).
-pub(crate) fn query_performance_counter() -> i64 {
-    let mut value = LARGE_INTEGER::default();
-    // SAFETY: `value` is a valid, writable LARGE_INTEGER.
-    unsafe { wdk_sys::windows::QueryPerformanceCounter(&raw mut value) };
-    // SAFETY: LARGE_INTEGER is a union of plain integers over the same 8 bytes; `QuadPart` is always
-    // initialized (zeroed by Default, then written by QueryPerformanceCounter).
-    unsafe { value.QuadPart }
-}
 
 // ---------------------------------------------------------------------------------------------------
 // PrepareHardware: USB target device, interface 0, pipes, continuous reader.
