@@ -60,8 +60,9 @@ pub enum LowerReadClass {
     /// The read failed (P3 fix of HF-B7). C ignored the status, so a failed read with `Information == 0`
     /// took the [`Self::Empty`] path, whose work item issued the next read at once: a lower driver that
     /// fails every read (a Bluetooth link going down, a cancelled read) made a zero-delay loop between
-    /// the work item and the completion. The port starts the 3 s recovery timer instead, and only while
-    /// the device is in D0.
+    /// the work item and the completion. The port still re-issues at once, but only for
+    /// [`crate::config::MAX_IMMEDIATE_READ_RETRIES`] failures in a row; then it waits for the 3 s
+    /// recovery timer, while the device is in D0.
     Failed {
         /// The completion status.
         status: NtStatus,

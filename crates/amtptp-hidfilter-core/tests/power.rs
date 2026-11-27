@@ -5,6 +5,7 @@
 
 mod common;
 
+use amtptp_hidfilter_core::config::MAX_IMMEDIATE_READ_RETRIES;
 use amtptp_hidfilter_core::{
     DeviceState, LowerReadClass, LowerReadOutcome, NtStatus, ReadTicket, STATUS_CANCELLED,
     STATUS_SUCCESS, complete_lower_read, d0_entry, d0_exit, dispatch_internal_ioctl,
@@ -17,6 +18,8 @@ use ptp_hid::ioctl::IOCTL_HID_READ_REPORT;
 
 /// `STATUS_DEVICE_NOT_CONNECTED`: what a lower read fails with once the Bluetooth link is gone.
 const DEVICE_NOT_CONNECTED: NtStatus = 0xC000_009D_u32 as NtStatus;
+/// `STATUS_DEVICE_DATA_ERROR`: what `HidBth` fails a read with now and then during normal use.
+const DEVICE_DATA_ERROR: NtStatus = 0xC000_009C_u32 as NtStatus;
 /// A one-contact Bluetooth multitouch packet (report ID 0x31).
 const BT_PACKET: [u8; 13] = [0x31, 0, 0, 0, 0, 0, 0, 0, 0x14, 0x14, 0, 0, 0];
 
@@ -207,29 +210,66 @@ fn work_item_only_serves_a_configured_device() {
     assert_eq!(m.ev, Vec::<String>::new());
 }
 
-/// HF-B7 (P3): a failed lower read (here the Bluetooth link is gone, `Information` 0) arms the 3 s
-/// recovery timer instead of the work item, so a lower driver that fails every read cannot make a
-/// zero-delay read loop. The timer then issues the missing read.
+/// HF-B7 (P3): a failed lower read is re-issued at once by the work item, as C did. `HidBth` fails a read
+/// with `STATUS_DEVICE_DATA_ERROR` now and then during normal use; waiting 3 s for each froze input on
+/// hardware once two failed in a row.
 #[test]
-fn failed_read_is_retried_by_the_timer_not_the_work_item() {
+fn isolated_failed_reads_are_reissued_at_once() {
     let (state, mut m) = bluetooth();
     start(&state, &mut m);
     let upper = read_report(&state, &mut m);
-    m.ev.clear();
-    let ticket = m.tickets[0];
+    for _ in 0..2 {
+        m.ev.clear();
+        let sent = *m.tickets.last().expect("a read was sent");
+        assert_eq!(
+            complete(&mut m, &state, sent, DEVICE_DATA_ERROR, &[]),
+            LowerReadOutcome::Handled(LowerReadClass::Failed {
+                status: DEVICE_DATA_ERROR
+            })
+        );
+        assert_eq!((work_items(&m), timer_starts(&m)), (1, 0));
+        assert!(m.uppers[upper].completed.is_none(), "the upper read stays parked");
+        work_item_callback(&mut m, &state);
+        assert_eq!(m.in_flight(), 1, "the work item issued the read again");
+    }
+    // A successful read ends the run of failures and serves the upper read.
+    let sent = *m.tickets.last().expect("a read was sent");
     assert_eq!(
-        complete(&mut m, &state, ticket, DEVICE_NOT_CONNECTED, &[]),
-        LowerReadOutcome::Handled(LowerReadClass::Failed {
-            status: DEVICE_NOT_CONNECTED
-        })
+        complete(&mut m, &state, sent, STATUS_SUCCESS, &BT_PACKET),
+        LowerReadOutcome::Handled(LowerReadClass::Report { length: 13 })
     );
-    assert_eq!(work_items(&m), 0);
-    assert_eq!(timer_starts(&m), 1);
+    assert_eq!(m.uppers[upper].completed, Some((0, PTP_REPORT_LEN)));
+}
+
+/// HF-B7 (P3): a lower driver that fails every read at once (here the Bluetooth link is gone) cannot keep
+/// the work item in a zero-delay loop: after `MAX_IMMEDIATE_READ_RETRIES` failures in a row the next
+/// failure waits for the 3 s recovery timer, which then issues the read. A success resets the count.
+#[test]
+fn a_run_of_failed_reads_backs_off_to_the_timer() {
+    let (state, mut m) = bluetooth();
+    start(&state, &mut m);
+    let _upper = read_report(&state, &mut m);
+    let fail_once = |m: &mut Mock| {
+        m.ev.clear();
+        let sent = *m.tickets.last().expect("a read was sent");
+        let _outcome = complete(m, &state, sent, DEVICE_NOT_CONNECTED, &[]);
+        (work_items(m), timer_starts(m))
+    };
+    for _ in 0..MAX_IMMEDIATE_READ_RETRIES {
+        assert_eq!(fail_once(&mut m), (1, 0));
+        work_item_callback(&mut m, &state);
+    }
+    assert_eq!(fail_once(&mut m), (0, 1), "the next failure waits for the timer");
     assert!(m.ev.contains(&"WdfTimerStart(timer=timer,due=-30000000)".to_owned()));
-    assert!(m.uppers[upper].completed.is_none(), "the upper read stays parked");
     assert_eq!(m.in_flight(), 0);
     recovery_timer_callback(&mut m, &state);
-    assert_eq!(m.lower_reads_pending, 1, "the timer issued the read again");
+    assert_eq!(m.in_flight(), 1, "the timer issued the read again");
+
+    // A completion that is not a failure ends the run: the next failure is re-issued at once again.
+    let sent = *m.tickets.last().expect("a read was sent");
+    let _outcome = complete(&mut m, &state, sent, STATUS_SUCCESS, &[]);
+    work_item_callback(&mut m, &state);
+    assert_eq!(fail_once(&mut m), (1, 0));
 }
 
 /// HF-B14 (P3): `D0Exit` stops the recovery timer, cancels the lower reads in flight and completes the

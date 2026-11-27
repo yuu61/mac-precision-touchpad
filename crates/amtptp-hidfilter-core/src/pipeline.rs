@@ -3,7 +3,7 @@
 //!
 //! Triggers of a lower read (spec 6.5): an upper `READ_REPORT` while `DeviceConfigured`, and
 //! [`issue_backlog_reads`] after the device became configured, from the recovery timer, and from the
-//! recovery work item after an empty read or another report. A successful completion does not issue
+//! recovery work item after an empty, failed or other report. A successful completion does not issue
 //! another read; the pipeline is 1:1 with upper reads.
 //!
 //! Every lower read is registered in the device's read tracker ([`FilterIo::with_reads`]) before it is
@@ -16,7 +16,7 @@
 use ptp_hid::input::PTP_REPORT_LEN;
 use ptp_hid::read_tracker::{LowerReadOrigin, ReadTicket};
 
-use crate::config::TRANSPORT_RETRY_DUE_TIME;
+use crate::config::{MAX_IMMEDIATE_READ_RETRIES, TRANSPORT_RETRY_DUE_TIME};
 use crate::device::DeviceState;
 use crate::input::{InputLayout, LowerReadClass, build_report, classify_lower_read};
 use crate::io::{FailedAction, FilterIo};
@@ -96,7 +96,7 @@ pub fn issue_backlog_reads<P: FilterIo>(io: &mut P, state: &DeviceState) {
     }
 }
 
-/// `PtpFilterWorkItemCallback` (Input.c:30-37), enqueued after an empty read or another report:
+/// `PtpFilterWorkItemCallback` (Input.c:30-37), enqueued after an empty, failed or other report:
 /// [`issue_backlog_reads`]. C issued one lower read without checking `DeviceConfigured`, so the work
 /// item also sent reads to a stopped or unconfigured device (P3 fix).
 pub fn work_item_callback<P: FilterIo>(io: &mut P, state: &DeviceState) {
@@ -125,7 +125,9 @@ pub enum LowerReadOutcome {
 /// last `D0Exit`) is only deleted. Otherwise, by [`classify_lower_read`] (C order for a successful
 /// multitouch packet):
 /// 1. vendor not Apple: `WdfDeviceSetFailed(NoRestart)`;
-/// 2. failed read: recovery timer 3 s while the device is in D0 (P3 fix of HF-B7, no work item);
+/// 2. failed read (P3 fix of HF-B7): enqueue the recovery work item, as C did for its zero-length
+///    result, until [`MAX_IMMEDIATE_READ_RETRIES`] reads have failed in a row; after that the 3 s
+///    recovery timer, while the device is in D0. Any other completion ends the run;
 /// 3. empty read, or another report than multitouch (P3 fix of HF-B8): enqueue the recovery work item;
 /// 4. `Information` above the buffer (P3 fix of HF-B29) or malformed length: recovery timer 3 s;
 /// 5. no parked upper read: drop the packet;
@@ -150,11 +152,18 @@ pub fn complete_lower_read<P: FilterIo>(
             let first_byte = io.lower_read_buffer(memory).first().copied();
             let class =
                 classify_lower_read(state.vendor_id(), &layout, status, information, first_byte);
+            if !matches!(class, LowerReadClass::Failed { .. }) {
+                state.note_read_completion();
+            }
             match class {
                 LowerReadClass::UnsupportedVendor => io.set_failed(FailedAction::NoRestart),
                 LowerReadClass::Failed { .. } => {
-                    if state.in_d0() {
-                        io.start_recovery_timer(TRANSPORT_RETRY_DUE_TIME);
+                    let immediate = state.note_read_failure() <= MAX_IMMEDIATE_READ_RETRIES;
+                    match (immediate, state.in_d0()) {
+                        (true, _) => io.enqueue_recovery_work_item(),
+                        (false, true) => io.start_recovery_timer(TRANSPORT_RETRY_DUE_TIME),
+                        // Out of D0: the restart issues the reads.
+                        (false, false) => {}
                     }
                 }
                 LowerReadClass::Empty | LowerReadClass::OtherReport { .. } => {
