@@ -17,6 +17,7 @@ use amtptp_usbkm_core::state::DeviceState;
 use amtptp_usbkm_core::status::Completion;
 use common::fake::FakeHw;
 use common::{Record, Tally, hex, kv, load, num, replay_descriptor_ioctl, status, to_hex};
+use ptp_hid::contact_tracker::ContactTracker;
 
 fn completion_of(r: &Record) -> Completion {
     Completion {
@@ -120,6 +121,7 @@ fn replay_route(r: &Record) -> &'static str {
 /// 0x027a (the outputs use x.min -6243 / y.max 7685).
 struct Fifo {
     state: DeviceState,
+    contacts: ContactTracker,
     reqs: Vec<(Vec<u8>, Option<Completion>)>,
     queue: VecDeque<usize>,
 }
@@ -133,13 +135,15 @@ impl Fifo {
         assert_eq!(lifecycle::d0_entry(&state, &mut hw), 0);
         Self {
             state,
+            contacts: ContactTracker::new(),
             reqs: vec![(vec![0xcc; 50], None); 3],
             queue: (0..3).collect(),
         }
     }
 
     fn deliver(&mut self, packet: &[u8]) {
-        if let PacketAction::Deliver(result) = process_packet(&self.state, packet, 10_000_000)
+        if let PacketAction::Deliver(result) =
+            process_packet(&self.state, &mut self.contacts, packet, 10_000_000)
             && let Some(i) = self.queue.pop_front()
         {
             let (buf, done) = &mut self.reqs[i];

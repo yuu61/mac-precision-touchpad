@@ -1,25 +1,28 @@
 //! `const fn` builders for the PTP report descriptors of all four drivers.
 //!
-//! Every C report descriptor follows one template. Only these things vary:
+//! Every report descriptor follows one template. Only these things vary:
 //! - the contact shape inside each finger collection: a 9-byte contact with a 32-bit contact ID (`UsbUm`,
 //!   `UsbKm`, `HidFilter`), or a 5-byte contact with a 3-bit contact ID (`SpiKm`);
 //! - the touchpad TLC usage (Touch Pad 0x05, or Touch Screen 0x04 for `SpiKm`'s touchscreen variant);
 //! - four 16-bit axis values ([`Axes`]);
 //! - whether the user-mode-app TLC ([`UMAPP_TLC`]) is appended.
 //!
-//! The builders mirror the C macros item by item, with the item names from [`crate::item`]. They
-//! reproduce all 16 descriptors byte for byte, except one deliberate change: the SPI contact ID's logical
-//! maximum is [`SPI_CONTACT_ID_LOGICAL_MAX`] (4) instead of 3, at [`SPI_CONTACT_ID_MAX_OFFSETS`]:
+//! Compared to the legacy C macro templates, these builders make four intentional HID conformance fixes:
+//! - the SPI contact ID's logical maximum is [`SPI_CONTACT_ID_LOGICAL_MAX`] (4) instead of 3, at
+//!   [`SPI_CONTACT_ID_MAX_OFFSETS`];
+//! - all five finger collections end with [`GLOBAL_RESET`] (retiring the legacy `_2` no-reset macro on
+//!   fingers 3 and 5);
+//! - [`TOUCHPAD_TLC_TAIL`] emits [`GLOBAL_RESET`] immediately after Scan Time so `Seconds / -4 / 65535`
+//!   do not leak into subsequent fields and collections;
+//! - [`WINDOWS_CONFIGURATION_TLC`] declares [`PTP_COLLECTION_WINDOWS`] (`0x03`) instead of `16` as the
+//!   logical maximum of Input Mode (`0x52`).
 //!
 //! | Driver | Builder | Length |
 //! |---|---|---|
-//! | `UsbUm`, 6 families | [`report_descriptor_u32_id_umapp`] | 516 |
-//! | `UsbKm` (T2) | [`report_descriptor_u32_id`] | 493 |
-//! | `HidFilter` (MT2) | [`report_descriptor_u32_id`] | 493 |
-//! | `SpiKm`, 4 families × {touchpad, touchscreen} | [`report_descriptor_spi_umapp`] | 501 |
-//!
-//! The per-family axis values belong to the core crates. Quirks such as the missing global-item reset in
-//! finger collections 3 and 5 are reproduced verbatim. Do not "clean up" these bytes.
+//! | `UsbUm` | [`report_descriptor_u32_id_umapp`] | 534 |
+//! | `UsbKm` (T2) | [`report_descriptor_u32_id`] | 511 |
+//! | `HidFilter` (MT2) | [`report_descriptor_u32_id`] | 511 |
+//! | `SpiKm`, 4 families × {touchpad, touchscreen} | [`report_descriptor_spi_umapp`] | 519 |
 //!
 //! Every function here is a `const fn`, so a core crate can write
 //! `pub const REPORT_DESCRIPTOR: [u8; REPORT_DESCRIPTOR_U32_ID_LEN] = report_descriptor_u32_id(AXES);`.
@@ -27,8 +30,9 @@
 
 use crate::bytes::put;
 use crate::common::{
-    BUTTON_SWITCH, MAX_FINGERS, PTP_MAX_CONTACT_POINTS, REPORTID_DEVICE_CAPS, REPORTID_FUNCSWITCH,
-    REPORTID_MULTITOUCH, REPORTID_PTPHQA, REPORTID_REPORTMODE, REPORTID_UMAPP_CONF, SURFACE_SWITCH,
+    BUTTON_SWITCH, PTP_COLLECTION_WINDOWS, PTP_MAX_CONTACT_POINTS, REPORTID_DEVICE_CAPS,
+    REPORTID_FUNCSWITCH, REPORTID_MULTITOUCH, REPORTID_PTPHQA, REPORTID_REPORTMODE,
+    REPORTID_UMAPP_CONF, SURFACE_SWITCH,
 };
 use crate::item::{
     BEGIN_COLLECTION, END_COLLECTION, FEATURE, INPUT, LOGICAL_MAXIMUM, LOGICAL_MAXIMUM_2,
@@ -85,35 +89,29 @@ pub const AXIS_ITEMS_LEN: usize = 30;
 /// Length of the `45 00 55 00 65 00` reset at the end of a `*_FINGER_COLLECTION_1`.
 pub const GLOBAL_RESET_LEN: usize = 6;
 
-/// Length of [`finger_collection_u32_id`] (`*_PTP_FINGER_COLLECTION_1`, 9-byte contact).
+/// Length of [`finger_collection_u32_id`] (9-byte contact with [`GLOBAL_RESET`]).
 pub const FINGER_COLLECTION_U32_ID_LEN: usize =
     FINGER_HEAD_U32_ID_LEN + AXIS_ITEMS_LEN + GLOBAL_RESET_LEN + 1;
-/// Length of [`finger_collection_u32_id_no_reset`] (`*_PTP_FINGER_COLLECTION_2`, 9-byte contact).
-pub const FINGER_COLLECTION_U32_ID_NO_RESET_LEN: usize =
-    FINGER_HEAD_U32_ID_LEN + AXIS_ITEMS_LEN + 1;
-/// Length of [`finger_collection_spi`] (`*_PTP_FINGER_COLLECTION_1`, SPI 5-byte contact).
+/// Length of [`finger_collection_spi`] (SPI 5-byte contact with [`GLOBAL_RESET`]).
 pub const FINGER_COLLECTION_SPI_LEN: usize =
     FINGER_HEAD_SPI_LEN + AXIS_ITEMS_LEN + GLOBAL_RESET_LEN + 1;
-/// Length of [`finger_collection_spi_no_reset`] (`*_PTP_FINGER_COLLECTION_2`, SPI 5-byte contact).
-pub const FINGER_COLLECTION_SPI_NO_RESET_LEN: usize = FINGER_HEAD_SPI_LEN + AXIS_ITEMS_LEN + 1;
 
 /// Length of [`touchpad_tlc_header`].
 pub const TOUCHPAD_TLC_HEADER_LEN: usize = 10;
 /// Length of [`FINGER_SEPARATOR`].
 pub const FINGER_SEPARATOR_LEN: usize = 4;
 /// Length of [`TOUCHPAD_TLC_TAIL`].
-pub const TOUCHPAD_TLC_TAIL_LEN: usize = 82;
+pub const TOUCHPAD_TLC_TAIL_LEN: usize = 88;
 
-/// Length of [`touchpad_tlc_u32_id`]: header, fingers 1,1,2,1,2 with 4 separators, and the tail.
+/// Length of [`touchpad_tlc_u32_id`]: header, five reset-terminated finger collections with 4 separators,
+/// and the tail.
 pub const TOUCHPAD_TLC_U32_ID_LEN: usize = TOUCHPAD_TLC_HEADER_LEN
-    + 3 * FINGER_COLLECTION_U32_ID_LEN
-    + 2 * FINGER_COLLECTION_U32_ID_NO_RESET_LEN
+    + 5 * FINGER_COLLECTION_U32_ID_LEN
     + 4 * FINGER_SEPARATOR_LEN
     + TOUCHPAD_TLC_TAIL_LEN;
 /// Length of [`touchpad_tlc_spi`].
 pub const TOUCHPAD_TLC_SPI_LEN: usize = TOUCHPAD_TLC_HEADER_LEN
-    + 3 * FINGER_COLLECTION_SPI_LEN
-    + 2 * FINGER_COLLECTION_SPI_NO_RESET_LEN
+    + 5 * FINGER_COLLECTION_SPI_LEN
     + 4 * FINGER_SEPARATOR_LEN
     + TOUCHPAD_TLC_TAIL_LEN;
 
@@ -131,16 +129,13 @@ pub const REPORT_DESCRIPTOR_U32_ID_UMAPP_LEN: usize = REPORT_DESCRIPTOR_U32_ID_L
 pub const REPORT_DESCRIPTOR_SPI_UMAPP_LEN: usize =
     TOUCHPAD_TLC_SPI_LEN + WINDOWS_CONFIGURATION_TLC_LEN + UMAPP_TLC_LEN;
 
-// Measured lengths from the C harness (crosscut spec A4, fixtures *.txt).
 const _: () = assert!(FINGER_COLLECTION_U32_ID_LEN == 70);
-const _: () = assert!(FINGER_COLLECTION_U32_ID_NO_RESET_LEN == 64);
 const _: () = assert!(FINGER_COLLECTION_SPI_LEN == 67);
-const _: () = assert!(FINGER_COLLECTION_SPI_NO_RESET_LEN == 61);
-const _: () = assert!(TOUCHPAD_TLC_U32_ID_LEN == 446);
-const _: () = assert!(TOUCHPAD_TLC_SPI_LEN == 431);
-const _: () = assert!(REPORT_DESCRIPTOR_U32_ID_LEN == 493);
-const _: () = assert!(REPORT_DESCRIPTOR_U32_ID_UMAPP_LEN == 516);
-const _: () = assert!(REPORT_DESCRIPTOR_SPI_UMAPP_LEN == 501);
+const _: () = assert!(TOUCHPAD_TLC_U32_ID_LEN == 464);
+const _: () = assert!(TOUCHPAD_TLC_SPI_LEN == 449);
+const _: () = assert!(REPORT_DESCRIPTOR_U32_ID_LEN == 511);
+const _: () = assert!(REPORT_DESCRIPTOR_U32_ID_UMAPP_LEN == 534);
+const _: () = assert!(REPORT_DESCRIPTOR_SPI_UMAPP_LEN == 519);
 
 /// Head of a 9-byte-contact finger collection, from `BEGIN_COLLECTION` to the 32-bit Contact
 /// Identifier: Confidence:1, Tip Switch:1, 6 constant bits, Contact ID:32 with logical maximum
@@ -172,17 +167,16 @@ pub const SPI_CONTACT_ID_LOGICAL_MAX: u8 = PTP_MAX_CONTACT_POINTS - 1;
 pub const FINGER_HEAD_SPI_CONTACT_ID_MAX_OFFSET: usize = 19;
 
 /// Offsets of the Contact Identifier's logical-maximum value in an SPI report descriptor, one per finger
-/// collection (fingers 1, 2, 4 have the global reset, 3 and 5 do not; see [`touchpad_tlc_spi`]).
+/// collection (all five finger collections end with [`GLOBAL_RESET`]; see [`touchpad_tlc_spi`]).
 pub const SPI_CONTACT_ID_MAX_OFFSETS: [usize; 5] = {
-    let step1 = FINGER_COLLECTION_SPI_LEN + FINGER_SEPARATOR_LEN;
-    let step2 = FINGER_COLLECTION_SPI_NO_RESET_LEN + FINGER_SEPARATOR_LEN;
+    let step = FINGER_COLLECTION_SPI_LEN + FINGER_SEPARATOR_LEN;
     let first = TOUCHPAD_TLC_HEADER_LEN + FINGER_HEAD_SPI_CONTACT_ID_MAX_OFFSET;
     [
         first,
-        first + step1,
-        first + 2 * step1,
-        first + 2 * step1 + step2,
-        first + 3 * step1 + step2,
+        first + step,
+        first + 2 * step,
+        first + 3 * step,
+        first + 4 * step,
     ]
 };
 
@@ -269,35 +263,16 @@ const fn finger_collection<const H: usize, const R: usize, const N: usize>(
     out
 }
 
-/// `*_PTP_FINGER_COLLECTION_1` with a 9-byte contact (70 bytes). It ends with the [`GLOBAL_RESET`].
-/// In the C template, fingers 1, 2 and 4 use it.
+/// Finger collection with a 9-byte contact (70 bytes), ending with [`GLOBAL_RESET`].
 #[must_use]
 pub const fn finger_collection_u32_id(axes: Axes) -> [u8; FINGER_COLLECTION_U32_ID_LEN] {
     finger_collection(&FINGER_HEAD_U32_ID, axes, &GLOBAL_RESET)
 }
 
-/// `*_PTP_FINGER_COLLECTION_2` with a 9-byte contact (64 bytes). It has no [`GLOBAL_RESET`], so finger 4's
-/// bit fields inherit cm, exponent -2 and Y physical max (preserved quirk). In the C template, fingers 3
-/// and 5 use it.
-#[must_use]
-pub const fn finger_collection_u32_id_no_reset(
-    axes: Axes,
-) -> [u8; FINGER_COLLECTION_U32_ID_NO_RESET_LEN] {
-    finger_collection(&FINGER_HEAD_U32_ID, axes, &[])
-}
-
-/// `*_PTP_FINGER_COLLECTION_1` with an SPI 5-byte contact (67 bytes). It ends with the [`GLOBAL_RESET`].
+/// Finger collection with an SPI 5-byte contact (67 bytes), ending with [`GLOBAL_RESET`].
 #[must_use]
 pub const fn finger_collection_spi(axes: Axes) -> [u8; FINGER_COLLECTION_SPI_LEN] {
     finger_collection(&FINGER_HEAD_SPI, axes, &GLOBAL_RESET)
-}
-
-/// `*_PTP_FINGER_COLLECTION_2` with an SPI 5-byte contact (61 bytes). It has no [`GLOBAL_RESET`].
-#[must_use]
-pub const fn finger_collection_spi_no_reset(
-    axes: Axes,
-) -> [u8; FINGER_COLLECTION_SPI_NO_RESET_LEN] {
-    finger_collection(&FINGER_HEAD_SPI, axes, &[])
 }
 
 /// The first 10 bytes of the touchpad TLC: Digitizer page, the [`TlcUsage`] (at byte 3), Application
@@ -321,13 +296,11 @@ pub const FINGER_SEPARATOR: [u8; FINGER_SEPARATOR_LEN] = [
     USAGE, 0x22, // Usage: Finger
 ];
 
-/// The end of the touchpad TLC after the fifth finger (82 bytes). It contains Scan Time (16-bit, because
-/// the finger collections' `REPORT_SIZE 0x10` is still in effect; unit seconds, exponent -4), Contact
-/// Count (8-bit, logical max 0x7F), Button 1 plus 7 padding bits, feature report 0x07 (Maximum Contacts,
-/// Pad Type), vendor feature report 0x08 (256-byte HQA blob), and `END_COLLECTION`.
-///
-/// The globals it sets (seconds, -4, physical max 65535) are never reset. They carry over into the later
-/// TLCs. Preserved quirk.
+/// The end of the touchpad TLC after the fifth finger (88 bytes). It contains Scan Time (16-bit, because
+/// the finger collections' `REPORT_SIZE 0x10` is still in effect; unit seconds, exponent -4), an explicit
+/// [`GLOBAL_RESET`] so time units and `65535` physical maximum do not leak further, Contact Count (8-bit,
+/// logical max 0x7F), Button 1 plus 7 padding bits, feature report 0x07 (Maximum Contacts, Pad Type),
+/// vendor feature report 0x08 (256-byte HQA blob), and `END_COLLECTION`.
 #[rustfmt::skip]
 pub const TOUCHPAD_TLC_TAIL: [u8; TOUCHPAD_TLC_TAIL_LEN] = [
     USAGE_PAGE, 0x0d, // Usage Page: Digitizer
@@ -337,6 +310,9 @@ pub const TOUCHPAD_TLC_TAIL: [u8; TOUCHPAD_TLC_TAIL_LEN] = [
     LOGICAL_MAXIMUM_3, 0xff, 0xff, 0x00, 0x00,
     USAGE, 0x56, // Usage: Scan Time
     INPUT, 0x02, // Input: (Data, Var, Abs)
+    PHYSICAL_MAXIMUM, 0x00, // Physical Maximum: 0
+    UNIT_EXPONENT, 0x00, // Unit exponent: 0
+    UNIT, 0x00, // Unit: None
     USAGE, 0x54, // Usage: Contact Count
     LOGICAL_MAXIMUM, 0x7f,
     REPORT_SIZE, 0x08,
@@ -368,66 +344,49 @@ pub const TOUCHPAD_TLC_TAIL: [u8; TOUCHPAD_TLC_TAIL_LEN] = [
     END_COLLECTION, // End Collection (Application)
 ];
 
-/// Assembles the touchpad TLC: header, finger collections in the C order 1, 1, 2, 1, 2 (`fc1` = with
-/// reset, `fc2` = without) separated by [`FINGER_SEPARATOR`], and [`TOUCHPAD_TLC_TAIL`].
-const fn touchpad_tlc<const F1: usize, const F2: usize, const N: usize>(
-    usage: TlcUsage,
-    fc1: &[u8; F1],
-    fc2: &[u8; F2],
-) -> [u8; N] {
+/// Assembles the touchpad TLC: header, five identical reset-terminated finger collections separated by
+/// [`FINGER_SEPARATOR`], and [`TOUCHPAD_TLC_TAIL`].
+const fn touchpad_tlc<const F: usize, const N: usize>(usage: TlcUsage, fc: &[u8; F]) -> [u8; N] {
     const {
         assert!(
-            TOUCHPAD_TLC_HEADER_LEN
-                + 3 * F1
-                + 2 * F2
-                + 4 * FINGER_SEPARATOR_LEN
-                + TOUCHPAD_TLC_TAIL_LEN
-                == N,
+            TOUCHPAD_TLC_HEADER_LEN + 5 * F + 4 * FINGER_SEPARATOR_LEN + TOUCHPAD_TLC_TAIL_LEN == N,
             "touchpad TLC length mismatch"
         );
     };
     let mut out = [0_u8; N];
     let rest = put(&mut out, &touchpad_tlc_header(usage));
-    let rest = put(rest, fc1); // finger 1
+    let rest = put(rest, fc); // finger 1
     let rest = put(rest, &FINGER_SEPARATOR);
-    let rest = put(rest, fc1); // finger 2
+    let rest = put(rest, fc); // finger 2
     let rest = put(rest, &FINGER_SEPARATOR);
-    let rest = put(rest, fc2); // finger 3
+    let rest = put(rest, fc); // finger 3
     let rest = put(rest, &FINGER_SEPARATOR);
-    let rest = put(rest, fc1); // finger 4
+    let rest = put(rest, fc); // finger 4
     let rest = put(rest, &FINGER_SEPARATOR);
-    let rest = put(rest, fc2); // finger 5
+    let rest = put(rest, fc); // finger 5
     put(rest, &TOUCHPAD_TLC_TAIL);
     out
 }
 
-/// The touchpad TLC with 9-byte contacts (446 bytes), e.g. `AAPL_WELLSPRING_3_PTP_TLC`,
+/// The touchpad TLC with 9-byte contacts (464 bytes), e.g. `AAPL_WELLSPRING_3_PTP_TLC`,
 /// `AAPL_WELLSPRING_T2_PTP_TLC` or `AAPL_MAGIC_TRACKPAD2_PTP_TLC`. Inside each finger collection the axis
 /// value bytes are at offsets 36, 47, 54 and 57.
 #[must_use]
 pub const fn touchpad_tlc_u32_id(usage: TlcUsage, axes: Axes) -> [u8; TOUCHPAD_TLC_U32_ID_LEN] {
-    touchpad_tlc(
-        usage,
-        &finger_collection_u32_id(axes),
-        &finger_collection_u32_id_no_reset(axes),
-    )
+    touchpad_tlc(usage, &finger_collection_u32_id(axes))
 }
 
-/// The touchpad TLC with SPI 5-byte contacts (431 bytes), e.g. `AAPL_SPI_SERIES1_PTP_TLC` (with
+/// The touchpad TLC with SPI 5-byte contacts (449 bytes), e.g. `AAPL_SPI_SERIES1_PTP_TLC` (with
 /// [`TlcUsage::TouchPad`]) or `AAPL_SPI_SERIES1_TOUCHSCREEN_TLC` (with [`TlcUsage::TouchScreen`]). Inside
 /// each finger collection the axis value bytes are at offsets 33, 44, 51 and 54.
 #[must_use]
 pub const fn touchpad_tlc_spi(usage: TlcUsage, axes: Axes) -> [u8; TOUCHPAD_TLC_SPI_LEN] {
-    touchpad_tlc(
-        usage,
-        &finger_collection_spi(axes),
-        &finger_collection_spi_no_reset(axes),
-    )
+    touchpad_tlc(usage, &finger_collection_spi(axes))
 }
 
 /// `AAPL_PTP_WINDOWS_CONFIGURATION_TLC` (47 bytes), identical in all four drivers. It holds the Digitizer
-/// Configuration TLC with feature report 0x04 (Input Mode; logical max [`MAX_FINGERS`] = 16, sic) and
-/// feature report 0x06 (two 1-bit switches, Surface 0x57 then Button 0x58, plus 6 padding bits).
+/// Configuration TLC with feature report 0x04 (Input Mode; logical max [`PTP_COLLECTION_WINDOWS`] = 3)
+/// and feature report 0x06 (two 1-bit switches, Surface 0x57 then Button 0x58, plus 6 padding bits).
 #[rustfmt::skip]
 pub const WINDOWS_CONFIGURATION_TLC: [u8; WINDOWS_CONFIGURATION_TLC_LEN] = [
     USAGE_PAGE, 0x0d, // Usage Page: Digitizer
@@ -437,8 +396,8 @@ pub const WINDOWS_CONFIGURATION_TLC: [u8; WINDOWS_CONFIGURATION_TLC_LEN] = [
     USAGE, 0x22, // Usage: Finger
     BEGIN_COLLECTION, 0x02, // Begin Collection: Logical
     USAGE, 0x52, // Usage: Input Mode
-    LOGICAL_MINIMUM, 0x00, // Logical Minimum: 0 finger
-    LOGICAL_MAXIMUM, MAX_FINGERS, // Logical Maximum: MAX_FINGERS
+    LOGICAL_MINIMUM, 0x00, // Logical Minimum: 0 (Mouse)
+    LOGICAL_MAXIMUM, PTP_COLLECTION_WINDOWS, // Logical Maximum: 3 (Windows PTP)
     REPORT_SIZE, 0x08, // Report Size: 0x08
     REPORT_COUNT, 0x01, // Report Count: 0x01
     FEATURE, 0x02, // Feature: (Data, Var, Abs)
@@ -475,9 +434,9 @@ pub const UMAPP_TLC: [u8; UMAPP_TLC_LEN] = [
     END_COLLECTION,
 ];
 
-/// Touchpad TLC (9-byte contacts, Touch Pad usage) followed by [`WINDOWS_CONFIGURATION_TLC`]: 493 bytes.
+/// Touchpad TLC (9-byte contacts, Touch Pad usage) followed by [`WINDOWS_CONFIGURATION_TLC`]: 511 bytes.
 ///
-/// `UsbKm` `AmtPtpT2ReportDescriptor` and `HidFilter` `PtpReportDescriptorMagicTrackpad2` use it.
+/// `UsbKm` and `HidFilter` use it.
 #[must_use]
 pub const fn report_descriptor_u32_id(axes: Axes) -> [u8; REPORT_DESCRIPTOR_U32_ID_LEN] {
     concat(
@@ -486,10 +445,10 @@ pub const fn report_descriptor_u32_id(axes: Axes) -> [u8; REPORT_DESCRIPTOR_U32_
     )
 }
 
-/// Touchpad TLC (9-byte contacts, Touch Pad usage), [`WINDOWS_CONFIGURATION_TLC`] and [`UMAPP_TLC`]: 516
+/// Touchpad TLC (9-byte contacts, Touch Pad usage), [`WINDOWS_CONFIGURATION_TLC`] and [`UMAPP_TLC`]: 534
 /// bytes.
 ///
-/// `UsbUm` `AmtPtp{3,5,6,7a,8,Mt2}ReportDescriptor` use it.
+/// `UsbUm` uses it.
 #[must_use]
 pub const fn report_descriptor_u32_id_umapp(
     axes: Axes,
@@ -498,7 +457,7 @@ pub const fn report_descriptor_u32_id_umapp(
 }
 
 /// Touchpad TLC (SPI 5-byte contacts, with the given usage), [`WINDOWS_CONFIGURATION_TLC`] and
-/// [`UMAPP_TLC`]: 501 bytes.
+/// [`UMAPP_TLC`]: 519 bytes.
 ///
 /// `SpiKm` `AmtPtpSpiFamily{1,2,3a,3b}ReportDescriptor` (with [`TlcUsage::TouchPad`]) and
 /// `...TouchscreenReportDescriptor` (with [`TlcUsage::TouchScreen`]) use it.
@@ -538,42 +497,32 @@ mod tests {
     }
 
     #[test]
-    fn no_reset_variant_is_prefix_plus_end_collection() {
+    fn every_finger_collection_ends_with_global_reset() {
         let a = finger_collection_u32_id(AXES);
-        let b = finger_collection_u32_id_no_reset(AXES);
-        assert_eq!(&a[..63], &b[..63]);
         assert_eq!(&a[63..69], &GLOBAL_RESET);
         assert_eq!(a[69], END_COLLECTION);
-        assert_eq!(b[63], END_COLLECTION);
-        let a = finger_collection_spi(AXES);
-        let b = finger_collection_spi_no_reset(AXES);
-        assert_eq!(&a[..60], &b[..60]);
-        assert_eq!(&a[60..66], &GLOBAL_RESET);
-        assert_eq!(b[60], END_COLLECTION);
+        let b = finger_collection_spi(AXES);
+        assert_eq!(&b[60..66], &GLOBAL_RESET);
+        assert_eq!(b[66], END_COLLECTION);
     }
 
     #[test]
     fn finger_collection_offsets_inside_tlc() {
-        // Offsets measured by seg.py: (10,70) (84,70) (158,64) (226,70) (300,64) and
-        // (10,67) (81,67) (152,61) (217,67) (288,61).
         let t = touchpad_tlc_u32_id(TlcUsage::TouchPad, AXES);
-        let fc1 = finger_collection_u32_id(AXES);
-        let fc2 = finger_collection_u32_id_no_reset(AXES);
-        assert_eq!(&t[10..80], &fc1);
-        assert_eq!(&t[84..154], &fc1);
-        assert_eq!(&t[158..222], &fc2);
-        assert_eq!(&t[226..296], &fc1);
-        assert_eq!(&t[300..364], &fc2);
-        assert_eq!(&t[364..], &TOUCHPAD_TLC_TAIL);
+        let fc = finger_collection_u32_id(AXES);
+        for idx in 0..5 {
+            let start = TOUCHPAD_TLC_HEADER_LEN + idx * (FINGER_COLLECTION_U32_ID_LEN + FINGER_SEPARATOR_LEN);
+            assert_eq!(&t[start..start + FINGER_COLLECTION_U32_ID_LEN], &fc);
+        }
+        assert_eq!(&t[376..], &TOUCHPAD_TLC_TAIL);
+
         let t = touchpad_tlc_spi(TlcUsage::TouchScreen, AXES);
-        let fc1 = finger_collection_spi(AXES);
-        let fc2 = finger_collection_spi_no_reset(AXES);
-        assert_eq!(&t[10..77], &fc1);
-        assert_eq!(&t[81..148], &fc1);
-        assert_eq!(&t[152..213], &fc2);
-        assert_eq!(&t[217..284], &fc1);
-        assert_eq!(&t[288..349], &fc2);
-        assert_eq!(&t[349..], &TOUCHPAD_TLC_TAIL);
+        let fc = finger_collection_spi(AXES);
+        for idx in 0..5 {
+            let start = TOUCHPAD_TLC_HEADER_LEN + idx * (FINGER_COLLECTION_SPI_LEN + FINGER_SEPARATOR_LEN);
+            assert_eq!(&t[start..start + FINGER_COLLECTION_SPI_LEN], &fc);
+        }
+        assert_eq!(&t[361..], &TOUCHPAD_TLC_TAIL);
         assert_eq!(t[3], 0x04);
     }
 
@@ -597,7 +546,7 @@ mod tests {
             WINDOWS_CONFIGURATION_TLC,
             [
                 0x05, 0x0d, 0x09, 0x0e, 0xa1, 0x01, 0x85, 0x04, 0x09, 0x22, 0xa1, 0x02, 0x09, 0x52,
-                0x15, 0x00, 0x25, 0x10, 0x75, 0x08, 0x95, 0x01, 0xb1, 0x02, 0xc0, 0xa1, 0x00, 0x85,
+                0x15, 0x00, 0x25, 0x03, 0x75, 0x08, 0x95, 0x01, 0xb1, 0x02, 0xc0, 0xa1, 0x00, 0x85,
                 0x06, 0x09, 0x57, 0x09, 0x58, 0x75, 0x01, 0x95, 0x02, 0x25, 0x01, 0xb1, 0x02, 0x95,
                 0x06, 0xb1, 0x03, 0xc0, 0xc0
             ]

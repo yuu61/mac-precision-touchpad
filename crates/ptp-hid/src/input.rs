@@ -210,9 +210,8 @@ pub struct SpiPtpContact {
     pub confidence: bool,
     /// `TipSwitch : 1` (bit 1 of byte 0).
     pub tip_switch: bool,
-    /// `ContactID : 3` (bits 2-4 of byte 0). Only the low 3 bits are encoded, as assigning to the C
-    /// bitfield truncates. The descriptor declares a logical maximum of 3, but `SpiKm` emits 0..=4
-    /// (preserved known issue).
+    /// `ContactID : 3` (bits 2-4 of byte 0). Only the low 3 bits are encoded (`0..=4` matches
+    /// [`crate::descriptor::SPI_CONTACT_ID_LOGICAL_MAX`]).
     pub contact_id: u8,
     /// `X` (bytes 1-2, u16 LE).
     pub x: u16,

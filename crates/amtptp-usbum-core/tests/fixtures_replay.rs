@@ -15,13 +15,12 @@
 #![cfg(test)]
 
 mod common;
-#[path = "../../bcm5974/tests/support/mt2.rs"]
-mod mt2;
 
 use std::collections::{BTreeMap, HashMap};
 
 use amtptp_usbum_core::NtStatus;
-use amtptp_usbum_core::config::{CONFIG_TABLE, Family, lookup_config_row};
+use amtptp_usbum_core::config::{CONFIG_TABLE, Family, WellspringDevice, lookup_config_row};
+use amtptp_usbum_core::descriptors::{HID_DESCRIPTOR, HidRegistry, REPORT_DESCRIPTOR_LEN};
 use amtptp_usbum_core::hid::{
     IoctlOutcome, IoctlRoute, get_device_attributes, get_feature, get_hid_descriptor,
     get_report_descriptor, get_string, route_ioctl, set_feature,
@@ -37,6 +36,11 @@ use amtptp_usbum_core::status::{STATUS_INVALID_DEVICE_STATE, STATUS_SUCCESS, nt_
 use common::{
     FAKE_DECIDED, FakeQueue, FakeReq, FakeStrings, FakeUsb, Rec, check_dev2, fake_decided, fixture,
     hex, normalize_wire, records, status_hex, to_hex,
+};
+use ptp_hid::common::{MAX_FINGERS, PTP_COLLECTION_WINDOWS};
+use ptp_hid::descriptor::{
+    FINGER_COLLECTION_U32_ID_LEN, FINGER_HEAD_U32_ID_LEN, FINGER_SEPARATOR_LEN, GLOBAL_RESET,
+    TOUCHPAD_TLC_HEADER_LEN,
 };
 
 const B1_UMASK: &str = "B1 TYPE4/5 SET payload bytes past a short GET are 00 (umask)";
@@ -321,6 +325,65 @@ fn devices() {
 // descriptors.txt
 // =================================================================================================
 
+const C_REPORT_DESCRIPTOR_LEN: usize = 516;
+const REPORT_DESCRIPTOR_DELTA: usize = REPORT_DESCRIPTOR_LEN - C_REPORT_DESCRIPTOR_LEN;
+
+/// Projects a clean 534-byte `UsbUm` report descriptor back to the 516-byte C descriptor, including
+/// the `Ws5a` (`Ws7a -> Ws5`) and `Ws9` (`Ws9 -> Ws8`) axis alignments of Step 2 (`A-2.4`).
+fn to_legacy_c_usbum(bytes: &[u8], family: Option<Family>) -> Vec<u8> {
+    let mut patched = bytes.to_vec();
+    let step = FINGER_COLLECTION_U32_ID_LEN + FINGER_SEPARATOR_LEN;
+    match family {
+        Some(Family::Ws5a) => {
+            for finger in 0..5 {
+                let base = TOUCHPAD_TLC_HEADER_LEN + finger * step + FINGER_HEAD_U32_ID_LEN;
+                assert_eq!(&patched[base + 3..base + 5], &10030_u16.to_le_bytes());
+                patched[base + 3..base + 5].copy_from_slice(&9465_u16.to_le_bytes());
+                assert_eq!(&patched[base + 14..base + 16], &1064_u16.to_le_bytes());
+                patched[base + 14..base + 16].copy_from_slice(&1050_u16.to_le_bytes());
+                assert_eq!(&patched[base + 21..base + 23], &773_u16.to_le_bytes());
+                patched[base + 21..base + 23].copy_from_slice(&810_u16.to_le_bytes());
+                assert_eq!(&patched[base + 24..base + 26], &6880_u16.to_le_bytes());
+                patched[base + 24..base + 26].copy_from_slice(&6735_u16.to_le_bytes());
+            }
+        }
+        Some(Family::Ws9) => {
+            for finger in 0..5 {
+                let base = TOUCHPAD_TLC_HEADER_LEN + finger * step + FINGER_HEAD_U32_ID_LEN;
+                assert_eq!(&patched[base + 3..base + 5], &10173_u16.to_le_bytes());
+                patched[base + 3..base + 5].copy_from_slice(&9760_u16.to_le_bytes());
+                assert_eq!(&patched[base + 24..base + 26], &7006_u16.to_le_bytes());
+                patched[base + 24..base + 26].copy_from_slice(&6750_u16.to_le_bytes());
+            }
+        }
+        _ => {}
+    }
+    let f3_reset = TOUCHPAD_TLC_HEADER_LEN
+        + 2 * step
+        + (FINGER_COLLECTION_U32_ID_LEN - 1 - GLOBAL_RESET.len());
+    let f5_reset = TOUCHPAD_TLC_HEADER_LEN
+        + 4 * step
+        + (FINGER_COLLECTION_U32_ID_LEN - 1 - GLOBAL_RESET.len());
+    let tail_start =
+        TOUCHPAD_TLC_HEADER_LEN + 5 * FINGER_COLLECTION_U32_ID_LEN + 4 * FINGER_SEPARATOR_LEN;
+    let scan_time_reset = tail_start + 21;
+    let input_mode_max_offset = tail_start + 88 + 17;
+
+    assert_eq!(&patched[f3_reset..f3_reset + 6], &GLOBAL_RESET);
+    assert_eq!(&patched[f5_reset..f5_reset + 6], &GLOBAL_RESET);
+    assert_eq!(&patched[scan_time_reset..scan_time_reset + 6], &GLOBAL_RESET);
+    assert_eq!(patched[input_mode_max_offset], PTP_COLLECTION_WINDOWS);
+
+    let mut out = Vec::with_capacity(C_REPORT_DESCRIPTOR_LEN);
+    out.extend_from_slice(&patched[..f3_reset]);
+    out.extend_from_slice(&patched[f3_reset + 6..f5_reset]);
+    out.extend_from_slice(&patched[f5_reset + 6..scan_time_reset]);
+    out.extend_from_slice(&patched[scan_time_reset + 6..input_mode_max_offset]);
+    out.push(MAX_FINGERS);
+    out.extend_from_slice(&patched[input_mode_max_offset + 1..]);
+    out
+}
+
 #[test]
 fn descriptors() {
     let text = fixture("descriptors.txt");
@@ -346,18 +409,25 @@ fn descriptors() {
             assert_eq!(state.config(), None, "{case}: injected PID must be unknown");
             tally.note("inj=1 (unknown PID via context injection, B3 exclusion)");
         }
+        let code = rec.u("ioctl") as u32;
+        let route = route_ioctl(code);
         let mut req = ioctl_request(&rec);
+        let c_outlen = rec.u("outlen") as usize;
+        if route == IoctlRoute::GetReportDescriptor
+            && (C_REPORT_DESCRIPTOR_LEN - 1..=C_REPORT_DESCRIPTOR_LEN + 4).contains(&c_outlen)
+        {
+            req = FakeReq::new(req.input, c_outlen + REPORT_DESCRIPTOR_DELTA, 0xa5);
+        }
         let mut usb = FakeUsb::default();
         let mut strings = FakeStrings::new();
         if case == "str-queryfail" {
             strings.fail_all = Some(rec.status("status"));
         }
-        let code = rec.u("ioctl") as u32;
         let outcome = dispatch(&state, code, &mut req, &mut usb, &mut strings)
             .unwrap_or_else(|| panic!("{case}: not completed"));
 
         let mut expected = expected_ioctl_out(&rec);
-        if route_ioctl(code) == IoctlRoute::GetString && rec.status("status") == STATUS_SUCCESS {
+        if route == IoctlRoute::GetString && rec.status("status") == STATUS_SUCCESS {
             let expected_completion = if rec.s("strq") == "-" {
                 IoctlOutcome::NOT_SUPPORTED
             } else {
@@ -375,9 +445,47 @@ fn descriptors() {
             };
             assert_eq!(outcome, expected_completion, "{case}");
             assert_eq!(req.out, expected, "{case}");
+        } else if route == IoctlRoute::GetReportDescriptor {
+            assert_eq!(rec.s("cpl"), "1", "{case}: completed once");
+            assert_eq!(
+                status_hex(outcome.status),
+                status_hex(rec.status("status")),
+                "{case}: status"
+            );
+            if outcome.status == STATUS_SUCCESS {
+                assert_eq!(rec.u("info") as usize, C_REPORT_DESCRIPTOR_LEN, "{case}");
+                assert_eq!(outcome.information, REPORT_DESCRIPTOR_LEN, "{case}");
+                let reg = HidRegistry::for_pid(pid_of(&rec)).expect("supported PID");
+                assert_eq!(
+                    &req.out[..REPORT_DESCRIPTOR_LEN],
+                    reg.report_descriptor(),
+                    "{case}: clean descriptor"
+                );
+                let projected = to_legacy_c_usbum(
+                    &req.out[..REPORT_DESCRIPTOR_LEN],
+                    state.config().map(|c| c.family),
+                );
+                assert_eq!(
+                    to_hex(&projected),
+                    to_hex(&expected[..C_REPORT_DESCRIPTOR_LEN]),
+                    "{case}: legacy C projection"
+                );
+                assert!(
+                    req.out[REPORT_DESCRIPTOR_LEN..].iter().all(|&b| b == 0xa5)
+                        && expected[C_REPORT_DESCRIPTOR_LEN..].iter().all(|&b| b == 0xa5),
+                    "{case}: trailing prefill"
+                );
+            } else {
+                assert_eq!(outcome.information, 0, "{case}");
+                assert!(req.out.iter().all(|&b| b == 0xa5), "{case}: untouched");
+            }
         } else {
-            if route_ioctl(code) == IoctlRoute::GetDeviceAttributes && rec.u("info") == 32 {
+            if route == IoctlRoute::GetDeviceAttributes && rec.u("info") == 32 {
                 expected[10..32].fill(0);
+            }
+            if route == IoctlRoute::GetDeviceDescriptor && outcome.status == STATUS_SUCCESS {
+                assert_eq!(&req.out[..9], &HID_DESCRIPTOR, "{case}: HID descriptor");
+                expected[7..9].copy_from_slice(&(REPORT_DESCRIPTOR_LEN as u16).to_le_bytes());
             }
             check_ioctl(&rec, &outcome, &req, Some(expected));
         }
@@ -527,6 +635,90 @@ fn packets() -> HashMap<String, Vec<u8>> {
     map
 }
 
+/// Independent Step 2 specification for frame-0 `UsbUm` report encoding (both Wellspring TYPE1-4 and
+/// Magic Trackpad 2 TYPE5), plus whether the C single-frame report (after MT2 coordinate clamping)
+/// was unaffected by hover filtering, duplicate-ID filtering, Wellspring `Confidence`, and clamping.
+fn expected_frame0_usbum_report(
+    cfg: &WellspringDevice,
+    packet: &[u8],
+    surf: bool,
+    btn: bool,
+) -> ([u8; 50], bool) {
+    let mut report = [0_u8; 50];
+    report[0] = 0x05;
+    let format = cfg.profile.tp_type;
+    report[49] = u8::from(btn && packet[format.button() as usize] != 0);
+    if !surf {
+        return (report, true);
+    }
+    let header = format.header() as usize;
+    let stride = format.finger_size() as usize;
+    let base = header + format.delta() as usize;
+    let raw_count = ((packet.len() - header) / stride).min(usize::from(MAX_FINGERS));
+    let mut count = 0_usize;
+    let mut matches_c = true;
+
+    if cfg.family == Family::Mt2 {
+        let signed13 = |bits: u32| (bits & 0xfff) as i32 - (bits & 0x1000) as i32;
+        let mut seen_ids = 0_u16;
+        for i in 0..raw_count {
+            let f = &packet[(base + i * 9)..(base + (i + 1) * 9)];
+            assert!(f.len() > 8);
+            let coords = u32::from_le_bytes([f[0], f[1], f[2], f[3]]);
+            let x = (3678 + signed13(coords)).clamp(0, 7612) as u16;
+            let y = (2479 - signed13(coords >> 13)).clamp(0, 5065) as u16;
+            let tip = f[4] > 0;
+            let conf = f[5] <= 172;
+            let id = u32::from(f[8] & 0x0f);
+            if i < 5 && (!tip || (seen_ids & (1 << id)) != 0) {
+                matches_c = false;
+            }
+            if !tip || (seen_ids & (1 << id)) != 0 || count >= 5 {
+                continue;
+            }
+            seen_ids |= 1 << id;
+            let off = 1 + 9 * count;
+            report[off] = u8::from(conf) | 0x02;
+            report[off + 1..off + 5].copy_from_slice(&id.to_le_bytes());
+            report[off + 5..off + 7].copy_from_slice(&x.to_le_bytes());
+            report[off + 7..off + 9].copy_from_slice(&y.to_le_bytes());
+            count += 1;
+        }
+    } else {
+        let x_span = cfg.profile.x.max - cfg.profile.x.min;
+        let y_span = cfg.profile.y.max - cfg.profile.y.min;
+        for i in 0..raw_count {
+            let f = &packet[(base + i * stride)..];
+            assert!(f.len() > 19);
+            let abs_x = i16::from_le_bytes([f[2], f[3]]);
+            let abs_y = i16::from_le_bytes([f[4], f[5]]);
+            let major = i32::from(i16::from_le_bytes([f[16], f[17]])) * 2;
+            let minor = i32::from(i16::from_le_bytes([f[18], f[19]])) * 2;
+            let unclamped_x = (i32::from(abs_x) - cfg.profile.x.min).max(0);
+            let unclamped_y = (cfg.profile.y.max - i32::from(abs_y)).max(0);
+            let tip = major >= 200;
+            let conf = major < 2500 && minor < 2500;
+            let c_conf = minor > 0;
+            if i < 5 && (!tip || conf != c_conf || unclamped_x > x_span || unclamped_y > y_span) {
+                matches_c = false;
+            }
+            if !tip || count >= 5 {
+                continue;
+            }
+            let x = unclamped_x.min(x_span) as u16;
+            let y = unclamped_y.min(y_span) as u16;
+            let off = 1 + 9 * count;
+            report[off] = u8::from(conf) | 0x02;
+            report[off + 1..off + 5].copy_from_slice(&(count as u32).to_le_bytes());
+            report[off + 5..off + 7].copy_from_slice(&x.to_le_bytes());
+            report[off + 7..off + 9].copy_from_slice(&y.to_le_bytes());
+            count += 1;
+        }
+    }
+    report[48] = count as u8;
+    (report, matches_c)
+}
+
 /// Runs one `Input` record (input files and sequences) on `state`/`usb` and checks everything it
 /// records. `lengths` are the pending `READ_REPORT` output lengths.
 fn run_input(
@@ -571,15 +763,20 @@ fn run_input(
             assert_eq!(queue.completed.len(), 1, "{case}: one completion");
             let (req, status, info) = &queue.completed[0];
             assert_eq!((*status, *info), (STATUS_SUCCESS, 50), "{case}: completion");
-            let mut expected = rec.hex("out");
-            // Replays are single frames or use the same QPC sample throughout a sequence.
-            let offset = ptp_hid::input::PTP_REPORT_SCAN_TIME_OFFSET;
-            expected[offset..offset + 2].copy_from_slice(&0_u16.to_le_bytes());
-            if state.config().is_some_and(|cfg| cfg.family == Family::Mt2) {
-                let records = &packet[12..];
-                mt2::correct_coordinates(&mut expected, records);
+            let cfg = state.config().expect("configured family");
+            let (spec_report, matches_c) = expected_frame0_usbum_report(
+                cfg,
+                packet,
+                state.is_surface_report_on(),
+                state.is_button_report_on(),
+            );
+            assert_eq!(&req.out[..50], &spec_report, "{case}: report");
+            if matches_c && cfg.family != Family::Mt2 {
+                let mut c_expected = rec.hex("out");
+                let offset = ptp_hid::input::PTP_REPORT_SCAN_TIME_OFFSET;
+                c_expected[offset..offset + 2].copy_from_slice(&0_u16.to_le_bytes());
+                assert_eq!(&req.out[..50], &c_expected[..50], "{case}: exact C match");
             }
-            assert_eq!(&req.out[..50], expected, "{case}: report");
             assert!(
                 req.out[50..].iter().all(|&b| b == 0xee),
                 "{case}: bytes past 50 written"

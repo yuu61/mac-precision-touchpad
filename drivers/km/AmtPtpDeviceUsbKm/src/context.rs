@@ -19,9 +19,10 @@
 use core::ptr;
 use core::sync::atomic::{AtomicPtr, Ordering};
 
+use amtptp_usbkm_core::input::ContactTracker;
 use amtptp_usbkm_core::state::DeviceState;
 use wdf_support::declare_context_type;
-use wdf_support::sync::WaitLock;
+use wdf_support::sync::{SpinLocked, WaitLock};
 use wdk_sys::{
     WDFQUEUE, WDFQUEUE__, WDFUSBDEVICE, WDFUSBDEVICE__, WDFUSBINTERFACE, WDFUSBINTERFACE__,
     WDFUSBPIPE, WDFUSBPIPE__,
@@ -42,6 +43,9 @@ pub(crate) struct DeviceContext {
     /// Serializes the wellspring mode switches (not in C): created in `create_device`, held by
     /// `UsbIo::serialized` around each outermost `GET_REPORT`/`SET_REPORT` sequence.
     pub(crate) mode_switch_lock: WaitLock,
+    /// Persistent `ContactID` and liftoff state, protected by a `WDFSPINLOCK` created in
+    /// `create_device`. Never held across synchronous USB control transfers.
+    pub(crate) contacts: SpinLocked<ContactTracker>,
     /// Everything else (core).
     pub(crate) state: DeviceState,
 }
@@ -58,6 +62,7 @@ impl DeviceContext {
             usb_interface: AtomicPtr::new(ptr::null_mut()),
             input_queue: AtomicPtr::new(ptr::null_mut()),
             mode_switch_lock: WaitLock::new(),
+            contacts: SpinLocked::new(ContactTracker::new()),
             state: DeviceState::new(),
         }
     }

@@ -8,9 +8,12 @@
 
 mod common;
 
-use amtptp_hidfilter_core::{DeviceState, dispatch_internal_ioctl};
+use amtptp_hidfilter_core::{DeviceState, REPORT_DESCRIPTOR, dispatch_internal_ioctl};
 use common::*;
-use ptp_hid::ioctl::{IOCTL_HID_GET_FEATURE, IOCTL_HID_GET_STRING, IOCTL_HID_SET_FEATURE};
+use ptp_hid::ioctl::{
+    IOCTL_HID_GET_FEATURE, IOCTL_HID_GET_REPORT_DESCRIPTOR, IOCTL_HID_GET_STRING,
+    IOCTL_HID_SET_FEATURE,
+};
 
 const TOTAL: usize = 519;
 
@@ -77,7 +80,12 @@ fn replay_ioctl_routing() {
         assert_eq!(disp, r.get("disp"), "{}", r.case());
         if let Some((s, info)) = u.completed {
             assert_eq!(st(s), r.get("status"), "{}", r.case());
-            assert_eq!(info as i128, r.num("info"), "{}", r.case());
+            let want_info = if code == IOCTL_HID_GET_REPORT_DESCRIPTOR && s == 0 {
+                REPORT_DESCRIPTOR.len() as i128
+            } else {
+                r.num("info")
+            };
+            assert_eq!(info as i128, want_info, "{}", r.case());
         } else {
             assert_eq!(r.get("status"), "-");
             assert_eq!(r.get("info"), "-");
@@ -87,7 +95,17 @@ fn replay_ioctl_routing() {
             assert_eq!(u8::from(any).to_string(), changed, "{}", r.case());
         }
         if r.opt("ev").is_some() {
-            assert_eq!(m.ev, events(r), "{}", r.case());
+            let want_ev: Vec<String> = events(r)
+                .into_iter()
+                .map(|ev| {
+                    if code == IOCTL_HID_GET_REPORT_DESCRIPTOR {
+                        ev.replace("len=493", "len=511").replace("info=493", "info=511")
+                    } else {
+                        ev
+                    }
+                })
+                .collect();
+            assert_eq!(m.ev, want_ev, "{}", r.case());
             tally.add("routing + ev");
         } else {
             // Sweep codes record no ev: the only call must be the NOT_SUPPORTED completion.

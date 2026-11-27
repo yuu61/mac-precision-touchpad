@@ -39,6 +39,7 @@ fn p3_expectation(case: &str, r: &Rec) -> Option<(Vec<String>, DeviceSnapshot, O
             out.vendor_id = st_in.vendor_id;
             out.product_id = st_in.product_id;
             out.version_number = st_in.version_number;
+            out.ptp_input_on = true;
             Some((events(r), out, None))
         }
         // C issued a read for an unconfigured device, and the timer marked a device without the detour
@@ -115,9 +116,10 @@ fn replay_add_device(record: &Rec, tally: &mut Tally) {
         }
     }
     if record.get("st_out") != "nodevice" {
-        // P3: both selective-reporting switches start on (C left them FALSE and never read them).
+        // P3 / Step 2 (B-4): input mode and both selective-reporting switches start on.
         let mut expected = parse_state(record.get("st_out"));
-        assert!(!expected.ptp_report_touch && !expected.ptp_report_button);
+        assert!(!expected.ptp_input_on && !expected.ptp_report_touch && !expected.ptp_report_button);
+        expected.ptp_input_on = true;
         expected.ptp_report_touch = true;
         expected.ptp_report_button = true;
         assert_eq!(DeviceState::new().snapshot(), expected);

@@ -19,8 +19,9 @@
 //! 0 but not above (B19), Y is inverted, contact IDs are slot indices (B18), more than 5 contacts fail the
 //! read (B8), Tip = `major*2 >= 200 || minor*2 >= 150`, Confidence = `minor*2 > 0`.
 
-use bcm5974::input::{build_usb_report, usb_contact_count, wellspring_contact};
+use bcm5974::input::{build_tracked_usb_report, usb_contact_count, wellspring_contact};
 use ptp_hid::common::PTP_CONTACT_SLOTS;
+pub use ptp_hid::contact_tracker::ContactTracker;
 use ptp_hid::input::PTP_REPORT_LEN;
 
 use crate::config::T2Device;
@@ -51,22 +52,24 @@ pub enum PacketAction {
     Deliver(ReadReportResult),
 }
 
-/// Builds the report from a raw packet (`packet.len()` = `NumBytesTransferred`), with the given config
-/// row, gates and `ScanTime`. Pure; see the module docs for the arithmetic.
+/// Builds a tracked report from a raw packet (`packet.len()` = `NumBytesTransferred`), with the
+/// given config row, gates, `ScanTime` and [`ContactTracker`].
 #[must_use]
 pub fn parse_packet(
     cfg: &T2Device,
     packet: &[u8],
     gates: InputGates,
     scan_time: u16,
+    contacts: &mut ContactTracker,
 ) -> PacketAction {
-    parse_packet_with_clock(cfg, packet, gates, || scan_time)
+    parse_packet_with_clock(cfg, packet, gates, contacts, || scan_time)
 }
 
 fn parse_packet_with_clock<F: FnOnce() -> u16>(
     cfg: &T2Device,
     packet: &[u8],
     gates: InputGates,
+    contacts: &mut ContactTracker,
     scan_time: F,
 ) -> PacketAction {
     let format = cfg.profile.tp_type;
@@ -77,20 +80,33 @@ fn parse_packet_with_clock<F: FnOnce() -> u16>(
         return PacketAction::Deliver(ReadReportResult::DataError);
     }
 
-    let mut report = build_usb_report(
+    let mut report = build_tracked_usb_report(
         format,
         packet,
         gates.report_touch,
         gates.report_button,
+        contacts,
         |finger, slot| wellspring_contact(&cfg.profile, finger, slot, Some(150)),
     );
     report.scan_time = scan_time();
     PacketAction::Deliver(ReadReportResult::Report(report.to_bytes()))
 }
 
-/// Parses a packet using the device's selected config, input gates and reporting clock.
-pub fn process_packet(state: &DeviceState, packet: &[u8], counter: i64) -> PacketAction {
-    parse_packet_with_clock(state.config(), packet, state.input_gates(), || {
+/// Parses a packet using the device's selected config, wellspring mode gate, input gates,
+/// reporting clock and [`ContactTracker`]. When Wellspring mode is off (`SET_FEATURE` 0x04 mouse
+/// mode or after `D0Exit`), `contacts` is reset and the packet is discarded without dequeuing a
+/// pending `READ_REPORT`.
+pub fn process_packet(
+    state: &DeviceState,
+    contacts: &mut ContactTracker,
+    packet: &[u8],
+    counter: i64,
+) -> PacketAction {
+    if !state.wellspring_mode_on() {
+        contacts.reset();
+        return PacketAction::Discard;
+    }
+    parse_packet_with_clock(state.config(), packet, state.input_gates(), contacts, || {
         state.scan_clock.sample(counter)
     })
 }
@@ -175,10 +191,11 @@ mod tests {
 
     #[test]
     fn golden_a_header_only() {
+        let mut contacts = ContactTracker::new();
         let mut packet = [0_u8; 46];
         packet[31] = 1;
         let PacketAction::Deliver(ReadReportResult::Report(r)) =
-            parse_packet(&FALLBACK_CONFIG, &packet, InputGates::ON, 0)
+            parse_packet(&FALLBACK_CONFIG, &packet, InputGates::ON, 0, &mut contacts)
         else {
             panic!("expected a report");
         };
@@ -191,16 +208,17 @@ mod tests {
     #[test]
     fn length_gate_and_data_error() {
         let cfg = config_for_pid(0x027a);
+        let mut contacts = ContactTracker::new();
         assert_eq!(
-            parse_packet(cfg, &[0; 45], InputGates::ON, 0),
+            parse_packet(cfg, &[0; 45], InputGates::ON, 0, &mut contacts),
             PacketAction::Discard
         );
         assert_eq!(
-            parse_packet(cfg, &[0; 47], InputGates::ON, 0),
+            parse_packet(cfg, &[0; 47], InputGates::ON, 0, &mut contacts),
             PacketAction::Discard
         );
         assert_eq!(
-            parse_packet(cfg, &[0; 226], InputGates::ON, 0),
+            parse_packet(cfg, &[0; 226], InputGates::ON, 0, &mut contacts),
             PacketAction::Deliver(ReadReportResult::DataError)
         );
         // The DATA_ERROR check is inside the touch gate.
@@ -209,7 +227,7 @@ mod tests {
             report_button: true,
         };
         assert!(matches!(
-            parse_packet(cfg, &[0; 226], gates, 0),
+            parse_packet(cfg, &[0; 226], gates, 0, &mut contacts),
             PacketAction::Deliver(ReadReportResult::Report(_))
         ));
     }

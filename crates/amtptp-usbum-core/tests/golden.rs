@@ -1,28 +1,39 @@
-//! Focused unit tests for the golden vectors of the porting spec (`specs/usbum.md`) and for the P2
-//! decisions that no fixture record covers.
+//! Focused unit tests for the golden vectors of the porting spec (`specs/usbum.md`), the P2/P3 fixes,
+//! and Step 2 improvements (descriptor cleanup, `Ws5a`/`Ws9` axis alignment, Wellspring `Confidence`,
+//! coordinate clamping, and `ContactTracker` liftoff synthesis).
 
 #![cfg(test)]
 
 use core::fmt::Write as _;
 mod common;
 
+use amtptp_usbum_core::ContactTracker;
 use amtptp_usbum_core::config::{
     CONFIG_TABLE, Family, TrackpadType, lookup_config, lookup_config_row,
 };
 use amtptp_usbum_core::descriptors::{
-    HID_DESCRIPTOR, HidRegistry, REPORT_DESCRIPTOR_MT2, REPORT_DESCRIPTOR_WS3,
-    REPORT_DESCRIPTOR_WS5, REPORT_DESCRIPTOR_WS6, REPORT_DESCRIPTOR_WS7A, REPORT_DESCRIPTOR_WS8,
+    HID_DESCRIPTOR, HidRegistry, REPORT_DESCRIPTOR_LEN, REPORT_DESCRIPTOR_MT2,
+    REPORT_DESCRIPTOR_WS3, REPORT_DESCRIPTOR_WS5, REPORT_DESCRIPTOR_WS6, REPORT_DESCRIPTOR_WS7A,
+    REPORT_DESCRIPTOR_WS8, REPORT_DESCRIPTOR_WS9,
 };
 use amtptp_usbum_core::hid::{
     IoctlOutcome, IoctlRoute, TraceEvent, get_string, route_ioctl, set_feature,
 };
-use amtptp_usbum_core::input::{ReadCompleteOutcome, build_report, mt2_contact, on_read_complete, wellspring_contact};
+use amtptp_usbum_core::input::{
+    ReadCompleteOutcome, build_report, mt2_contact, on_read_complete, wellspring_contact,
+};
+use amtptp_usbum_core::io::{PipeInfo, PipeType};
 use amtptp_usbum_core::pnp::{d0_entry, d0_exit, prepare_hardware};
 use amtptp_usbum_core::state::{DeviceState, UsbDeviceDescriptor};
-use amtptp_usbum_core::status::{STATUS_BUFFER_TOO_SMALL, STATUS_INVALID_DEVICE_STATE, STATUS_SUCCESS};
+use amtptp_usbum_core::status::{
+    STATUS_BUFFER_TOO_SMALL, STATUS_INVALID_DEVICE_STATE, STATUS_SUCCESS,
+};
 use amtptp_usbum_core::usb::{wellspring_mode_read_setup, wellspring_mode_write_setup};
-use amtptp_usbum_core::io::{PipeInfo, PipeType};
 use common::{FakeQueue, FakeReq, FakeUsb, hex, to_hex};
+use ptp_hid::common::{MAX_FINGERS, PTP_COLLECTION_WINDOWS};
+use ptp_hid::descriptor::{
+    FINGER_COLLECTION_U32_ID_LEN, FINGER_SEPARATOR_LEN, GLOBAL_RESET, TOUCHPAD_TLC_HEADER_LEN,
+};
 use ptp_hid::input::PtpContact;
 
 fn cfg(family: Family) -> &'static amtptp_usbum_core::config::WellspringDevice {
@@ -32,8 +43,32 @@ fn cfg(family: Family) -> &'static amtptp_usbum_core::config::WellspringDevice {
         .expect("family")
 }
 
+fn to_legacy_c(bytes: &[u8]) -> Vec<u8> {
+    let step = FINGER_COLLECTION_U32_ID_LEN + FINGER_SEPARATOR_LEN;
+    let f3_reset = TOUCHPAD_TLC_HEADER_LEN
+        + 2 * step
+        + (FINGER_COLLECTION_U32_ID_LEN - 1 - GLOBAL_RESET.len());
+    let f5_reset = TOUCHPAD_TLC_HEADER_LEN
+        + 4 * step
+        + (FINGER_COLLECTION_U32_ID_LEN - 1 - GLOBAL_RESET.len());
+    let tail_start =
+        TOUCHPAD_TLC_HEADER_LEN + 5 * FINGER_COLLECTION_U32_ID_LEN + 4 * FINGER_SEPARATOR_LEN;
+    let scan_time_reset = tail_start + 21;
+    let input_mode_max_offset = tail_start + 88 + 17;
+    assert_eq!(bytes[input_mode_max_offset], PTP_COLLECTION_WINDOWS);
+
+    let mut out = Vec::with_capacity(516);
+    out.extend_from_slice(&bytes[..f3_reset]);
+    out.extend_from_slice(&bytes[f3_reset + 6..f5_reset]);
+    out.extend_from_slice(&bytes[f5_reset + 6..scan_time_reset]);
+    out.extend_from_slice(&bytes[scan_time_reset + 6..input_mode_max_offset]);
+    out.push(MAX_FINGERS);
+    out.extend_from_slice(&bytes[input_mode_max_offset + 1..]);
+    out
+}
+
 // ------------------------------------------------------------------------------------------------
-// Descriptors (spec 5.1): SHA-256 of the six report descriptors and the WS3 byte dump
+// Descriptors (spec 5.1): SHA-256 of the report descriptors and the WS3 byte dump
 // ------------------------------------------------------------------------------------------------
 
 /// Minimal SHA-256 (FIPS 180-4) for the spec's descriptor hashes.
@@ -186,6 +221,7 @@ fn sha256_self_test() {
 
 #[test]
 fn report_descriptor_hashes() {
+    assert_eq!(REPORT_DESCRIPTOR_LEN, 534);
     for (bytes, sha) in [
         (
             &REPORT_DESCRIPTOR_WS3,
@@ -212,18 +248,18 @@ fn report_descriptor_hashes() {
             "c803f5c305a07a33d24e518be786ade6338bad844105657e64c582ba7fa13f25",
         ),
     ] {
-        assert_eq!(bytes.len(), 516);
-        assert_eq!(sha256(bytes), sha);
+        assert_eq!(bytes.len(), 534);
+        assert_eq!(sha256(&to_legacy_c(bytes)), sha);
     }
+    assert_eq!(REPORT_DESCRIPTOR_WS9.len(), 534);
     assert_eq!(
         HID_DESCRIPTOR,
-        [0x09, 0x21, 0x00, 0x01, 0x00, 0x01, 0x22, 0x04, 0x02]
+        [0x09, 0x21, 0x00, 0x01, 0x00, 0x01, 0x22, 0x16, 0x02]
     );
 }
 
 #[test]
 fn ws3_report_descriptor_dump() {
-    // Spec 5.1, full byte dump of AmtPtp3ReportDescriptor.
     let dump = [
         "05 0d 09 05 a1 01 85 05 09 22 a1 02 25 01 09 47 09 42 95 02 75 01 81 02 75 01 95 06 81 03 95 01",
         "75 20 27 ff ff ff ff 09 51 81 02 05 01 26 9a 25 75 10 55 0e 65 11 09 30 46 1a 04 95 01 81 02 46",
@@ -245,41 +281,43 @@ fn ws3_report_descriptor_dump() {
     ]
     .concat();
     let compact: String = dump.chars().filter(char::is_ascii_hexdigit).collect();
-    assert_eq!(to_hex(&REPORT_DESCRIPTOR_WS3), compact);
+    assert_eq!(to_hex(&to_legacy_c(&REPORT_DESCRIPTOR_WS3)), compact);
 }
 
 #[test]
 fn pid_to_descriptor_switch() {
-    // Spec 8.3: not every config row has a descriptor.
     for pid in [0x0223_u16, 0x0230, 0x023f, 0x0242, 0x027d, 0x0000, 0x0266] {
         assert_eq!(HidRegistry::for_pid(pid), None, "{pid:04x}");
     }
-    assert_eq!(HidRegistry::for_pid(0x0254), Some(HidRegistry::Ws5)); // WS5A -> AmtPtp5 (B18)
-    assert_eq!(HidRegistry::for_pid(0x0272), Some(HidRegistry::Ws8)); // WS9 -> AmtPtp8 (B18)
+    assert_eq!(HidRegistry::for_pid(0x0254), Some(HidRegistry::Ws7a)); // WS5A -> 10030x6880 (Step 2 A-2.4)
+    assert_eq!(HidRegistry::for_pid(0x0272), Some(HidRegistry::Ws9)); // WS9 -> 10173x7006 (Step 2 A-2.4)
     assert_eq!(HidRegistry::for_pid(0x0292), Some(HidRegistry::Ws8)); // WS8 JIS
     assert_eq!(HidRegistry::for_pid(0x024b), Some(HidRegistry::Ws6)); // WS6A
     assert_eq!(HidRegistry::for_pid(0x025b), Some(HidRegistry::Ws7a)); // WS7A
     assert_eq!(HidRegistry::for_pid(0x0265), Some(HidRegistry::Mt2));
 }
 
-/// The C PID switch of `AmtPtpGetHidDescriptor` / `AmtPtpGetReportDescriptor`, kept as the oracle of the
-/// family-based selection.
-const fn c_descriptor_switch(pid: u16) -> Option<HidRegistry> {
+const fn expected_descriptor_switch(pid: u16) -> Option<HidRegistry> {
     match pid {
         0x0236..=0x0238 => Some(HidRegistry::Ws3),
-        0x0245..=0x0247 | 0x0252..=0x0254 => Some(HidRegistry::Ws5),
+        0x0245..=0x0247 => Some(HidRegistry::Ws5),
         0x0249..=0x024e => Some(HidRegistry::Ws6),
-        0x0262..=0x0264 | 0x0259..=0x025b => Some(HidRegistry::Ws7a),
-        0x0290..=0x0292 | 0x0272..=0x0274 => Some(HidRegistry::Ws8),
+        0x0252..=0x0254 | 0x0262..=0x0264 | 0x0259..=0x025b => Some(HidRegistry::Ws7a),
+        0x0290..=0x0292 => Some(HidRegistry::Ws8),
+        0x0272..=0x0274 => Some(HidRegistry::Ws9),
         0x0265 => Some(HidRegistry::Mt2),
         _ => None,
     }
 }
 
 #[test]
-fn family_based_descriptor_selection_equals_the_c_switch() {
+fn family_based_descriptor_selection_matches_axis_spans() {
     for pid in 0..=u16::MAX {
-        assert_eq!(HidRegistry::for_pid(pid), c_descriptor_switch(pid), "{pid:04x}");
+        assert_eq!(
+            HidRegistry::for_pid(pid),
+            expected_descriptor_switch(pid),
+            "{pid:04x}"
+        );
     }
 }
 
@@ -310,8 +348,6 @@ fn config_lookup_is_bounded() {
 
 #[test]
 fn unknown_pid_fails_prepare_hardware() {
-    // Excluded fixture case 1 (B3): the C lookup walks past the table. The port returns
-    // STATUS_INVALID_DEVICE_STATE with the DeviceNotFoundInRegistry event and DeviceInfo = NULL.
     let state = DeviceState::new();
     let mut usb = FakeUsb {
         descriptor: UsbDeviceDescriptor {
@@ -336,7 +372,6 @@ fn unknown_pid_fails_prepare_hardware() {
 
 #[test]
 fn reader_is_configured_once() {
-    // B16 (P2): a PnP stop/start re-runs PrepareHardware; the reader is configured only the first time.
     let state = DeviceState::new();
     let mut usb = FakeUsb::default();
     usb.descriptor.id_product = 0x0265;
@@ -347,7 +382,7 @@ fn reader_is_configured_once() {
     );
     state.set_surface_report_on(false);
     usb.calls.clear();
-    usb.reader_status = STATUS_INVALID_DEVICE_STATE; // what WDF would answer to a second configuration
+    usb.reader_status = STATUS_INVALID_DEVICE_STATE;
     let second = prepare_hardware(&state, &mut usb);
     assert_eq!(
         (second.status, second.configured_reader),
@@ -364,7 +399,6 @@ fn reader_is_configured_once() {
     assert!(state.is_surface_report_on());
 }
 
-/// A Magic Trackpad 2 whose interface 0 has the given pipes.
 fn mt2_with_pipes(pipes: Vec<PipeInfo>) -> (DeviceState, FakeUsb) {
     let mut usb = FakeUsb::default();
     usb.descriptor.id_product = 0x0265;
@@ -374,7 +408,6 @@ fn mt2_with_pipes(pipes: Vec<PipeInfo>) -> (DeviceState, FakeUsb) {
 
 #[test]
 fn reader_goes_on_the_interrupt_in_pipe_after_an_out_pipe() {
-    // B21 (P3): interrupt OUT 0x03, then interrupt IN 0x83.
     let (state, mut usb) = mt2_with_pipes(vec![
         common::pipe(PipeType::Interrupt, 0x03),
         common::interrupt_in(0x83),
@@ -382,7 +415,10 @@ fn reader_goes_on_the_interrupt_in_pipe_after_an_out_pipe() {
     let outcome = prepare_hardware(&state, &mut usb);
     assert_eq!(outcome.status, STATUS_SUCCESS);
     assert_eq!(usb.interrupt_pipe, Some(1));
-    assert_eq!(usb.calls.last().map(String::as_str), Some("ConfigContinuousReader(1)=0x00000000"));
+    assert_eq!(
+        usb.calls.last().map(String::as_str),
+        Some("ConfigContinuousReader(1)=0x00000000")
+    );
 }
 
 #[test]
@@ -394,7 +430,11 @@ fn interrupt_out_pipe_alone_fails_prepare_hardware() {
     let outcome = prepare_hardware(&state, &mut usb);
     assert_eq!(outcome.status, STATUS_INVALID_DEVICE_STATE);
     assert_eq!(usb.interrupt_pipe, None);
-    assert!(!usb.calls.iter().any(|c| c.starts_with("ConfigContinuousReader")));
+    assert!(
+        !usb.calls
+            .iter()
+            .any(|c| c.starts_with("ConfigContinuousReader"))
+    );
     assert!(!state.reader_configured());
 }
 
@@ -442,11 +482,9 @@ fn setup_packets() {
 
 #[test]
 fn type4_short_response_sends_zero_padding() {
-    // B1 (P2): the TYPE4/5 buffer is 4 zeroed bytes, so a 1-byte GET answer leaves bytes 1..3 zero
-    // before the mode byte is patched in.
     let state = DeviceState::new();
     state.set_config_row(lookup_config_row(0x0272));
-    state.set_button_report_on(true); // as after PrepareHardware
+    state.set_button_report_on(true);
     let mut usb = FakeUsb {
         reg: [0x02, 0x00, 0x5a, 0xa5, 0, 0, 0, 0],
         resp: 1,
@@ -475,7 +513,6 @@ fn type4_short_response_sends_zero_padding() {
 #[test]
 fn mt2_golden_vectors() {
     let c = cfg(Family::Mt2);
-    // finger bytes, X, Y, ID, Tip, Conf
     for (bytes, x, y, id, tip, conf) in [
         ("000000001020000013", 3678, 2479, 3, true, true),
         ("01000000 10ac000002", 3679, 2479, 2, true, true),
@@ -483,7 +520,6 @@ fn mt2_golden_vectors() {
         ("ffffff03 304000 0001", 3677, 2480, 1, true, true),
         ("62f19a02 2030000004", 0, 5065, 4, true, true),
         ("00e0ff01 0101000000", 3678, 0, 0, true, true),
-        // Y13 = -4096 maps to the upper edge.
         ("00000002 0101000000", 3678, 5065, 0, true, true),
     ] {
         let raw = hex(&bytes.replace(' ', ""));
@@ -506,12 +542,14 @@ fn mt2_golden_vectors() {
 #[test]
 fn wellspring_golden_vectors() {
     let c = cfg(Family::Ws3);
+    // Step 2 (A-2.2 / A-2.4): Confidence is `major < 2500 && minor < 2500` (minor == 0 stays
+    // confident), and X/Y clamp to WS3's 0..=9626 and 0..=6775 logical spans.
     for (abs_x, abs_y, major, minor, x, y, tip, conf) in [
         (0_i16, 0_i16, 100_i16, 1_i16, 4460_u16, 6700_u16, true, true),
-        (-4460, 6700, 99, 0, 0, 0, false, false),
-        (-5000, 7000, -5, -1, 0, 0, false, false),
+        (-4460, 6700, 99, 0, 0, 0, false, true),
+        (-5000, 7000, -5, -1, 0, 0, false, true),
         (5166, -75, 150, 30, 9626, 6775, true, true),
-        (0x7FFF, -0x8000, 0x4000, 2, 37227, 39468, true, true),
+        (0x7FFF, -0x8000, 0x4000, 2, 9626, 6775, true, false),
     ] {
         let mut finger = [0_u8; 28];
         finger[2..4].copy_from_slice(&abs_x.to_le_bytes());
@@ -534,8 +572,7 @@ fn wellspring_golden_vectors() {
 }
 
 #[test]
-fn type4_frame_vector() {
-    // Spec 7.6 frame-level vector (WS9, 106 bytes, two fingers, button), ScanTime forced to 0xFF.
+fn type4_frame_vector_and_liftoff() {
     let mut packet = [0_u8; 106];
     packet[31] = 1;
     for (offset, value) in [
@@ -550,20 +587,38 @@ fn type4_frame_vector() {
     ] {
         packet[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
     }
-    let report = build_report(cfg(Family::Ws9), &packet, true, true, 0xff);
+    let mut contacts = ContactTracker::new();
+    let report = build_report(cfg(Family::Ws9), &packet, true, true, 0xff, &mut contacts);
+    // Finger 0 is active (flags 03, ID 0, X 0x1340, Y 0x19cb); finger 1 is hover (major 100 < 200).
     let expected = concat!(
-        "05 03 00 00 00 00 40 13 cb 19 00 01 00 00 00 00 00 00 00 00 00 00 00 00 00",
-        "00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ff 00 02 01"
+        "05 03 00 00 00 00 40 13 cb 19 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00",
+        "00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ff 00 01 01"
     )
     .replace(' ', "");
     assert_eq!(to_hex(&report.to_bytes()), expected);
+
+    // Header-only empty frame synthesizes a single TipSwitch=0 liftoff frame for finger 0.
+    let liftoff = build_report(cfg(Family::Ws9), &[0_u8; 46], true, false, 0x100, &mut contacts);
+    assert_eq!(liftoff.contact_count, 1);
+    assert_eq!(
+        liftoff.contacts[0],
+        PtpContact {
+            confidence: true,
+            tip_switch: false,
+            contact_id: 0,
+            x: 0x1340,
+            y: 0x19cb,
+        }
+    );
+    let after = build_report(cfg(Family::Ws9), &[0_u8; 46], true, false, 0x101, &mut contacts);
+    assert_eq!(after.contact_count, 0);
 }
 
 #[test]
 fn report_with_surface_off_is_zero() {
-    // B13 (P2): with the surface off, C sends garbage contacts; the port sends zeros.
     let packet = [0xff_u8; 30 + 28];
-    let report = build_report(cfg(Family::Ws3), &packet, false, false, 7);
+    let mut contacts = ContactTracker::new();
+    let report = build_report(cfg(Family::Ws3), &packet, false, false, 7, &mut contacts);
     let mut expected = [0_u8; 50];
     expected[0] = 0x05;
     expected[46] = 7;
@@ -575,7 +630,10 @@ fn input_scan_time_uses_the_cached_qpc_frequency() {
     let state = started(0x0272);
     let mut usb = FakeUsb::default();
     let frequency = 24_000_000;
-    assert_eq!(d0_entry(&state, &mut usb, || frequency).status, STATUS_SUCCESS);
+    assert_eq!(
+        d0_entry(&state, &mut usb, || frequency).status,
+        STATUS_SUCCESS
+    );
     state.set_wellspring_mode_on(true);
     let packet = [0_u8; 46];
     let mut queue = FakeQueue::with_lengths(&[50; 3]);
@@ -590,18 +648,19 @@ fn input_scan_time_uses_the_cached_qpc_frequency() {
     }
 }
 
-/// `SET_FEATURE` 0x06 `[06, bits]` (bit 0 Surface Switch, bit 1 Button Switch) for each combination,
-/// then a WS3 frame with one contact and the button down.
 #[test]
 fn selective_reporting_shapes_the_input_report() {
     let state = started(0x0236);
     let mut usb = FakeUsb::default();
-    assert_eq!(d0_entry(&state, &mut usb, || 10_000_000).status, STATUS_SUCCESS);
+    assert_eq!(
+        d0_entry(&state, &mut usb, || 10_000_000).status,
+        STATUS_SUCCESS
+    );
     state.set_wellspring_mode_on(true);
     let mut packet = vec![0_u8; 30 + 28];
-    packet[15] = 1; // button
-    packet[30 + 2..30 + 4].copy_from_slice(&1000_i16.to_le_bytes()); // X
-    packet[30 + 16..30 + 18].copy_from_slice(&200_i16.to_le_bytes()); // touch major: tip
+    packet[15] = 1;
+    packet[30 + 2..30 + 4].copy_from_slice(&1000_i16.to_le_bytes());
+    packet[30 + 16..30 + 18].copy_from_slice(&200_i16.to_le_bytes());
     for (bits, contacts, button) in [(0_u8, 0_u8, 0_u8), (1, 1, 0), (2, 0, 1), (3, 1, 1)] {
         let mut req = FakeReq::new(vec![0x06, bits], 6, 0xa5);
         assert_eq!(
@@ -622,9 +681,6 @@ fn selective_reporting_shapes_the_input_report() {
     }
 }
 
-/// UM-B10 (P3): Windows turns both selective-reporting switches off, the device is suspended and resumed.
-/// `D0Entry` still switches the trackpad into multitouch (Wellspring) mode, so turning the switches back
-/// on brings the contacts back without an input-mode report.
 #[test]
 fn d0_entry_switches_the_mode_after_selective_reporting_off() {
     let state = started(0x0236);
@@ -635,7 +691,10 @@ fn d0_entry_switches_the_mode_after_selective_reporting_off() {
     };
     state.set_wellspring_mode_on(true);
     let mut req = FakeReq::new(vec![0x06, 0x00], 6, 0xa5);
-    assert_eq!(set_feature(&state, &mut req, &mut usb), IoctlOutcome::success(2));
+    assert_eq!(
+        set_feature(&state, &mut req, &mut usb),
+        IoctlOutcome::success(2)
+    );
     assert!(!state.is_button_report_on() && !state.is_surface_report_on());
 
     assert_eq!(d0_exit(&state, &mut usb).status, STATUS_SUCCESS);
@@ -650,7 +709,10 @@ fn d0_entry_switches_the_mode_after_selective_reporting_off() {
     );
 
     let mut req = FakeReq::new(vec![0x06, 0x03], 6, 0xa5);
-    assert_eq!(set_feature(&state, &mut req, &mut usb), IoctlOutcome::success(2));
+    assert_eq!(
+        set_feature(&state, &mut req, &mut usb),
+        IoctlOutcome::success(2)
+    );
     let mut packet = vec![0_u8; 30 + 28];
     packet[30 + 16..30 + 18].copy_from_slice(&200_i16.to_le_bytes());
     let mut queue = FakeQueue::with_lengths(&[50]);
@@ -689,7 +751,12 @@ fn short_set_feature_reports_leave_the_device_unchanged() {
     state.set_qual_levels(1, 2, 3);
     let before = state.snapshot();
     let mut usb = FakeUsb::default();
-    for (id, bytes) in [(4, vec![4]), (6, vec![6]), (9, vec![9, 7]), (9, vec![9, 7, 8])] {
+    for (id, bytes) in [
+        (4, vec![4]),
+        (6, vec![6]),
+        (9, vec![9, 7]),
+        (9, vec![9, 7, 8]),
+    ] {
         let mut req = FakeReq::new(bytes, id, 0xa5);
         assert_eq!(
             set_feature(&state, &mut req, &mut usb),
@@ -702,7 +769,6 @@ fn short_set_feature_reports_leave_the_device_unchanged() {
 
 #[test]
 fn set_feature_input_mode_other_values_only_read() {
-    // Modes other than 0/3 still issue the GET, then report Information 2.
     let state = started(0x0265);
     let mut usb = FakeUsb {
         reg: [0x02, 0x01, 0x5a, 0xa5, 0, 0, 0, 0],
@@ -732,7 +798,10 @@ fn get_string_edge_cases() {
     for (source, expected) in [
         (Vec::new(), vec![0, 0]),
         (vec![0x42, 0, 0, 0], vec![0x42, 0, 0, 0]),
-        (common::FakeStrings::utf16("Apple Inc."), common::FakeStrings::utf16("Apple Inc.\0")),
+        (
+            common::FakeStrings::utf16("Apple Inc."),
+            common::FakeStrings::utf16("Apple Inc.\0"),
+        ),
     ] {
         for len in [expected.len() - 1, expected.len(), expected.len() + 7] {
             let mut req = FakeReq::new(vec![0x0e, 0, 0x09, 0x04], len, 0xa5);

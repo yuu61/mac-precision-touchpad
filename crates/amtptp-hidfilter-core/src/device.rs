@@ -242,7 +242,8 @@ pub struct DeviceSnapshot {
     /// delivers the multitouch reports on. It replaces C's `IsHidIoDetourCompleted` and
     /// `HidIoTarget != NULL` (the HIDCLASS detour is gone, `bth`).
     pub source_open: bool,
-    /// `PtpInputOn` (written by `SET_FEATURE` 0x04, never read: HF-B20).
+    /// `PtpInputOn`: written by `SET_FEATURE` 0x04 (`0x03` = TRUE, `0x00` = FALSE); gates PTP input
+    /// reporting via [`DeviceState::effective_reporting`].
     pub ptp_input_on: bool,
     /// `PtpReportTouch`: the Surface Switch of `SET_FEATURE` 0x06; the input report honours it (P3 fix of
     /// HF-B20: C never read it).
@@ -342,10 +343,10 @@ impl Default for DeviceState {
 }
 
 impl DeviceState {
-    /// All fields zero / FALSE except the two selective-reporting switches, which start on
-    /// ([`SelectiveReportBits::POWER_ON`]): the state after `PtpFilterCreateDevice` (KMDF zero-fills the
-    /// context and the C code then sets the IDs to 0 and `DeviceConfigured = FALSE` again; C left the
-    /// switches FALSE, which it never read).
+    /// All fields zero / FALSE except `ptp_input_on` and the two selective-reporting switches, which
+    /// start on (`true` / [`SelectiveReportBits::POWER_ON`]) so PTP reports flow as soon as the
+    /// multitouch mode switch completes unless the host explicitly switches to mouse mode (`0x04 = 0`)
+    /// or disables switches (`0x06`).
     #[must_use]
     pub const fn new() -> Self {
         Self::with(&DeviceSnapshot {
@@ -360,7 +361,7 @@ impl DeviceState {
             y: Bcm5974Param { min: 0, max: 0 },
             device_configured: false,
             source_open: false,
-            ptp_input_on: false,
+            ptp_input_on: true,
             ptp_report_touch: SelectiveReportBits::POWER_ON.surface_report,
             ptp_report_button: SelectiveReportBits::POWER_ON.button_report,
             qpc_frequency: 0,
@@ -571,7 +572,7 @@ impl DeviceState {
         self.scan_clock.restart(value);
     }
 
-    /// The selective-reporting switches the input report honours.
+    /// The selective-reporting switches configured by `SET_FEATURE` 0x06.
     pub fn selective_reporting(&self) -> SelectiveReportBits {
         SelectiveReportBits {
             surface_report: self.ptp_report_touch.load(Ordering::Relaxed),
@@ -579,9 +580,23 @@ impl DeviceState {
         }
     }
 
-    /// Back to [`SelectiveReportBits::POWER_ON`] (`PrepareHardware`: the state is not kept across a
-    /// power reset).
+    /// Effective input gates combining `ptp_input_on` (`SET_FEATURE` 0x04) with
+    /// [`Self::selective_reporting`] (`SET_FEATURE` 0x06).
+    pub fn effective_reporting(&self) -> SelectiveReportBits {
+        if self.ptp_input_on.load(Ordering::Relaxed) {
+            self.selective_reporting()
+        } else {
+            SelectiveReportBits {
+                surface_report: false,
+                button_report: false,
+            }
+        }
+    }
+
+    /// Back to power-on enabled state (`ptp_input_on = true` and [`SelectiveReportBits::POWER_ON`];
+    /// `PrepareHardware`).
     pub(crate) fn reset_selective_reporting(&self) {
+        self.ptp_input_on.store(true, Ordering::Relaxed);
         self.apply_feature_change(FeatureChange::SelectiveReporting {
             button_report: SelectiveReportBits::POWER_ON.button_report,
             surface_report: SelectiveReportBits::POWER_ON.surface_report,
@@ -672,6 +687,7 @@ mod tests {
         assert_eq!(
             DeviceState::new().snapshot(),
             DeviceSnapshot {
+                ptp_input_on: true,
                 ptp_report_touch: true,
                 ptp_report_button: true,
                 ..DeviceSnapshot::default()

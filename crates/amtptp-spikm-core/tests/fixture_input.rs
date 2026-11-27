@@ -6,22 +6,25 @@
 //! `WdfMemoryCopyFromBuffer`) is the KMDF model from the fixture README.
 //!
 //! Decisions checked here:
-//! - SPI-B5 (P2): the report is zero-initialized, so it must equal `out` (the 0x00 stack-paint run), and
-//!   every bit flagged in `undef` must be 0.
+//! - SPI-B5 (P2): the report is zero-initialized, so every bit flagged in `undef` must be 0.
 //! - P3 (SPI-B6/B9): a frame whose valid bytes do not hold every finger record `NumOfFingers` declares is
 //!   rejected with `STATUS_DEVICE_DATA_ERROR` before the clock is sampled (C delivered it, reading the
 //!   missing fingers as stale or zero bytes). Every `b9=1` record (C read stale bytes past `len`) is such
 //!   a frame. These records are counted, not compared with the C bytes.
-//! - P3 (SPI-B6): `ContactCount` is `min(NumOfFingers, 5)`, so the C byte is clamped before comparing.
+//! - Step 2 (A-2.1 / A-2.4): on frame 0 (`ContactTracker::new()`), hover records (`pressure <= 0`) are
+//!   ignored, active contacts are packed into slots `0..count` (up to 5), and X/Y are clamped to
+//!   `0..=(max - min)`. Records unaffected by those fixes are also checked byte-for-byte against `out`.
 //! - Each isolated frame begins a new reporting session, so its `ScanTime` is zero.
 
 #![cfg(test)]
 
 mod common;
 
-use amtptp_spikm_core::device::{APPLE_VENDOR_ID, Family, family_for_product, lookup_trackpad};
-use amtptp_spikm_core::runtime::{DeviceRuntime, DeviceStatus, ReadTracker};
+use amtptp_spikm_core::device::{
+    APPLE_VENDOR_ID, Family, SpiTrackpadInfo, family_for_product, lookup_trackpad,
+};
 use amtptp_spikm_core::input::{MAX_FILLED_CONTACTS, packet_len_for};
+use amtptp_spikm_core::runtime::{ContactTracker, DeviceRuntime, DeviceStatus, ReadTracker};
 use amtptp_spikm_core::status::{STATUS_BUFFER_TOO_SMALL, STATUS_DEVICE_DATA_ERROR, STATUS_SUCCESS};
 use amtptp_spikm_core::wire::LOWER_READ_BUFFER_LEN;
 use common::{Tally, load, prefill, wdf_failures};
@@ -52,6 +55,108 @@ fn undef_rule(num_of_fingers: u8) -> [u8; REPORT_LEN] {
     mask
 }
 
+/// Independent Step 2 specification for frame-0 SPI report encoding, plus whether C's single-frame
+/// output was unaffected by hover filtering and upper-bound clamping.
+fn expected_frame0_report(buffer: &[u8], info: &SpiTrackpadInfo) -> ([u8; REPORT_LEN], bool) {
+    assert!(buffer.len() > 30);
+    let mut report = [0_u8; REPORT_LEN];
+    report[0] = 0x05;
+    report[29] = buffer[1];
+    let declared = usize::from(buffer[30]);
+    let x_span = i32::from(info.x_max) - i32::from(info.x_min);
+    let y_span = i32::from(info.y_max) - i32::from(info.y_min);
+    let mut count = 0_usize;
+    let mut matches_c = true;
+    for i in 0..declared {
+        let finger = &buffer[(46 + 30 * i)..(76 + 30 * i)];
+        assert!(finger.len() > 27);
+        let raw_x = i16::from_le_bytes([finger[4], finger[5]]);
+        let raw_y = i16::from_le_bytes([finger[6], finger[7]]);
+        let major = i16::from_le_bytes([finger[18], finger[19]]);
+        let minor = i16::from_le_bytes([finger[20], finger[21]]);
+        let pressure = i16::from_le_bytes([finger[26], finger[27]]);
+        let unclamped_x = (i32::from(raw_x) - i32::from(info.x_min)).max(0);
+        let unclamped_y = (i32::from(info.y_max) - i32::from(raw_y)).max(0);
+        if i < usize::from(MAX_FILLED_CONTACTS)
+            && (pressure <= 0 || unclamped_x > x_span || unclamped_y > y_span)
+        {
+            matches_c = false;
+        }
+        if pressure <= 0 || count >= usize::from(MAX_FILLED_CONTACTS) {
+            continue;
+        }
+        let x = unclamped_x.min(x_span) as u16;
+        let y = unclamped_y.min(y_span) as u16;
+        let conf = major < 2500 && minor < 2500;
+        let slot = &mut report[(1 + 5 * count)..(6 + 5 * count)];
+        assert!(slot.len() > 4);
+        slot[0] = u8::from(conf) | 0x02 | ((count as u8) << 2);
+        slot[1..3].copy_from_slice(&x.to_le_bytes());
+        slot[3..5].copy_from_slice(&y.to_le_bytes());
+        count += 1;
+    }
+    report[CONTACT_COUNT_OFFSET] = count as u8;
+    (report, matches_c)
+}
+
+fn verify_output_and_undef(
+    r: &common::Record,
+    ctx: &str,
+    buffer: &[u8],
+    info: &SpiTrackpadInfo,
+    status: i32,
+    out: &[u8],
+) -> bool {
+    assert!(!r.has("out_tail0"), "{ctx}");
+    let num_of_fingers = buffer[30];
+    let mut c_expected = common::hex(r.get("out"));
+    let mut exact_c_match = false;
+    if status == STATUS_SUCCESS {
+        let (spec_report, matches_c) = expected_frame0_report(buffer, info);
+        assert_eq!(&out[..REPORT_LEN], &spec_report, "{ctx}: spec report");
+        assert_eq!(
+            &out[REPORT_LEN..],
+            &c_expected[REPORT_LEN..],
+            "{ctx}: trailing prefill"
+        );
+        c_expected[SPI_PTP_REPORT_SCAN_TIME_OFFSET..SPI_PTP_REPORT_SCAN_TIME_OFFSET + 2]
+            .copy_from_slice(&0_u16.to_le_bytes());
+        assert_eq!(c_expected[CONTACT_COUNT_OFFSET], num_of_fingers, "{ctx}: C count");
+        c_expected[CONTACT_COUNT_OFFSET] = num_of_fingers.min(MAX_FILLED_CONTACTS);
+        if matches_c {
+            assert_eq!(out, c_expected, "{ctx}: exact C match");
+            exact_c_match = true;
+        }
+    } else {
+        assert_eq!(out, c_expected, "{ctx}: out");
+    }
+
+    // SPI-B5 (P2): every reserved bit in contact byte 0 and every unused contact slot is zero.
+    let actual_count = if status == STATUS_SUCCESS {
+        out[CONTACT_COUNT_OFFSET]
+    } else {
+        0
+    };
+    if let Some(undef) = r.opt("undef").filter(|u| *u != "-") {
+        let undef = common::hex(undef);
+        assert_eq!(undef.len(), out.len(), "{ctx}: undef length");
+        let n = r.bytes("in").get(30).copied().unwrap_or(0);
+        assert_eq!(undef[..REPORT_LEN], undef_rule(n), "{ctx}: undef rule");
+        assert!(undef[REPORT_LEN..].iter().all(|&b| b == 0), "{ctx}");
+        if status != STATUS_SUCCESS {
+            for (o, m) in out.iter().zip(&undef) {
+                assert_eq!(o & m, 0, "{ctx}: uninitialized bit not zero");
+            }
+        }
+    }
+    if status == STATUS_SUCCESS {
+        for (o, m) in out[..REPORT_LEN].iter().zip(undef_rule(actual_count)) {
+            assert_eq!(o & m, 0, "{ctx}: reserved/unused bit not zero");
+        }
+    }
+    exact_c_match
+}
+
 struct Expect {
     file: &'static str,
     records: usize,
@@ -70,6 +175,7 @@ fn replay(e: &Expect) -> Tally {
     assert_eq!(recs.len(), e.records, "{}: record count", e.file);
     let mut tally = Tally::default();
     let mut b9 = 0_usize;
+    let mut exact_c_matches = 0_usize;
     for r in &recs {
         let ctx = format!("{}:{} {}", e.file, r.line, r.case());
         let pid = r.hex16("pid");
@@ -98,7 +204,8 @@ fn replay(e: &Expect) -> Tally {
         buffer[..input.len()].copy_from_slice(&input);
         let len: u64 = r.dec("len");
         let mut qpc_calls = 0_u32;
-        let result = rt.complete_lower_read(info, len, &buffer, || {
+        let mut contacts = ContactTracker::new();
+        let result = rt.complete_lower_read(info, &mut contacts, len, &buffer, || {
             qpc_calls += 1;
             qpcf
         });
@@ -160,44 +267,11 @@ fn replay(e: &Expect) -> Tally {
             assert_eq!(in_ops as u32, qpc_calls, "{ctx}: QPC calls in ops");
         }
 
-        assert!(!r.has("out_tail0"), "{ctx}");
-        let mut expected = common::hex(r.get("out"));
-        if status == STATUS_SUCCESS {
-            expected[SPI_PTP_REPORT_SCAN_TIME_OFFSET..SPI_PTP_REPORT_SCAN_TIME_OFFSET + 2]
-                .copy_from_slice(&0_u16.to_le_bytes());
-            // P3 (SPI-B6): C reported the raw NumOfFingers.
-            assert_eq!(expected[CONTACT_COUNT_OFFSET], num_of_fingers, "{ctx}: C count");
-            expected[CONTACT_COUNT_OFFSET] = num_of_fingers.min(MAX_FILLED_CONTACTS);
-        }
-        assert_eq!(out, expected, "{ctx}: out");
-
-        // SPI-B5 (P2): every bit C leaves uninitialized is zero in our report.
-        match r.opt("undef").filter(|u| *u != "-") {
-            Some(undef) => {
-                let undef = common::hex(undef);
-                assert_eq!(undef.len(), outlen, "{ctx}: undef length");
-                let n = input.get(30).copied().unwrap_or(0);
-                let rule = undef_rule(n);
-                assert_eq!(undef[..REPORT_LEN], rule, "{ctx}: undef rule");
-                assert!(undef[REPORT_LEN..].iter().all(|&b| b == 0), "{ctx}");
-                for (o, m) in out.iter().zip(&undef) {
-                    assert_eq!(o & m, 0, "{ctx}: uninitialized bit not zero");
-                }
-            }
-            None if status == STATUS_SUCCESS => {
-                // Random records omit `undef`; it follows the same rule, so the masked bits must be 0.
-                let n = if len as u32 as i32 >= 46 {
-                    input.get(30).copied().unwrap_or(0)
-                } else {
-                    0
-                };
-                for (o, m) in out.iter().zip(undef_rule(n)) {
-                    assert_eq!(o & m, 0, "{ctx}: uninitialized bit not zero");
-                }
-            }
-            None => {}
-        }
+        exact_c_matches += usize::from(verify_output_and_undef(
+            r, &ctx, &buffer, info, status, &out,
+        ));
     }
+    assert!(exact_c_matches > 0, "{}: expected unaffected C-matching records", e.file);
     assert_eq!(b9, e.b9, "{}: b9 records", e.file);
     assert_eq!(tally.get(FW_RETRIEVE), e.fw_retrieve, "{}", e.file);
     assert_eq!(tally.get(FW_COPY), e.fw_copy, "{}", e.file);

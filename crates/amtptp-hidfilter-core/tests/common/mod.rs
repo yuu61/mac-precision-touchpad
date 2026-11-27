@@ -9,7 +9,7 @@ use core::fmt::Write as _;
 use std::collections::VecDeque;
 
 use amtptp_hidfilter_core::{
-    AddDeviceIo, Bcm5974Param, DeviceSnapshot, FailedAction, FilterIo, NtStatus,
+    AddDeviceIo, Bcm5974Param, ContactTracker, DeviceSnapshot, FailedAction, FilterIo, NtStatus,
     ReadTicket, ReadTracker, XferBuffer, XferPacket, XferPacketMut,
 };
 
@@ -199,11 +199,11 @@ pub fn started(vid: u16, hdr: usize) -> DeviceSnapshot {
         },
         device_configured: true,
         source_open: true,
+        ptp_input_on: true,
         // Both selective-reporting switches on: what the C input path behaved like (it ignored them).
         ptp_report_touch: true,
         ptp_report_button: true,
         qpc_frequency: 10_000_000,
-        ..DeviceSnapshot::default()
     }
 }
 
@@ -306,6 +306,8 @@ pub struct Mock {
     pub sends: Vec<Send>,
     /// The lower-read tracker (not in the C oracle, so its calls are not recorded in `ev`).
     pub tracker: ReadTracker<usize>,
+    /// Per-device contact lifecycle tracker (not in the C oracle).
+    pub contacts: ContactTracker,
     /// `WdfTimerStop` calls (not in the C oracle).
     pub timer_stops: usize,
     /// Reads `cancel_in_flight_reads` cancelled (not in the C oracle).
@@ -555,6 +557,10 @@ impl FilterIo for Mock {
 
     fn with_reads<R, F: FnOnce(&mut ReadTracker<usize>) -> R>(&mut self, f: F) -> R {
         f(&mut self.tracker)
+    }
+
+    fn with_contacts<R, F: FnOnce(&mut ContactTracker) -> R>(&mut self, f: F) -> R {
+        f(&mut self.contacts)
     }
 
     fn cancel_in_flight_reads(&mut self) -> usize {

@@ -181,9 +181,14 @@ impl AddDeviceIo for AddDevice {
         // The data source's locks (not in C), created the same way.
         // SAFETY: as above.
         let lock_status = unsafe {
-            let status = (*context).strings.create(device.cast());
+            let status = (*context).contacts.create(device.cast());
             if NT_SUCCESS(status) {
-                (*context).pending_link.create(device.cast())
+                let status = (*context).strings.create(device.cast());
+                if NT_SUCCESS(status) {
+                    (*context).pending_link.create(device.cast())
+                } else {
+                    status
+                }
             } else {
                 status
             }
@@ -389,6 +394,8 @@ unsafe extern "C" fn evt_device_prepare_hardware(
     // SAFETY: PnP callback of a live device of this driver.
     let ctx = unsafe { device_context(device) };
     let status = prepare_hardware(&ctx.state);
+    // SAFETY: live device context; spinlock created in `create_device`.
+    unsafe { ctx.contacts.with(amtptp_hidfilter_core::ContactTracker::reset) };
     tlg::write_event!(
         PROVIDER,
         "PrepareHardware",

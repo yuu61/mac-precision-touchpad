@@ -26,7 +26,7 @@ use core::ptr::null_mut;
 
 use amtptp_hidfilter_core::bth::{PADDED_REPORT_LEN, PaddedReport, unpad_report};
 use amtptp_hidfilter_core::{
-    FailedAction, FeatureChange, FilterIo, HID_XFER_PACKET_SIZE, LowerReadClass,
+    ContactTracker, FailedAction, FeatureChange, FilterIo, HID_XFER_PACKET_SIZE, LowerReadClass,
     LowerReadOutcome, NtStatus, ReadTicket, ReadTracker, STATUS_INVALID_DEVICE_REQUEST,
     STATUS_INVALID_DEVICE_STATE, XferBuffer, XferPacket, XferPacketMut, complete_lower_read,
     decode_set_feature,
@@ -523,6 +523,12 @@ impl FilterIo for Filter<'_> {
         // caller runs at <= DISPATCH_LEVEL; `f` only touches the tracker and atomics (the core's
         // contract), so it neither re-enters the lock nor runs a callback of this driver.
         unsafe { self.ctx.reads.with(f) }
+    }
+
+    fn with_contacts<R, F: FnOnce(&mut ContactTracker) -> R>(&mut self, f: F) -> R {
+        // SAFETY: the lock was created in `create_device` before any callback could run; every
+        // caller runs at <= DISPATCH_LEVEL; `f` only touches the contact tracker.
+        unsafe { self.ctx.contacts.with(f) }
     }
 
     fn cancel_in_flight_reads(&mut self) -> usize {

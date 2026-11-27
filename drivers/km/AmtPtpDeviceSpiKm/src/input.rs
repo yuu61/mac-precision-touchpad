@@ -446,12 +446,18 @@ unsafe fn serve_oldest_read(
 
     let trackpad = context.config.trackpad_info();
     // Lossless: ULONG_PTR is u64 on x64/ARM64.
-    let result = context.runtime.complete_lower_read(
-        &trackpad,
-        information as u64,
-        packet,
-        query_performance_counter,
-    );
+    // SAFETY: `context` belongs to our live device; IRQL <= DISPATCH_LEVEL; pure report assembly.
+    let result = unsafe {
+        context.with_contacts(|runtime, contacts| {
+            runtime.complete_lower_read(
+                &trackpad,
+                contacts,
+                information as u64,
+                packet,
+                query_performance_counter,
+            )
+        })
+    };
     match result {
         Ok(report) => {
             let status = copy_report(&ptp_request, &report);

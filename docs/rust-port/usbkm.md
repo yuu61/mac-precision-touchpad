@@ -31,14 +31,14 @@ The policy terms come from the [behavior policy](README.md#behavior-policy):
 | KM-B11 | PRESERVED (P1) status, FIXED (P3) condition | `lifecycle::d0_entry` ignores the wellspring-ON status. The switch runs before the reader starts, now unconditionally: C's condition `PtpReportButton \|\| IsWellspringModeOn` was always true while SET_FEATURE 0x06 was ignored, and would otherwise leave the device in mouse mode after a resume with the button switch off. |
 | KM-B12 | FIXED (P2) *glue* | `WdfPdoInitAllowForwardingRequestToParent` (a PDO-only API, rejected by KMDF on a filter `DeviceInit`, with a verifier break) is not called. It has no other effect. The wire test asserts the DeviceAdd call list without it. |
 | KM-B13 | PRESERVED (P1) | GET/SET_FEATURE complete with Information 0 (`feature::get_feature` / `set_feature` return `Completion::status`). |
-| KM-B14 | PRESERVED (P3) values, FIXED (P2) read | Mode values other than 0 and 3 succeed with no action. `feature::input_mode` reads byte 1 only when it lies inside `reportBufferLen`; otherwise it uses 0, giving `STATUS_NOT_SUPPORTED` and no transfer. C read past the report (fixture tag `ub_oob_read`). |
+| KM-B14 | FIXED (Step 2) | `SET_FEATURE` 0x04 with `reportBufferLen < 2` returns `STATUS_INVALID_BUFFER_SIZE` with no transfer. Mode 0 (`PTP_COLLECTION_MOUSE`) switches Wellspring mode off when on and completes with `STATUS_SUCCESS` (or the transfer status); mode 3 switches Wellspring mode on when off; other mode values succeed with no action. Packets arriving while Wellspring mode is off are discarded without dequeuing `READ_REPORT` (`input::process_packet`). |
 | KM-B15 | FIXED (P3) | SET_FEATURE 0x06 sets `PtpReportTouch` from bit 0 (Surface Switch) and `PtpReportButton` from bit 1 (Button Switch) of byte 1 (`feature::selective_report_bits`); the reader completion honours them. A report without byte 1 changes nothing. |
-| KM-B16 | FIXED (P2) *glue* | A NULL `reportBuffer` is passed to the core as an empty slice. GET 0x07/0x08 then returns `STATUS_INVALID_BUFFER_SIZE`, which is the C result whenever C does not crash. SET 0x04 treats it as mode 0. |
+| KM-B16 | FIXED (P2) *glue* | A NULL `reportBuffer` is passed to the core as an empty slice. GET 0x07/0x08 and SET 0x04 then return `STATUS_INVALID_BUFFER_SIZE`. |
 | KM-B17 | FIXED (Step 2) | `get_device_attributes` writes the complete 32-byte structure with zeroed reserved fields. |
-| KM-B18 | PRESERVED (P1) | ContactID = slot index (`u32::from(i as u8)`). |
-| KM-B19 | PRESERVED (P1) | X/Y are clamped below at 0 only; Y is inverted (`y.max - abs_y`). |
+| KM-B18 | FIXED (Step 2) | `ptp_hid::contact_tracker::ContactTracker` maintains persistent `ContactID`s by nearest-neighbor matching, synthesizes 1-frame `TipSwitch = 0` liftoff reports, and latches `Confidence = 0` palms (`major >= 2500 \|\| minor >= 2500`). |
+| KM-B19 | FIXED (Step 2) | X and Y are clamped to `0..=(max - min)`; Y is inverted (`y.max - abs_y`). |
 | KM-B20 | FIXED (P2) stale handle, FIXED (P3) selection | `lifecycle::select_interrupt_interface` resets `InterruptPipe` before the selection and takes the first interrupt **IN** pipe. A restart that finds none fails with `STATUS_INVALID_DEVICE_STATE`; C kept the deleted pipe handle, a use-after-free, and took the first interrupt pipe whatever its direction. |
-| KM-B21 | PRESERVED (P1) | The descriptor bytes are reproduced exactly (`hid::REPORT_DESCRIPTOR` = `ptp_hid::descriptor::report_descriptor_u32_id(T2_AXES)`): physical maxima 1300/850, COLLECTION_2 without the unit reset, and Contact ID Logical Max `27 FF FF FF FF`. |
+| KM-B21 | FIXED (Step 2) | Clean 511-byte report descriptors (`hid::REPORT_DESCRIPTOR` for 15/16-inch and fallback, `hid::REPORT_DESCRIPTOR_T2_13` `12992x7855` / `1352x836` for 13-inch `0x027a`/`0x027b`), with `GLOBAL_RESET` after all five finger collections and `Scan Time`, and `Input Mode` logical maximum `3`. |
 | KM-B22 | PRESERVED (P3) *glue* | `FILETYPE VFT_APP` in the version resource is a driver-crate resource matter, not core logic. |
 | KM-B23 | PRESERVED (P1) *packaging* | Duplicate INF hardware IDs are an INF matter (`packaging/AmtPtpDevice.inx`). |
 | KM-B24 | PRESERVED (P1) *glue* | `Irp->UserBuffer` is checked only for NULL (`feature::*` closure returns `None`). The glue builds the report slice from `(reportBuffer, reportBufferLen)` and trusts hidclass. |
@@ -167,8 +167,8 @@ The KMDF 1.23 glue. It makes the WDF calls the C code makes, in the C order, and
 
 ### WDF call fidelity
 
-- **Completion.** `queue::complete` calls `WdfRequestSetInformation` only on the paths where the C calls it: 9, 493,
-  32 and 50 bytes, which are exactly the non-zero `Completion::information` values. It then calls
+- **Completion.** `queue::complete` calls `WdfRequestSetInformation` only on the paths where the C calls it: 9, 511,
+  32 and 50 bytes, which are the non-zero `Completion::information` values. It then calls
   `WdfRequestComplete(status)`. Every other path keeps the Information the IRP arrived with, as in C. The driver does
   not use `WdfRequestCompleteWithInformation(status, 0)`, which would overwrite that value.
 - **Framework copies.** The descriptors and the READ_REPORT go through `WdfRequestRetrieveOutputMemory` and

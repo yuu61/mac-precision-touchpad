@@ -6,8 +6,9 @@
 //! `X` @4, `Y` @6, `TouchMajor` @18, `TouchMinor` @20 and `Pressure` @26.
 
 use ptp_hid::common::PTP_CONTACT_SLOTS;
+use ptp_hid::contact_tracker::ContactTracker;
 use ptp_hid::feature::SelectiveReportBits;
-use ptp_hid::input::{SPI_PTP_REPORT_LEN, SpiPtpContact, SpiPtpReport};
+use ptp_hid::input::{PtpContact, SPI_PTP_REPORT_LEN, SpiPtpReport};
 
 use crate::device::SpiTrackpadInfo;
 use crate::status::{NtStatus, STATUS_DEVICE_DATA_ERROR};
@@ -173,45 +174,33 @@ pub const fn lower_read_length(information: u64) -> Result<usize, NtStatus> {
     }
 }
 
-/// `(i32)a - (i32)b > 0 ? (USHORT)(a - b) : 0` (int promotion, no overflow, no upper clamp: SPI-B19).
-const fn positive_difference(a: i16, b: i16) -> u16 {
-    let d = a as i32 - b as i32;
-    if d > 0 {
-        // d <= 65535, so the low 16 bits are the value (the C (USHORT) cast).
-        d as u16
-    } else {
+/// Clamps `value - minimum` into `0..=logical_max`.
+const fn bounded_offset(value: i32, minimum: i32, logical_max: i32) -> u16 {
+    let offset = value.saturating_sub(minimum);
+    if offset < 0 {
         0
+    } else if offset > logical_max {
+        logical_max as u16
+    } else {
+        offset as u16
     }
 }
 
-/// Builds the PTP input report from a packet (Input.c:224-264), zero-initialized (P2 fix of SPI-B5: C left
-/// unused contacts and the padding bits as stack garbage).
+/// Builds a tracked PTP input report from a packet, clamping coordinates to the trackpad's logical
+/// span and maintaining persistent `ContactID`s (`0..=4`) plus 1-frame `TipSwitch = 0` liftoff
+/// reports via `contacts`.
 ///
-/// - `ContactCount` = `min(NumOfFingers, 5)` (P3 fix of SPI-B6), `IsButtonClicked` = `ClickOccurred` raw.
-/// - For `i < min(NumOfFingers, 5)`: `ContactID` = `i` (SPI-B7; the descriptor's logical maximum is 4,
-///   P3), X = `X - XMin` if positive else 0,
-///   Y = `YMax - Y` if positive else 0, Tip = `Pressure > 0`, Confidence = `TouchMajor < 2500 &&
-///   TouchMinor < 2500`.
-/// - `ScanTime` = `scan_time`.
-/// - Selective reporting (P3 fix of SPI-B3): with the surface switch off no contact is reported
-///   (`ContactCount` 0); with the button switch off `IsButtonClicked` is 0.
+/// When `!selective.surface_report`, `contacts` is reset and no contacts are emitted.
 #[must_use]
 pub fn build_report(
     packet: &SpiPacket<'_>,
     trackpad: &SpiTrackpadInfo,
     scan_time: u16,
     selective: SelectiveReportBits,
+    contacts: &mut ContactTracker,
 ) -> SpiPtpReport {
-    let filled = if !selective.surface_report {
-        0
-    } else if packet.num_of_fingers() > MAX_FILLED_CONTACTS {
-        MAX_FILLED_CONTACTS
-    } else {
-        packet.num_of_fingers()
-    };
     let mut report = SpiPtpReport {
         scan_time,
-        contact_count: filled,
         is_button_clicked: if selective.button_report {
             packet.click_occurred()
         } else {
@@ -219,23 +208,29 @@ pub fn build_report(
         },
         ..SpiPtpReport::EMPTY
     };
-    for (index, slot) in report
-        .contacts
-        .iter_mut()
-        .enumerate()
-        .take(usize::from(filled))
-    {
+    if !selective.surface_report {
+        contacts.reset();
+        return report;
+    }
+
+    let raw_count = usize::from(packet.num_of_fingers()).min(SPI_MAX_FINGERS);
+    let x_span = i32::from(trackpad.x_max).saturating_sub(i32::from(trackpad.x_min));
+    let y_span = i32::from(trackpad.y_max).saturating_sub(i32::from(trackpad.y_min));
+    let mut decoded = [PtpContact::EMPTY; SPI_MAX_FINGERS];
+    for (index, dst) in decoded.iter_mut().take(raw_count).enumerate() {
         let f = packet.finger(index);
-        *slot = SpiPtpContact {
+        *dst = PtpContact {
             confidence: f.touch_major < CONFIDENCE_TOUCH_LIMIT
                 && f.touch_minor < CONFIDENCE_TOUCH_LIMIT,
             tip_switch: f.pressure > 0,
-            // index < 5, so it fits the 3-bit field.
-            contact_id: index as u8,
-            x: positive_difference(f.x, trackpad.x_min),
-            y: positive_difference(trackpad.y_max, f.y),
+            contact_id: index as u32,
+            x: bounded_offset(i32::from(f.x), i32::from(trackpad.x_min), x_span),
+            y: bounded_offset(i32::from(trackpad.y_max).saturating_sub(i32::from(f.y)), 0, y_span),
         };
     }
+    let tracked = contacts.update_tracked(decoded.get(..raw_count).unwrap_or_default());
+    report.contacts = tracked.to_spi_contacts();
+    report.contact_count = tracked.count;
     report
 }
 
@@ -246,8 +241,9 @@ pub fn report_bytes(
     trackpad: &SpiTrackpadInfo,
     scan_time: u16,
     selective: SelectiveReportBits,
+    contacts: &mut ContactTracker,
 ) -> [u8; SPI_PTP_REPORT_LEN] {
-    build_report(packet, trackpad, scan_time, selective).to_bytes()
+    build_report(packet, trackpad, scan_time, selective, contacts).to_bytes()
 }
 
 /// The valid prefix of a lower read buffer: the first `min(length, buffer.len())` bytes, where `length`

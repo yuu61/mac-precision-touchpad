@@ -6,13 +6,13 @@
 //! - [`common`]: report IDs, PTP constants and usages from `HidCommon.h` / `Hid.h`.
 //! - [`item`]: HID short-item prefix bytes from `HidCommon.h`.
 //! - [`ioctl`]: `CTL_CODE` as a `const fn` and every HID IOCTL code the drivers handle or send.
-//! - [`descriptor`]: `const fn` report-descriptor builders that reproduce all 16 C report descriptors
-//!   byte for byte.
+//! - [`descriptor`]: `const fn` report-descriptor builders for all four drivers.
 //! - [`hidport`]: `HID_DESCRIPTOR` (9 bytes) and `HID_DEVICE_ATTRIBUTES` (32 bytes) byte codecs.
 //! - [`feature`]: feature reports: device caps 0x07, HQA 0x08, input mode 0x04, selective reporting 0x06,
 //!   and the user-mode-app configuration report 0x09.
 //! - [`input`]: input report 0x05 in its two wire shapes: 9-byte contacts (50 bytes) and SPI 5-byte
 //!   contacts (30 bytes).
+//! - [`contact_tracker`]: persistent `ContactID` tracking and single-frame liftoff synthesis.
 //! - [`read_tracker`]: the lower reads a driver has in flight, and the epoch that makes a read issued
 //!   before a suspend stale.
 //! - [`scan_time`]: the per-session Scan Time clock.
@@ -38,8 +38,8 @@
 //! pub static REPORT_DESCRIPTOR: [u8; REPORT_DESCRIPTOR_U32_ID_UMAPP_LEN] =
 //!     report_descriptor_u32_id_umapp(MT2);
 //!
-//! assert_eq!(REPORT_DESCRIPTOR.len(), 516);
-//! assert_eq!(HID_DESCRIPTOR_U32_ID_UMAPP, [0x09, 0x21, 0x00, 0x01, 0x00, 0x01, 0x22, 0x04, 0x02]);
+//! assert_eq!(REPORT_DESCRIPTOR.len(), 534);
+//! assert_eq!(HID_DESCRIPTOR_U32_ID_UMAPP, [0x09, 0x21, 0x00, 0x01, 0x00, 0x01, 0x22, 0x16, 0x02]);
 //!
 //! let mut report = PtpReport { contact_count: 1, ..PtpReport::EMPTY };
 //! report.contacts[0] = PtpContact { confidence: true, tip_switch: true, contact_id: 0, x: 100, y: 200 };
@@ -61,6 +61,7 @@
 
 mod bytes;
 pub mod common;
+pub mod contact_tracker;
 pub mod descriptor;
 pub mod feature;
 pub mod hidport;

@@ -8,8 +8,8 @@ use amtptp_spikm_core::device::{
     SharedDeviceConfig, desired_report_type_value,
 };
 use amtptp_spikm_core::runtime::{
-    D0_EXIT_DRAIN_STATUS, DeviceRuntime, MAX_IN_FLIGHT_READS, RECOVERY_TIMER_PERIOD, ReadTracker,
-    SuspendedReads,
+    ContactTracker, D0_EXIT_DRAIN_STATUS, DeviceRuntime, MAX_IN_FLIGHT_READS,
+    RECOVERY_TIMER_PERIOD, ReadTracker, SuspendedReads,
 };
 use amtptp_spikm_core::wire::{
     DEVICE_INTERFACE_GUID, LOWER_ATTRIBUTES_IOCTL, LOWER_ATTRIBUTES_LEN, LOWER_READ_BUFFER_LEN,
@@ -63,9 +63,10 @@ pub(crate) struct DeviceContext {
     pub(crate) config: SharedDeviceConfig,
     /// `DeviceStatus`, the reporting clock and the PTP feature flags.
     pub(crate) runtime: DeviceRuntime,
-    /// The lower reads in flight and the current epoch (see [`amtptp_spikm_core::runtime`]). Every
-    /// change of `DeviceStatus` and every claim of a lower read happens under this lock.
-    reads: SpinLocked<ReadTracker<LowerRead>>,
+    /// The lower reads in flight, the current epoch, and the active contact tracker (see
+    /// [`amtptp_spikm_core::runtime`]). Every change of `DeviceStatus`, every claim of a lower
+    /// read, and every contact-state update happens under this lock.
+    reads: SpinLocked<(ReadTracker<LowerRead>, ContactTracker)>,
 }
 
 impl DeviceContext {
@@ -79,7 +80,7 @@ impl DeviceContext {
             hid_read_buffer_lookaside: WdfHandle::NULL,
             config: SharedDeviceConfig::new(),
             runtime: DeviceRuntime::new(),
-            reads: SpinLocked::new(ReadTracker::new()),
+            reads: SpinLocked::new((ReadTracker::new(), ContactTracker::new())),
         }
     }
 
@@ -94,7 +95,21 @@ impl DeviceContext {
     {
         // SAFETY: the lock was created in `initialize_device` (caller contract); `f` only touches the
         // runtime and the tracker.
-        unsafe { self.reads.with(|reads| f(&self.runtime, reads)) }
+        unsafe { self.reads.with(|(reads, _)| f(&self.runtime, reads)) }
+    }
+
+    /// Runs `f` with the runtime and the contact tracker while holding the read lock. `f` runs at
+    /// `DISPATCH_LEVEL` and must not send, cancel or complete a request.
+    ///
+    /// # Safety
+    /// The context was set up by [`create_device`] (so the lock exists); IRQL <= `DISPATCH_LEVEL`.
+    pub(crate) unsafe fn with_contacts<R, F>(&self, f: F) -> R
+    where
+        F: FnOnce(&DeviceRuntime, &mut ContactTracker) -> R,
+    {
+        // SAFETY: the lock was created in `initialize_device` (caller contract); `f` only touches the
+        // runtime and the contact tracker.
+        unsafe { self.reads.with(|(_, contacts)| f(&self.runtime, contacts)) }
     }
 }
 
@@ -379,6 +394,8 @@ unsafe extern "C" fn evt_device_prepare_hardware(
 
     // Selective reporting is not kept across a (re)start: report contacts and the button again.
     context.runtime.ptp_settings().reset_selective_reporting();
+    // SAFETY: live device context at PASSIVE_LEVEL.
+    unsafe { context.with_contacts(|_, contacts| contacts.reset()) };
 
     // SAFETY: valid device handle, PASSIVE_LEVEL.
     let desired_report_type = unsafe { query_desired_report_type(device) };
@@ -511,6 +528,8 @@ unsafe extern "C" fn evt_device_d0_entry(
     let Some(context) = (unsafe { device_context(device) }) else {
         return STATUS_INVALID_DEVICE_STATE;
     };
+    // SAFETY: live device context at PASSIVE_LEVEL.
+    unsafe { context.with_contacts(|_, contacts| contacts.reset()) };
     context
         .runtime
         .on_d0_entry(query_performance_frequency())
@@ -567,8 +586,9 @@ where
     F: FnOnce(&DeviceRuntime, &mut ReadTracker<LowerRead>) -> SuspendedReads<LowerRead>,
 {
     let mut held: [WDFREQUEST; MAX_IN_FLIGHT_READS] = [null_mut(); MAX_IN_FLIGHT_READS];
-    let take = |runtime: &DeviceRuntime, reads: &mut ReadTracker<LowerRead>| {
-        let suspended = suspend(runtime, reads);
+    let take = |(reads, contacts): &mut (ReadTracker<LowerRead>, ContactTracker)| {
+        contacts.reset();
+        let suspended = suspend(&context.runtime, reads);
         let mut count = 0_usize;
         for (slot, read) in held.iter_mut().zip(suspended.iter()) {
             // SAFETY: a registered lower read is alive (see above); NULL tag, as WdfObjectReference.
@@ -586,8 +606,8 @@ where
         }
         count
     };
-    // SAFETY: caller contract; `take` only references objects (no callback can run from it).
-    let count = unsafe { context.with_reads(take) };
+    // SAFETY: caller contract; `take` only resets contacts and references objects (no callback can run from it).
+    let count = unsafe { context.reads.with(take) };
     for &read in held.iter().take(count) {
         // SAFETY: referenced above, so the handle is valid even if the read has completed and been
         // deleted meanwhile; IRQL <= DISPATCH_LEVEL.

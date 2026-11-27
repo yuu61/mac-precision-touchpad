@@ -30,9 +30,9 @@ pub const SURFACE_SWITCH: u8 = 0x57;
 /// `SURFACE_SWITCH`.
 pub const BUTTON_SWITCH: u8 = 0x58;
 
-/// `MAX_FINGERS` (16). In the descriptors it appears only as the logical maximum of the Input Mode usage
-/// in the Windows configuration TLC (`25 10`). It is not the contact limit; that is
-/// [`PTP_MAX_CONTACT_POINTS`].
+/// `MAX_FINGERS` (16) from the legacy C headers (`HidCommon.h`). The Windows configuration TLC
+/// now uses [`PTP_COLLECTION_WINDOWS`] (3) for Input Mode's logical maximum; the contact slot
+/// limit is [`PTP_MAX_CONTACT_POINTS`].
 pub const MAX_FINGERS: u8 = 16;
 
 /// `PTP_MAX_CONTACT_POINTS` (5): the number of contact slots in input report 0x05 and the value reported in

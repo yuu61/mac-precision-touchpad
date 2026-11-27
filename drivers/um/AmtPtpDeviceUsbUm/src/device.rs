@@ -18,9 +18,9 @@
 use core::ptr::{self, null_mut};
 use core::sync::atomic::{AtomicPtr, Ordering};
 
-use amtptp_usbum_core::{DeviceState, pnp};
+use amtptp_usbum_core::{ContactTracker, DeviceState, pnp};
 use wdf_support::declare_context_type;
-use wdf_support::sync::WaitLock;
+use wdf_support::sync::{SpinLocked, WaitLock};
 use wdf_support::init::{
     device_pnp_capabilities_init, object_attributes_init_context_type,
     pnppower_event_callbacks_init,
@@ -59,6 +59,9 @@ pub(crate) struct DeviceContext {
     /// Serializes the wellspring mode switches (not in C, UM-B22): created in `create_device`, held by
     /// `DeviceIo::serialized` around each outermost `GET_REPORT`/`SET_REPORT` sequence.
     pub(crate) mode_switch_lock: WaitLock,
+    /// Persistent `ContactID` and liftoff state, protected by a WDF spinlock created in
+    /// `create_device`. Never nested with `mode_switch_lock`.
+    pub(crate) contacts: SpinLocked<ContactTracker>,
     /// Everything else of `DEVICE_CONTEXT`.
     pub(crate) state: DeviceState,
 }
@@ -84,6 +87,7 @@ impl DeviceContext {
             input_queue: AtomicPtr::new(null_mut()),
             reader_pipe: AtomicPtr::new(null_mut()),
             mode_switch_lock: WaitLock::new(),
+            contacts: SpinLocked::new(ContactTracker::new()),
             state: DeviceState::new(),
         }
     }
@@ -251,6 +255,14 @@ unsafe fn create_device(mut device_init: PWDFDEVICE_INIT) -> NTSTATUS {
     let status = unsafe { context.mode_switch_lock.create(device.cast()) };
     if !NT_SUCCESS(status) {
         trace::pnp_failure("AmtPtpCreateDevice", "WdfWaitLockCreate", status);
+        return status;
+    }
+
+    // SAFETY: created once, before any callback can use the context; the device outlives its child
+    // lock.
+    let status = unsafe { context.contacts.create(device.cast()) };
+    if !NT_SUCCESS(status) {
+        trace::pnp_failure("AmtPtpCreateDevice", "WdfSpinLockCreate", status);
         return status;
     }
 

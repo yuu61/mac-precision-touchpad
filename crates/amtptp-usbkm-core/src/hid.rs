@@ -21,15 +21,15 @@ use ptp_hid::ioctl::{
 
 pub use ptp_hid::hidport::HID_DEVICE_ATTRIBUTES_LEN;
 
+use crate::config::T2Device;
 use crate::output::OutputMemory;
 use crate::state::UsbDeviceIds;
 use crate::status::{
     Completion, NtStatus, STATUS_BUFFER_TOO_SMALL, STATUS_NOT_SUPPORTED, nt_success,
 };
 
-/// The axis values of `AAPL_WELLSPRING_T2_PTP_TLC` (WellspringT2.h:28-37): X logical max 20000, X physical
-/// max 1300, Y physical max 850, Y logical max 12000. (The comments at WellspringT2.h:74/77 claim 1045/750;
-/// the bytes say 1300/850, and the bytes are what is reported.)
+/// The axis values of 15-inch / 16-inch and fallback T2 models (`AAPL_WELLSPRING_T2_PTP_TLC`):
+/// X logical max 20000, X physical max 1300, Y physical max 850, Y logical max 12000.
 pub const T2_AXES: Axes = Axes {
     x_logical_max: 20000,
     x_physical_max: 1300,
@@ -37,14 +37,26 @@ pub const T2_AXES: Axes = Axes {
     y_logical_max: 12000,
 };
 
-/// Length of [`REPORT_DESCRIPTOR`]: 493.
+/// The axis values of 13-inch T2 models (`0x027A`, `0x027B`), matching their `12992 x 7855`
+/// sensor coordinate span and 13-inch Series 3 physical dimensions (`13.52 cm x 8.36 cm`).
+pub const T2_13_AXES: Axes = Axes {
+    x_logical_max: 12992,
+    x_physical_max: 1352,
+    y_physical_max: 836,
+    y_logical_max: 7855,
+};
+
+/// Length of every `UsbKm` report descriptor: 511 bytes.
 pub const REPORT_DESCRIPTOR_LEN: usize = REPORT_DESCRIPTOR_U32_ID_LEN;
 
-/// `AmtPtpT2ReportDescriptor` (Hid.c:7-10): `{ AAPL_WELLSPRING_T2_PTP_TLC,
-/// AAPL_PTP_WINDOWS_CONFIGURATION_TLC }`, 493 bytes, identical for every PID.
+/// Report descriptor for 15-inch / 16-inch and fallback T2 models (`20000 x 12000`), 511 bytes.
 pub static REPORT_DESCRIPTOR: [u8; REPORT_DESCRIPTOR_LEN] = report_descriptor_u32_id(T2_AXES);
 
-/// `AmtPtpT2DefaultHidDescriptor` (Hid.c:12-22): `09 21 00 01 00 01 22 ed 01`.
+/// Report descriptor for 13-inch T2 models (`0x027A`, `0x027B`, `12992 x 7855`), 511 bytes.
+pub static REPORT_DESCRIPTOR_T2_13: [u8; REPORT_DESCRIPTOR_LEN] =
+    report_descriptor_u32_id(T2_13_AXES);
+
+/// `AmtPtpT2DefaultHidDescriptor`: `09 21 00 01 00 01 22 ff 01`.
 pub const HID_DESCRIPTOR: [u8; HID_DESCRIPTOR_LEN] = HID_DESCRIPTOR_U32_ID;
 
 /// `DEVICE_VERSION` (include/Hid.h:14): the HID `VersionNumber`, a constant (not `bcdDevice`).
@@ -141,9 +153,41 @@ pub fn get_hid_descriptor(output: Result<&mut [u8], NtStatus>) -> Completion {
     get_hid_descriptor_to(output)
 }
 
-/// `AmtPtpGetReportDescriptor` (Hid.c:169-285): copies the 493-byte [`REPORT_DESCRIPTOR`] and completes
-/// with `Information = 493`; `STATUS_BUFFER_TOO_SMALL` if the output is shorter. `output` as in
-/// [`get_hid_descriptor_to`].
+/// Selects the report descriptor matching `cfg`'s coordinate span: [`REPORT_DESCRIPTOR_T2_13`] for
+/// 13-inch T2 devices (`12992 x 7855`) and [`REPORT_DESCRIPTOR`] (`20000 x 12000`) for 15-inch /
+/// 16-inch and fallback rows.
+#[must_use]
+pub const fn report_descriptor_for(cfg: &T2Device) -> &'static [u8; REPORT_DESCRIPTOR_LEN] {
+    let x_span = cfg.profile.x.max.saturating_sub(cfg.profile.x.min);
+    let y_span = cfg.profile.y.max.saturating_sub(cfg.profile.y.min);
+    if x_span == T2_13_AXES.x_logical_max as i32 && y_span == T2_13_AXES.y_logical_max as i32 {
+        &REPORT_DESCRIPTOR_T2_13
+    } else {
+        &REPORT_DESCRIPTOR
+    }
+}
+
+/// Copies the 511-byte report descriptor for `cfg` into `output` and completes with
+/// `Information = 511`.
+#[must_use]
+pub fn get_report_descriptor_for_to<M: OutputMemory + ?Sized>(
+    cfg: &T2Device,
+    output: Result<&mut M, NtStatus>,
+) -> Completion {
+    copy_completion(output, report_descriptor_for(cfg))
+}
+
+/// [`get_report_descriptor_for_to`] on a byte slice.
+#[must_use]
+pub fn get_report_descriptor_for(
+    cfg: &T2Device,
+    output: Result<&mut [u8], NtStatus>,
+) -> Completion {
+    get_report_descriptor_for_to(cfg, output)
+}
+
+/// Copies the default 511-byte [`REPORT_DESCRIPTOR`] (`20000 x 12000`) and completes with
+/// `Information = 511`; `STATUS_BUFFER_TOO_SMALL` if the output is shorter.
 #[must_use]
 pub fn get_report_descriptor_to<M: OutputMemory + ?Sized>(
     output: Result<&mut M, NtStatus>,
@@ -186,12 +230,13 @@ pub fn get_device_attributes(output: Result<&mut [u8], NtStatus>, ids: UsbDevice
     }
 }
 
-const _: () = assert!(REPORT_DESCRIPTOR_LEN == 493);
+const _: () = assert!(REPORT_DESCRIPTOR_LEN == 511);
 const _: () = assert!(HID_DEVICE_ATTRIBUTES_LEN == 32);
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::config_for_pid;
     use crate::status::{
         STATUS_INVALID_BUFFER_SIZE, STATUS_INVALID_DEVICE_REQUEST, STATUS_SUCCESS,
     };
@@ -216,10 +261,26 @@ mod tests {
     }
 
     #[test]
-    fn hid_descriptor_bytes() {
+    fn hid_descriptor_bytes_and_per_model_report_descriptors() {
         assert_eq!(
             HID_DESCRIPTOR,
-            [0x09, 0x21, 0x00, 0x01, 0x00, 0x01, 0x22, 0xed, 0x01]
+            [0x09, 0x21, 0x00, 0x01, 0x00, 0x01, 0x22, 0xff, 0x01]
+        );
+        assert_eq!(
+            report_descriptor_for(config_for_pid(0x027a)),
+            &REPORT_DESCRIPTOR_T2_13
+        );
+        assert_eq!(
+            report_descriptor_for(config_for_pid(0x027b)),
+            &REPORT_DESCRIPTOR_T2_13
+        );
+        assert_eq!(
+            report_descriptor_for(config_for_pid(0x027c)),
+            &REPORT_DESCRIPTOR
+        );
+        assert_eq!(
+            report_descriptor_for(config_for_pid(0xffff)),
+            &REPORT_DESCRIPTOR
         );
         let mut out = [0xcc_u8; 10];
         assert_eq!(get_hid_descriptor(Ok(&mut out)), Completion::success(9));

@@ -110,6 +110,7 @@ pub use io::{FailedAction, FilterIo, XferPacket, XferPacketMut};
 pub use pipeline::{
     LowerReadOutcome, complete_lower_read, issue_backlog_reads, issue_lower_read, work_item_callback,
 };
+pub use ptp_hid::contact_tracker::ContactTracker;
 pub use ptp_hid::read_tracker::{LowerReadOrigin, ReadTicket, ReadTracker, SuspendedReads};
 pub use pnp::{
     configure_multitouch, d0_entry, d0_exit, prepare_hardware, recovery_timer_callback,

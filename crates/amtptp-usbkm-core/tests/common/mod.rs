@@ -14,11 +14,17 @@ use std::collections::BTreeMap;
 
 use amtptp_usbkm_core::config::config_index_for_pid;
 use amtptp_usbkm_core::hid::{
-    self, HID_DEVICE_ATTRIBUTES_LEN, InternalIoctl, route_internal_ioctl,
+    self, HID_DESCRIPTOR, HID_DEVICE_ATTRIBUTES_LEN, InternalIoctl, REPORT_DESCRIPTOR_LEN,
+    route_internal_ioctl,
 };
 use amtptp_usbkm_core::lifecycle;
 use amtptp_usbkm_core::state::{DeviceState, UsbDeviceIds};
 use amtptp_usbkm_core::status::{Completion, STATUS_BUFFER_TOO_SMALL};
+use ptp_hid::common::{MAX_FINGERS, PTP_COLLECTION_WINDOWS};
+use ptp_hid::descriptor::{
+    FINGER_COLLECTION_U32_ID_LEN, FINGER_HEAD_U32_ID_LEN, FINGER_SEPARATOR_LEN, GLOBAL_RESET,
+    TOUCHPAD_TLC_HEADER_LEN,
+};
 
 use fake::FakeHw;
 
@@ -177,6 +183,53 @@ impl Tally {
     }
 }
 
+pub const C_REPORT_DESCRIPTOR_LEN: usize = 493;
+pub const REPORT_DESCRIPTOR_DELTA: usize = REPORT_DESCRIPTOR_LEN - C_REPORT_DESCRIPTOR_LEN;
+
+/// Projects a clean 511-byte T2 report descriptor back to the 493-byte C descriptor.
+pub fn to_legacy_c_u32(bytes: &[u8], is_t2_13: bool) -> Vec<u8> {
+    let mut patched = bytes.to_vec();
+    let step = FINGER_COLLECTION_U32_ID_LEN + FINGER_SEPARATOR_LEN;
+    if is_t2_13 {
+        // Step 2 (A-2.4): 13-inch T2 (0x027a/0x027b) uses 12992x7855 (1352x836); C used 20000x12000.
+        for finger in 0..5 {
+            let base = TOUCHPAD_TLC_HEADER_LEN + finger * step + FINGER_HEAD_U32_ID_LEN;
+            assert_eq!(&patched[base + 3..base + 5], &12992_u16.to_le_bytes());
+            patched[base + 3..base + 5].copy_from_slice(&20000_u16.to_le_bytes());
+            assert_eq!(&patched[base + 14..base + 16], &1352_u16.to_le_bytes());
+            patched[base + 14..base + 16].copy_from_slice(&1300_u16.to_le_bytes());
+            assert_eq!(&patched[base + 21..base + 23], &836_u16.to_le_bytes());
+            patched[base + 21..base + 23].copy_from_slice(&850_u16.to_le_bytes());
+            assert_eq!(&patched[base + 24..base + 26], &7855_u16.to_le_bytes());
+            patched[base + 24..base + 26].copy_from_slice(&12000_u16.to_le_bytes());
+        }
+    }
+    let f3_reset = TOUCHPAD_TLC_HEADER_LEN
+        + 2 * step
+        + (FINGER_COLLECTION_U32_ID_LEN - 1 - GLOBAL_RESET.len());
+    let f5_reset = TOUCHPAD_TLC_HEADER_LEN
+        + 4 * step
+        + (FINGER_COLLECTION_U32_ID_LEN - 1 - GLOBAL_RESET.len());
+    let tail_start =
+        TOUCHPAD_TLC_HEADER_LEN + 5 * FINGER_COLLECTION_U32_ID_LEN + 4 * FINGER_SEPARATOR_LEN;
+    let scan_time_reset = tail_start + 21;
+    let input_mode_max_offset = tail_start + 88 + 17;
+
+    assert_eq!(&patched[f3_reset..f3_reset + 6], &GLOBAL_RESET);
+    assert_eq!(&patched[f5_reset..f5_reset + 6], &GLOBAL_RESET);
+    assert_eq!(&patched[scan_time_reset..scan_time_reset + 6], &GLOBAL_RESET);
+    assert_eq!(patched[input_mode_max_offset], PTP_COLLECTION_WINDOWS);
+
+    let mut out = Vec::with_capacity(C_REPORT_DESCRIPTOR_LEN);
+    out.extend_from_slice(&patched[..f3_reset]);
+    out.extend_from_slice(&patched[f3_reset + 6..f5_reset]);
+    out.extend_from_slice(&patched[f5_reset + 6..scan_time_reset]);
+    out.extend_from_slice(&patched[scan_time_reset + 6..input_mode_max_offset]);
+    out.push(MAX_FINGERS);
+    out.extend_from_slice(&patched[input_mode_max_offset + 1..]);
+    out
+}
+
 /// Replays one descriptor/attributes IOCTL through the dispatcher. Returns the bucket.
 ///
 /// The output-buffer retrieval is the framework's: `WdfRequestRetrieveOutputMemory` fails with
@@ -185,7 +238,15 @@ impl Tally {
 pub fn replay_descriptor_ioctl(r: &Record) -> &'static str {
     let id = r.id();
     let code = num(r.req("ioctl")) as u32;
-    let outlen = num(r.req("outlen")) as usize;
+    let route = route_internal_ioctl(code);
+    let c_outlen = num(r.req("outlen")) as usize;
+    let outlen = if route == InternalIoctl::GetReportDescriptor
+        && (C_REPORT_DESCRIPTOR_LEN - 1..=C_REPORT_DESCRIPTOR_LEN + 1).contains(&c_outlen)
+    {
+        c_outlen + REPORT_DESCRIPTOR_DELTA
+    } else {
+        c_outlen
+    };
     let prefill = hex(r.req("prefill"))[0];
     let mut out = vec![prefill; outlen];
     let state = DeviceState::new();
@@ -208,7 +269,7 @@ pub fn replay_descriptor_ioctl(r: &Record) -> &'static str {
         );
     }
     let mut framework = false;
-    let completion = match route_internal_ioctl(code) {
+    let completion = match route {
         InternalIoctl::GetDeviceDescriptor | InternalIoctl::GetReportDescriptor => {
             let output = if outlen == 0 {
                 framework = true;
@@ -216,10 +277,10 @@ pub fn replay_descriptor_ioctl(r: &Record) -> &'static str {
             } else {
                 Ok(&mut *out)
             };
-            if route_internal_ioctl(code) == InternalIoctl::GetDeviceDescriptor {
+            if route == InternalIoctl::GetDeviceDescriptor {
                 hid::get_hid_descriptor(output)
             } else {
-                hid::get_report_descriptor(output)
+                hid::get_report_descriptor_for(state.config(), output)
             }
         }
         InternalIoctl::GetDeviceAttributes => {
@@ -239,19 +300,58 @@ pub fn replay_descriptor_ioctl(r: &Record) -> &'static str {
         }
     };
     assert_eq!(r.req("completed"), "1", "{id}");
+    let expected_info = if completion.status == 0 && route == InternalIoctl::GetReportDescriptor {
+        num(r.req("info")) as usize + REPORT_DESCRIPTOR_DELTA
+    } else {
+        num(r.req("info")) as usize
+    };
     assert_eq!(
         completion,
         Completion {
             status: status(r.req("status")),
-            information: num(r.req("info")) as usize
+            information: expected_info
         },
         "{id}"
     );
     let mut expected = hex(r.req("out"));
-    if route_internal_ioctl(code) == InternalIoctl::GetDeviceAttributes && completion.information == 32 {
-        expected[10..32].fill(0);
+    match (completion.status, route) {
+        (0, InternalIoctl::GetDeviceAttributes) => {
+            expected[10..32].fill(0);
+            assert_eq!(out, expected, "{id}: output buffer");
+        }
+        (0, InternalIoctl::GetDeviceDescriptor) => {
+            assert_eq!(&out[..9], &HID_DESCRIPTOR, "{id}: HID descriptor");
+            expected[7..9].copy_from_slice(&(REPORT_DESCRIPTOR_LEN as u16).to_le_bytes());
+            assert_eq!(out, expected, "{id}: output buffer");
+        }
+        (0, InternalIoctl::GetReportDescriptor) => {
+            assert_eq!(
+                &out[..REPORT_DESCRIPTOR_LEN],
+                hid::report_descriptor_for(state.config()),
+                "{id}: report descriptor"
+            );
+            let is_t2_13 = matches!(state.config().identification, 0x027a | 0x027b);
+            assert_eq!(
+                to_legacy_c_u32(&out[..REPORT_DESCRIPTOR_LEN], is_t2_13),
+                expected[..C_REPORT_DESCRIPTOR_LEN],
+                "{id}: legacy C projection"
+            );
+            assert!(
+                out[REPORT_DESCRIPTOR_LEN..].iter().all(|&b| b == prefill)
+                    && expected[C_REPORT_DESCRIPTOR_LEN..].iter().all(|&b| b == prefill),
+                "{id}: trailing prefill"
+            );
+        }
+        (_, InternalIoctl::GetReportDescriptor) => {
+            assert!(
+                out.iter().all(|&b| b == prefill) && expected.iter().all(|&b| b == prefill),
+                "{id}: untouched prefill"
+            );
+        }
+        _ => {
+            assert_eq!(out, expected, "{id}: output buffer");
+        }
     }
-    assert_eq!(out, expected, "{id}: output buffer");
     assert_eq!(r.req("qdepth_before"), "0", "{id}");
     assert_eq!(r.req("qdepth_after"), "0", "{id}");
     if framework {

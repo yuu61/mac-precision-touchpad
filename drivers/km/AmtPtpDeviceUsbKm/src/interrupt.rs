@@ -79,20 +79,27 @@ pub(crate) unsafe extern "C" fn evt_usb_interrupt_pipe_read_complete(
         return;
     };
 
-    let result =
-        match input::process_packet(&context.state, packet, query_performance_counter()) {
-            PacketAction::Discard => {
-                tlg::write_event!(
-                    PROVIDER,
-                    "MalformedInput",
-                    level(Informational),
-                    keyword(KW_INPUT),
-                    usize("Length", &num_bytes_transferred)
-                );
-                return;
-            }
-            PacketAction::Deliver(result) => result,
-        };
+    let counter = query_performance_counter();
+    // SAFETY: live device context; spinlock created in `create_device`; IRQL <= DISPATCH_LEVEL;
+    // pure packet decoding and contact tracking inside the lock.
+    let action = unsafe {
+        context
+            .contacts
+            .with(|contacts| input::process_packet(&context.state, contacts, packet, counter))
+    };
+    let result = match action {
+        PacketAction::Discard => {
+            tlg::write_event!(
+                PROVIDER,
+                "MalformedInput",
+                level(Informational),
+                keyword(KW_INPUT),
+                usize("Length", &num_bytes_transferred)
+            );
+            return;
+        }
+        PacketAction::Deliver(result) => result,
+    };
 
     let input_queue = context.input_queue();
     if input_queue.is_null() {

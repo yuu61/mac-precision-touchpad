@@ -1,4 +1,4 @@
-//! Replays `tests/fixtures/input_<row>.txt`: reader completion → PTP input report.
+//! Replays `tests/fixtures/input_<row>.txt`: reader completion -> PTP input report.
 //!
 //! Model of one record (README "input_<row>.txt"): bring-up to D0 for `pid` through the core lifecycle,
 //! set the record's driver state (`st_in`), pend `npend` `READ_REPORTs` (the first with `outlen` bytes of
@@ -11,12 +11,15 @@ mod common;
 
 use std::collections::VecDeque;
 
+use amtptp_usbkm_core::config::T2Device;
 use amtptp_usbkm_core::input::{PacketAction, complete_read_report, process_packet};
 use amtptp_usbkm_core::lifecycle;
-use amtptp_usbkm_core::state::DeviceState;
+use amtptp_usbkm_core::state::{DeviceState, InputGates};
 use amtptp_usbkm_core::status::{Completion, STATUS_BUFFER_TOO_SMALL};
 use common::fake::FakeHw;
 use common::{Record, Tally, hex, kv, load, num, status, to_hex};
+use ptp_hid::contact_tracker::ContactTracker;
+use ptp_hid::input::{PTP_REPORT_LEN, PTP_REPORT_SCAN_TIME_OFFSET};
 
 /// A pended `READ_REPORT`: its output buffer and how it ended.
 struct PendedRead {
@@ -81,8 +84,56 @@ fn out_hex(case: &Case<'_>) -> String {
     }
 }
 
+/// Independent Step 2 specification for frame-0 T2 Type4 report encoding, plus whether C's
+/// single-frame output was unaffected by hover filtering, Wellspring `Confidence`, and clamping.
+fn expected_frame0_report(
+    cfg: &T2Device,
+    packet: &[u8],
+    gates: InputGates,
+) -> ([u8; PTP_REPORT_LEN], bool) {
+    let mut report = [0_u8; PTP_REPORT_LEN];
+    report[0] = 0x05;
+    report[49] = u8::from(gates.report_button && packet[31] != 0);
+    if !gates.report_touch {
+        return (report, true);
+    }
+    let x_span = cfg.profile.x.max - cfg.profile.x.min;
+    let y_span = cfg.profile.y.max - cfg.profile.y.min;
+    let mut count = 0_usize;
+    let mut matches_c = true;
+    let fingers = (packet.len() - 46) / 30;
+    for i in 0..fingers {
+        let f = 48 + 30 * i;
+        let abs_x = i16::from_le_bytes([packet[f + 2], packet[f + 3]]);
+        let abs_y = i16::from_le_bytes([packet[f + 4], packet[f + 5]]);
+        let major = i32::from(i16::from_le_bytes([packet[f + 16], packet[f + 17]])) << 1;
+        let minor = i32::from(i16::from_le_bytes([packet[f + 18], packet[f + 19]])) << 1;
+        let unclamped_x = (i32::from(abs_x) - cfg.profile.x.min).max(0);
+        let unclamped_y = (cfg.profile.y.max - i32::from(abs_y)).max(0);
+        let tip = major >= 200 || minor >= 150;
+        let conf = major < 2500 && minor < 2500;
+        let c_conf = minor > 0;
+        if !tip || conf != c_conf || unclamped_x > x_span || unclamped_y > y_span {
+            matches_c = false;
+        }
+        if !tip || count >= 5 {
+            continue;
+        }
+        let x = unclamped_x.min(x_span) as u16;
+        let y = unclamped_y.min(y_span) as u16;
+        let base = 1 + 9 * count;
+        report[base] = u8::from(conf) | 0x02;
+        report[base + 1..base + 5].copy_from_slice(&(count as u32).to_le_bytes());
+        report[base + 5..base + 7].copy_from_slice(&x.to_le_bytes());
+        report[base + 7..base + 9].copy_from_slice(&y.to_le_bytes());
+        count += 1;
+    }
+    report[48] = count as u8;
+    (report, matches_c)
+}
+
 /// Replays one record; returns its bucket. `prev_out` is the previous record's `out`.
-fn replay(case: &Case<'_>, prev_out: Option<&str>) -> &'static str {
+fn replay(case: &Case<'_>, prev_out: Option<&str>, exact_c_matches: &mut usize) -> &'static str {
     let r = case.r;
     let id = r.id();
     let state = state_for(case);
@@ -103,11 +154,19 @@ fn replay(case: &Case<'_>, prev_out: Option<&str>) -> &'static str {
             completion: None,
         })
         .collect();
-    let mut first: Option<PendedRead> = None;
 
-    // The reader completion, in the order the glue runs it.
+    // Step 2 (B-4): packets arriving with Wellspring mode off are discarded without dequeuing.
     let counter = num(case.get("qpc_freq")) as i64;
-    let action = process_packet(&state, &packet, counter);
+    let mut contacts = ContactTracker::new();
+    let action = process_packet(&state, &mut contacts, &packet, counter);
+    if !state.wellspring_mode_on() {
+        assert_eq!(action, PacketAction::Discard, "{id}");
+        assert_eq!(queue.len(), npend, "{id}");
+        assert_eq!(st_string(&state), st_before, "{id}");
+        return "b4_fixed/wsm0_discard";
+    }
+
+    let mut first: Option<PendedRead> = None;
     let res = case.get("res");
     let mut no_request = false;
     match action {
@@ -118,8 +177,6 @@ fn replay(case: &Case<'_>, prev_out: Option<&str>) -> &'static str {
                 no_request = true;
             }
             Some(mut req) => {
-                // WdfRequestRetrieveOutputMemory: zero-length output → STATUS_BUFFER_TOO_SMALL
-                // (framework, README "Fake framework").
                 let output = if req.buf.is_empty() {
                     Err(STATUS_BUFFER_TOO_SMALL)
                 } else {
@@ -130,7 +187,6 @@ fn replay(case: &Case<'_>, prev_out: Option<&str>) -> &'static str {
             }
         },
     }
-    // A first request that was not dequeued is still the first queued one.
     let first_buf = match (&first, queue.front()) {
         (Some(f), _) => Some(f.buf.clone()),
         (None, Some(q)) if npend > 0 => Some(q.buf.clone()),
@@ -163,8 +219,6 @@ fn replay(case: &Case<'_>, prev_out: Option<&str>) -> &'static str {
         "no_request" => {
             assert!(no_request);
             assert_eq!(case.get("completed"), "0", "{id}");
-            // There is no request. The harness printed a buffer the driver never touched: the previous
-            // case's buffer (req-none) or untouched prefill (req-none-6fingers).
             let out = out_hex(case);
             let prefill_only = to_hex(&vec![prefill; outlen]);
             assert!(
@@ -174,8 +228,6 @@ fn replay(case: &Case<'_>, prev_out: Option<&str>) -> &'static str {
             bucket = "driver/no_request";
         }
         "leak_outmem" | "leak_copy" => {
-            // C: retrieved and never completed (B6/B7). P2: completed with the status of the failing
-            // call (WdfRequestRetrieveOutputMemory / WdfMemoryCopyFromBuffer: BUFFER_TOO_SMALL here).
             let tag = if res == "leak_outmem" {
                 "c_leak_B6"
             } else {
@@ -198,25 +250,36 @@ fn replay(case: &Case<'_>, prev_out: Option<&str>) -> &'static str {
         other => panic!("{id}: unknown res {other}"),
     }
 
-    // The first request's buffer after the call.
     if !no_request {
-        let mut expected = match case.get("out") {
+        let mut c_expected = match case.get("out") {
             "unchanged" => vec![prefill; outlen],
             out => hex(out),
         };
         if completion.is_some_and(|c| c.status == 0) {
-            let offset = ptp_hid::input::PTP_REPORT_SCAN_TIME_OFFSET;
-            expected[offset..offset + 2].copy_from_slice(&0_u16.to_le_bytes());
+            let buf = first_buf.expect("completed request buffer");
+            let (spec_report, matches_c) =
+                expected_frame0_report(state.config(), &packet, state.input_gates());
+            assert_eq!(&buf[..PTP_REPORT_LEN], &spec_report, "{id}: spec report");
+            assert_eq!(
+                &buf[PTP_REPORT_LEN..],
+                &c_expected[PTP_REPORT_LEN..],
+                "{id}: trailing prefill"
+            );
+            c_expected[PTP_REPORT_SCAN_TIME_OFFSET..PTP_REPORT_SCAN_TIME_OFFSET + 2]
+                .copy_from_slice(&0_u16.to_le_bytes());
+            if matches_c {
+                assert_eq!(to_hex(&buf), to_hex(&c_expected), "{id}: exact C match");
+                *exact_c_matches += 1;
+            }
+        } else {
+            assert_eq!(
+                first_buf.map(|b| to_hex(&b)),
+                Some(to_hex(&c_expected)),
+                "{id}: out"
+            );
         }
-        assert_eq!(
-            first_buf.map(|b| to_hex(&b)),
-            Some(to_hex(&expected)),
-            "{id}: out"
-        );
     }
-    // `no_request`: `out` is the previous case's buffer (asserted above), not a request of this record.
 
-    // Queue depth: one request dequeued unless the packet was discarded or no request was pending.
     let dequeued = usize::from(first.is_some());
     assert_eq!(
         num(case.get("qdepth_out")) as usize,
@@ -225,7 +288,6 @@ fn replay(case: &Case<'_>, prev_out: Option<&str>) -> &'static str {
     );
     assert_eq!(queue.len(), npend - dequeued, "{id}");
 
-    // Sampling the reporting clock does not change the fields captured by the fixture.
     let st_out = case.get("st_out");
     let st_after = st_string(&state);
     assert_eq!(st_after, st_before, "{id}: state unchanged");
@@ -234,7 +296,6 @@ fn replay(case: &Case<'_>, prev_out: Option<&str>) -> &'static str {
     }
 
     if r.has_tag("unreachable_state") {
-        // The C fixture uses unusual gate or clock state here. Replay the same input and gates.
         assert!(bucket == "driver/edge", "{id}");
         bucket = "driver/unreachable_state";
     }
@@ -250,20 +311,21 @@ fn replay_file(name: &str, total: usize, expected: &[(&str, usize)]) {
     let mut tally = Tally::default();
     tally.add("defaults_line");
     let mut prev_out: Option<String> = None;
+    let mut exact_c_matches = 0_usize;
     for r in &records[1..] {
         let case = Case { r, defaults };
-        tally.add(replay(&case, prev_out.as_deref()));
+        tally.add(replay(&case, prev_out.as_deref(), &mut exact_c_matches));
         prev_out = Some(out_hex(&case));
     }
+    assert!(exact_c_matches > 0, "{name}: expected unaffected C-matching records");
     tally.assert_exact(name, total, expected);
 }
 
-/// Per file: 1 defaults line, 1000 random records, the edge groups. ffff has 11 extra fallback-PID
-/// golden-B records.
-const fn expected(edge: usize) -> [(&'static str, usize); 7] {
+const fn expected(edge: usize) -> [(&'static str, usize); 8] {
     [
+        ("b4_fixed/wsm0_discard", 1),
         ("defaults_line", 1),
-        ("driver/edge", edge),
+        ("driver/edge", edge - 1),
         ("driver/no_request", 2),
         ("driver/random", 1000),
         ("driver/unreachable_state", 22),
