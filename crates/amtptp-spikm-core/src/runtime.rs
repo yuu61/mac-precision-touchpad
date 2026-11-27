@@ -30,7 +30,7 @@ use ptp_hid::scan_time::ScanClock;
 
 use crate::device::SpiTrackpadInfo;
 use crate::feature::PtpSettings;
-use crate::input::{SpiPacket, lower_read_length, report_bytes, valid_prefix};
+use crate::input::{SpiPacket, check_declared_fingers, lower_read_length, report_bytes, valid_prefix};
 use crate::status::{NtStatus, STATUS_CANCELLED, STATUS_SUCCESS, nt_success};
 
 /// `PTP_AAPL_DEVICE_POWER_STATUS` (Device.h:46-50).
@@ -401,7 +401,10 @@ impl DeviceRuntime {
     /// - `information`: `WdfRequestGetInformation(SpiRequest)`; see [`lower_read_length`]. Below 46
     ///   returns `Err(STATUS_DEVICE_DATA_ERROR)` without sampling the clock.
     /// - `buffer`: the lower read buffer. Only its first `min((LONG)information, buffer.len())` bytes are
-    ///   read; bytes past them read as 0 (P2 fix of SPI-B9). Pass only memory that is initialized.
+    ///   read. They must hold every finger record `NumOfFingers` declares
+    ///   ([`check_declared_fingers`]), else `Err(STATUS_DEVICE_DATA_ERROR)` without sampling the clock
+    ///   (P3: C read missing fingers as 0 or as stale lookaside bytes). Pass only memory that is
+    ///   initialized.
     /// - `query_counter`: samples the QPC counter once after the length gate.
     ///
     /// On success the 30 report bytes are returned. The glue then
@@ -412,7 +415,8 @@ impl DeviceRuntime {
     /// use-after-free SPI-B10).
     ///
     /// # Errors
-    /// Returns `STATUS_DEVICE_DATA_ERROR` if the reported length is shorter than the packet header.
+    /// Returns `STATUS_DEVICE_DATA_ERROR` if the reported length is shorter than the packet header or
+    /// than the finger records the header declares.
     pub fn complete_lower_read<F: FnOnce() -> i64>(
         &self,
         trackpad: &SpiTrackpadInfo,
@@ -422,6 +426,7 @@ impl DeviceRuntime {
     ) -> Result<[u8; SPI_PTP_REPORT_LEN], NtStatus> {
         let length = lower_read_length(information)?;
         let packet = SpiPacket::new(valid_prefix(buffer, length));
+        check_declared_fingers(&packet)?;
         let scan_time = self.scan_clock.sample(query_counter());
         Ok(report_bytes(&packet, trackpad, scan_time))
     }
@@ -563,7 +568,7 @@ mod tests {
     }
 
     /// SPI-X12 (a): the glue passes an empty buffer when the completion parameters or the lookaside
-    /// buffer are NULL (unreachable). Every packet byte then reads as 0.
+    /// buffer are NULL (unreachable). It holds no header, so the frame is a data error.
     #[test]
     fn empty_lower_buffer_reads_as_zero_packet() {
         use crate::device::SPI_TRACKPAD_CONFIG_TABLE;
@@ -584,9 +589,15 @@ mod tests {
         assert!(!queried);
         assert_eq!(rt.qpc_frequency(), 0);
 
-        // >= 46: SUCCESS with the all-zero report (05, no contacts, ContactCount 0, button 0); ScanTime
-        // starts at zero in this reporting session.
-        let report = rt.complete_lower_read(&tp, 46, &[], || 0);
+        // No buffer at all: the header is missing, so the frame is rejected too.
+        assert_eq!(
+            rt.complete_lower_read(&tp, 46, &[], || 0),
+            Err(STATUS_DEVICE_DATA_ERROR)
+        );
+
+        // A zeroed 46-byte header: SUCCESS with the all-zero report (05, no contacts, ContactCount 0,
+        // button 0); ScanTime starts at zero in this reporting session.
+        let report = rt.complete_lower_read(&tp, 46, &[0; 46], || 0);
         assert_eq!(report, Ok(SpiPtpReport::EMPTY.to_bytes()));
         assert_eq!(
             report.ok().and_then(|bytes| bytes.first().copied()),

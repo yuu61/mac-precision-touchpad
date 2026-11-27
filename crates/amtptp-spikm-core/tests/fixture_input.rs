@@ -8,8 +8,11 @@
 //! Decisions checked here:
 //! - SPI-B5 (P2): the report is zero-initialized, so it must equal `out` (the 0x00 stack-paint run), and
 //!   every bit flagged in `undef` must be 0.
-//! - SPI-B9 (P2): bytes at or past `(LONG)len` read as 0, so `b9=1` records compare `out_tail0`. As a
-//!   cross-check, parsing the whole 1024-byte buffer (what C does) reproduces `out`.
+//! - P3 (SPI-B6/B9): a frame whose valid bytes do not hold every finger record `NumOfFingers` declares is
+//!   rejected with `STATUS_DEVICE_DATA_ERROR` before the clock is sampled (C delivered it, reading the
+//!   missing fingers as stale or zero bytes). Every `b9=1` record (C read stale bytes past `len`) is such
+//!   a frame. These records are counted, not compared with the C bytes.
+//! - P3 (SPI-B6): `ContactCount` is `min(NumOfFingers, 5)`, so the C byte is clamped before comparing.
 //! - Each isolated frame begins a new reporting session, so its `ScanTime` is zero.
 
 #![cfg(test)]
@@ -18,7 +21,8 @@ mod common;
 
 use amtptp_spikm_core::device::{APPLE_VENDOR_ID, Family, family_for_product, lookup_trackpad};
 use amtptp_spikm_core::runtime::{DeviceRuntime, DeviceStatus, ReadTracker};
-use amtptp_spikm_core::status::{STATUS_BUFFER_TOO_SMALL, STATUS_SUCCESS};
+use amtptp_spikm_core::input::{MAX_FILLED_CONTACTS, packet_len_for};
+use amtptp_spikm_core::status::{STATUS_BUFFER_TOO_SMALL, STATUS_DEVICE_DATA_ERROR, STATUS_SUCCESS};
 use amtptp_spikm_core::wire::LOWER_READ_BUFFER_LEN;
 use common::{Tally, load, prefill, wdf_failures};
 use ptp_hid::input::SPI_PTP_REPORT_SCAN_TIME_OFFSET;
@@ -29,6 +33,9 @@ const DELIVERED: &str = "report delivered (status 0, info 30)";
 const LENGTH_GATE: &str = "driver length gate: (LONG)len < 46 -> c000009c";
 const FW_RETRIEVE: &str = "framework: WdfRequestRetrieveOutputMemory c0000023 (outlen 0)";
 const FW_COPY: &str = "framework: WdfMemoryCopyFromBuffer c0000023 (outlen < 30)";
+const SHORT_FRAME: &str = "P3: contact data shorter than NumOfFingers declares -> c000009c";
+/// Offset of `ContactCount` in the 30-byte SPI report.
+const CONTACT_COUNT_OFFSET: usize = 28;
 
 /// README rule for `undef` (bits the C code leaves uninitialized), over the 30 report bytes.
 fn undef_rule(num_of_fingers: u8) -> [u8; REPORT_LEN] {
@@ -53,6 +60,9 @@ struct Expect {
     pids: &'static [u16],
     delivered: usize,
     length_gate: usize,
+    short_frames: usize,
+    fw_retrieve: usize,
+    fw_copy: usize,
 }
 
 fn replay(e: &Expect) -> Tally {
@@ -92,6 +102,20 @@ fn replay(e: &Expect) -> Tally {
             qpc_calls += 1;
             qpcf
         });
+        let is_b9 = r.opt("b9") == Some("1");
+        b9 += usize::from(is_b9);
+
+        // P3: the valid bytes must hold every declared finger record.
+        let num_of_fingers = buffer[30];
+        let gate_len = len as u32 as i32;
+        let valid = usize::try_from(gate_len).map_or(0, |l| l.min(LOWER_READ_BUFFER_LEN));
+        if gate_len >= 46 && valid < packet_len_for(num_of_fingers) {
+            assert_eq!(result, Err(STATUS_DEVICE_DATA_ERROR), "{ctx}: short frame");
+            assert_eq!(qpc_calls, 0, "{ctx}: no clock sample for a rejected frame");
+            tally.add(SHORT_FRAME);
+            continue;
+        }
+        assert!(!is_b9, "{ctx}: a b9 record reads past len, so it is a short frame");
 
         // KMDF model of the upstream copy.
         let outlen: usize = r.dec("outlen");
@@ -136,39 +160,16 @@ fn replay(e: &Expect) -> Tally {
             assert_eq!(in_ops as u32, qpc_calls, "{ctx}: QPC calls in ops");
         }
 
-        // SPI-B9 (P2): compare the tail-zeroed C run where the C code read stale bytes past len.
-        let is_b9 = r.opt("b9") == Some("1");
-        let expected = if is_b9 {
-            b9 += 1;
-            r.get("out_tail0")
-        } else {
-            assert!(!r.has("out_tail0"), "{ctx}");
-            r.get("out")
-        };
-        let mut expected = common::hex(expected);
+        assert!(!r.has("out_tail0"), "{ctx}");
+        let mut expected = common::hex(r.get("out"));
         if status == STATUS_SUCCESS {
             expected[SPI_PTP_REPORT_SCAN_TIME_OFFSET..SPI_PTP_REPORT_SCAN_TIME_OFFSET + 2]
                 .copy_from_slice(&0_u16.to_le_bytes());
+            // P3 (SPI-B6): C reported the raw NumOfFingers.
+            assert_eq!(expected[CONTACT_COUNT_OFFSET], num_of_fingers, "{ctx}: C count");
+            expected[CONTACT_COUNT_OFFSET] = num_of_fingers.min(MAX_FILLED_CONTACTS);
         }
         assert_eq!(out, expected, "{ctx}: out");
-
-        if is_b9 {
-            // Cross-check: reading the whole buffer like C reproduces the C output `out`.
-            let rt_c = DeviceRuntime::new();
-            rt_c.on_d0_entry(lrt_in);
-            let _status = rt_c.on_self_managed_io_init_or_restart(
-                &mut ReadTracker::<u32>::new(),
-                STATUS_SUCCESS,
-                || lrt_in,
-            );
-            let whole = rt_c
-                .complete_lower_read(info, LOWER_READ_BUFFER_LEN as u64, &buffer, || qpcf)
-                .expect("b9 records pass the length gate");
-            let mut c_out = common::hex(r.get("out"));
-            c_out[SPI_PTP_REPORT_SCAN_TIME_OFFSET..SPI_PTP_REPORT_SCAN_TIME_OFFSET + 2]
-                .copy_from_slice(&0_u16.to_le_bytes());
-            assert_eq!(whole[..], c_out[..REPORT_LEN], "{ctx}: whole-buffer parse");
-        }
 
         // SPI-B5 (P2): every bit C leaves uninitialized is zero in our report.
         match r.opt("undef").filter(|u| *u != "-") {
@@ -198,10 +199,11 @@ fn replay(e: &Expect) -> Tally {
         }
     }
     assert_eq!(b9, e.b9, "{}: b9 records", e.file);
-    assert_eq!(tally.get(FW_RETRIEVE), 1, "{}", e.file);
-    assert_eq!(tally.get(FW_COPY), 2, "{}", e.file);
+    assert_eq!(tally.get(FW_RETRIEVE), e.fw_retrieve, "{}", e.file);
+    assert_eq!(tally.get(FW_COPY), e.fw_copy, "{}", e.file);
     assert_eq!(tally.get(DELIVERED), e.delivered, "{}", e.file);
     assert_eq!(tally.get(LENGTH_GATE), e.length_gate, "{}", e.file);
+    assert_eq!(tally.get(SHORT_FRAME), e.short_frames, "{}", e.file);
     assert_eq!(
         tally.total(),
         e.records,
@@ -219,8 +221,11 @@ fn input_f1() {
         b9: 94,
         family: Family::F1,
         pids: &[0x0275, 0x0279, 0x0290, 0x0291],
-        delivered: 1136,
+        delivered: 834,
         length_gate: 103,
+        short_frames: 302,
+        fw_retrieve: 1,
+        fw_copy: 2,
     });
 }
 
@@ -232,8 +237,11 @@ fn input_f2() {
         b9: 97,
         family: Family::F2,
         pids: &[0x0272, 0x0273],
-        delivered: 1082,
+        delivered: 756,
         length_gate: 89,
+        short_frames: 326,
+        fw_retrieve: 1,
+        fw_copy: 2,
     });
 }
 
@@ -245,8 +253,11 @@ fn input_f3a() {
         b9: 101,
         family: Family::F3a,
         pids: &[0x0276, 0x0277],
-        delivered: 1079,
+        delivered: 778,
         length_gate: 92,
+        short_frames: 301,
+        fw_retrieve: 1,
+        fw_copy: 2,
     });
 }
 
@@ -258,7 +269,10 @@ fn input_f3b() {
         b9: 92,
         family: Family::F3b,
         pids: &[0x0278],
-        delivered: 1037,
+        delivered: 701,
         length_gate: 100,
+        short_frames: 336,
+        fw_retrieve: 1,
+        fw_copy: 2,
     });
 }

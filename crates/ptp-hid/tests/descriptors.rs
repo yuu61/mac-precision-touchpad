@@ -7,6 +7,7 @@ use core::fmt::Write as _;
 use std::collections::BTreeMap;
 
 use ptp_hid::descriptor::{
+    SPI_CONTACT_ID_LOGICAL_MAX, SPI_CONTACT_ID_MAX_OFFSETS,
     Axes, REPORT_DESCRIPTOR_SPI_UMAPP_LEN, REPORT_DESCRIPTOR_U32_ID_LEN,
     REPORT_DESCRIPTOR_U32_ID_UMAPP_LEN, TlcUsage, report_descriptor_spi_umapp,
     report_descriptor_u32_id, report_descriptor_u32_id_umapp,
@@ -132,8 +133,8 @@ fn hqa() -> Fixture {
 /// The 16 descriptors: (fixture file, entry name, Rust builder output).
 fn all_sixteen() -> Vec<(&'static str, &'static str, Vec<u8>)> {
     let u32_umapp = |a| report_descriptor_u32_id_umapp(a).to_vec();
-    let spi_pad = |a| report_descriptor_spi_umapp(TlcUsage::TouchPad, a).to_vec();
-    let spi_ts = |a| report_descriptor_spi_umapp(TlcUsage::TouchScreen, a).to_vec();
+    let spi_pad = |a| as_c_spi(report_descriptor_spi_umapp(TlcUsage::TouchPad, a).to_vec());
+    let spi_ts = |a| as_c_spi(report_descriptor_spi_umapp(TlcUsage::TouchScreen, a).to_vec());
     vec![
         ("um", "AmtPtp3ReportDescriptor", u32_umapp(WELLSPRING3)),
         ("um", "AmtPtp5ReportDescriptor", u32_umapp(WELLSPRING5)),
@@ -164,6 +165,18 @@ fn all_sixteen() -> Vec<(&'static str, &'static str, Vec<u8>)> {
             report_descriptor_u32_id(MAGIC_TRACKPAD2).to_vec(),
         ),
     ]
+}
+
+/// The C bytes of a port SPI report descriptor. The C descriptors declare a contact-ID logical maximum of
+/// 3 although the driver reports IDs 0..=4; the port declares 4 (P3). Checks that the five values are
+/// the only difference.
+fn as_c_spi(mut bytes: Vec<u8>) -> Vec<u8> {
+    for offset in SPI_CONTACT_ID_MAX_OFFSETS {
+        assert_eq!(bytes[offset - 1], 0x25, "Logical Maximum item at {offset}");
+        assert_eq!(bytes[offset], SPI_CONTACT_ID_LOGICAL_MAX, "contact-ID maximum at {offset}");
+        bytes[offset] = 3;
+    }
+    bytes
 }
 
 fn first_difference(a: &[u8], b: &[u8]) -> Option<usize> {
@@ -229,7 +242,7 @@ fn const_and_static_builders_match_fixtures() {
         FLT_MT2[..],
         flt().entries["PtpReportDescriptorMagicTrackpad2"][..]
     );
-    assert_eq!(SPI_S1[..], spi().entries["S1"][..]);
+    assert_eq!(as_c_spi(SPI_S1.to_vec()), spi().entries["S1"]);
 }
 
 #[test]
@@ -497,35 +510,35 @@ fn builders_match_spec_sha256() {
         ),
         (
             "21a4d11df641c918bbe5b9718c7b054f6d399b21d4296b81bd3e9f85cc617cd3",
-            SPI_S1.to_vec(),
+            as_c_spi(SPI_S1.to_vec()),
         ),
         (
             "868c9d50ac9ca620a578e717daf8dfb215086e83e8bf175851b712a6f809b1aa",
-            report_descriptor_spi_umapp(TlcUsage::TouchScreen, SPI_SERIES1).to_vec(),
+            as_c_spi(report_descriptor_spi_umapp(TlcUsage::TouchScreen, SPI_SERIES1).to_vec()),
         ),
         (
             "5dab7a973382bbada6cedb4c47e0f1d7bc2d72d263ed5fd86545f96f2f8c9a3f",
-            report_descriptor_spi_umapp(TlcUsage::TouchPad, SPI_SERIES2).to_vec(),
+            as_c_spi(report_descriptor_spi_umapp(TlcUsage::TouchPad, SPI_SERIES2).to_vec()),
         ),
         (
             "d4d5f0b8146fa01c0421653fff153cee5ff73679576546a1e8378f44cf479bbe",
-            report_descriptor_spi_umapp(TlcUsage::TouchScreen, SPI_SERIES2).to_vec(),
+            as_c_spi(report_descriptor_spi_umapp(TlcUsage::TouchScreen, SPI_SERIES2).to_vec()),
         ),
         (
             "fb0db27b1cdf967200ffd68b01005a15ffcebfd0e2786f8dba7bd163b324fcf9",
-            report_descriptor_spi_umapp(TlcUsage::TouchPad, SPI_SERIES3_13).to_vec(),
+            as_c_spi(report_descriptor_spi_umapp(TlcUsage::TouchPad, SPI_SERIES3_13).to_vec()),
         ),
         (
             "28d6043da39c1cc339b20f49f20059f5bf91c32573ca74c25b9fa865e01582bf",
-            report_descriptor_spi_umapp(TlcUsage::TouchScreen, SPI_SERIES3_13).to_vec(),
+            as_c_spi(report_descriptor_spi_umapp(TlcUsage::TouchScreen, SPI_SERIES3_13).to_vec()),
         ),
         (
             "31cd97cce4b5bfafc67bb490a1b3d2f2cf0d573c03e811181e2e7b424490361b",
-            report_descriptor_spi_umapp(TlcUsage::TouchPad, SPI_SERIES3_15).to_vec(),
+            as_c_spi(report_descriptor_spi_umapp(TlcUsage::TouchPad, SPI_SERIES3_15).to_vec()),
         ),
         (
             "976e5046059319cf83acb73000237753a9d2e74e52f5f73da65b5f74b16359d7",
-            report_descriptor_spi_umapp(TlcUsage::TouchScreen, SPI_SERIES3_15).to_vec(),
+            as_c_spi(report_descriptor_spi_umapp(TlcUsage::TouchScreen, SPI_SERIES3_15).to_vec()),
         ),
         (
             "b57b851d567808906f61a0122273da05c972140f1007355390aaf5dda8a072af",

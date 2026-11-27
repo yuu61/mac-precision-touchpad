@@ -8,7 +8,8 @@
 //! - whether the user-mode-app TLC ([`UMAPP_TLC`]) is appended.
 //!
 //! The builders mirror the C macros item by item, with the item names from [`crate::item`]. They
-//! reproduce all 16 descriptors byte for byte:
+//! reproduce all 16 descriptors byte for byte, except one deliberate change: the SPI contact ID's logical
+//! maximum is [`SPI_CONTACT_ID_LOGICAL_MAX`] (4) instead of 3, at [`SPI_CONTACT_ID_MAX_OFFSETS`]:
 //!
 //! | Driver | Builder | Length |
 //! |---|---|---|
@@ -26,8 +27,8 @@
 
 use crate::bytes::put;
 use crate::common::{
-    BUTTON_SWITCH, MAX_FINGERS, REPORTID_DEVICE_CAPS, REPORTID_FUNCSWITCH, REPORTID_MULTITOUCH,
-    REPORTID_PTPHQA, REPORTID_REPORTMODE, REPORTID_UMAPP_CONF, SURFACE_SWITCH,
+    BUTTON_SWITCH, MAX_FINGERS, PTP_MAX_CONTACT_POINTS, REPORTID_DEVICE_CAPS, REPORTID_FUNCSWITCH,
+    REPORTID_MULTITOUCH, REPORTID_PTPHQA, REPORTID_REPORTMODE, REPORTID_UMAPP_CONF, SURFACE_SWITCH,
 };
 use crate::item::{
     BEGIN_COLLECTION, END_COLLECTION, FEATURE, INPUT, LOGICAL_MAXIMUM, LOGICAL_MAXIMUM_2,
@@ -163,10 +164,30 @@ pub const FINGER_HEAD_U32_ID: [u8; FINGER_HEAD_U32_ID_LEN] = [
     INPUT, 0x02, // Input: (Data, Var, Abs)
 ];
 
+/// Logical maximum of the SPI 3-bit Contact Identifier: the highest contact slot index `SpiKm` reports
+/// (4). The C descriptor declared 3, so the fifth contact's ID was out of range (P3 fix).
+pub const SPI_CONTACT_ID_LOGICAL_MAX: u8 = PTP_MAX_CONTACT_POINTS - 1;
+
+/// Offset of the Contact Identifier's logical-maximum value in [`FINGER_HEAD_SPI`].
+pub const FINGER_HEAD_SPI_CONTACT_ID_MAX_OFFSET: usize = 19;
+
+/// Offsets of the Contact Identifier's logical-maximum value in an SPI report descriptor, one per finger
+/// collection (fingers 1, 2, 4 have the global reset, 3 and 5 do not; see [`touchpad_tlc_spi`]).
+pub const SPI_CONTACT_ID_MAX_OFFSETS: [usize; 5] = {
+    let step1 = FINGER_COLLECTION_SPI_LEN + FINGER_SEPARATOR_LEN;
+    let step2 = FINGER_COLLECTION_SPI_NO_RESET_LEN + FINGER_SEPARATOR_LEN;
+    let first = TOUCHPAD_TLC_HEADER_LEN + FINGER_HEAD_SPI_CONTACT_ID_MAX_OFFSET;
+    [
+        first,
+        first + step1,
+        first + 2 * step1,
+        first + 2 * step1 + step2,
+        first + 3 * step1 + step2,
+    ]
+};
+
 /// Head of an SPI 5-byte-contact finger collection, from `BEGIN_COLLECTION` to the padding: Confidence:1,
-/// Tip Switch:1, Contact ID:3 with logical maximum 3, and 3 constant bits.
-///
-/// Preserved quirk: the logical maximum is 3, but `SpiKm` emits contact IDs 0..=4.
+/// Tip Switch:1, Contact ID:3 with logical maximum [`SPI_CONTACT_ID_LOGICAL_MAX`], and 3 constant bits.
 #[rustfmt::skip]
 pub const FINGER_HEAD_SPI: [u8; FINGER_HEAD_SPI_LEN] = [
     BEGIN_COLLECTION, 0x02, // Begin Collection: Logical
@@ -178,13 +199,18 @@ pub const FINGER_HEAD_SPI: [u8; FINGER_HEAD_SPI_LEN] = [
     INPUT, 0x02, // Input: (Data, Var, Abs)
     REPORT_COUNT, 0x01, // Report Count: 1
     REPORT_SIZE, 0x03, // Report Size: 3
-    LOGICAL_MAXIMUM, 0x03, // Logical Maximum: 3
+    LOGICAL_MAXIMUM, SPI_CONTACT_ID_LOGICAL_MAX, // Logical Maximum: 4
     USAGE, 0x51, // Usage: Contact Identifier
     INPUT, 0x02, // Input: (Data, Var, Abs)
     REPORT_SIZE, 0x01, // Report Size: 1
     REPORT_COUNT, 0x03, // Report Count: 3
     INPUT, 0x03, // Input: (Const, Var, Abs)
 ];
+
+const _: () = {
+    assert!(FINGER_HEAD_SPI[FINGER_HEAD_SPI_CONTACT_ID_MAX_OFFSET - 1] == LOGICAL_MAXIMUM);
+    assert!(FINGER_HEAD_SPI[FINGER_HEAD_SPI_CONTACT_ID_MAX_OFFSET] == SPI_CONTACT_ID_LOGICAL_MAX);
+};
 
 /// The `PHYSICAL_MAXIMUM 0, UNIT_EXPONENT 0, UNIT 0` reset that ends `*_FINGER_COLLECTION_1` but is missing
 /// from `*_FINGER_COLLECTION_2`.
