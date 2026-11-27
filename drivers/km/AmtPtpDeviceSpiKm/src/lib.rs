@@ -4,10 +4,10 @@
 //! It answers the HID-minidriver internal IOCTLs itself, with a synthetic identity (VID 0x8910 and its own
 //! Precision Touchpad report descriptor). It queues every upstream `IOCTL_HID_READ_REPORT` in `HidQueue`
 //! and issues one lower read for each one that arrives while the device is `D0ActiveAndConfigured`; reads
-//! queued while unconfigured get no lower read of their own and are served by later lower-read completions
-//! (a successful recovery timer issues exactly one read for all of them, SPI-B12/B13, preserved). It
-//! converts Apple's multitouch packet into a 30-byte PTP input report and switches the trackpad into
-//! multitouch mode at every self-managed-I/O init/restart.
+//! queued while unconfigured get their lower reads when the mode switch succeeds. `SelfManagedIoSuspend`
+//! stops the recovery timer and cancels the lower reads in flight; their completions no longer touch
+//! `HidQueue`. It converts Apple's multitouch packet into a 30-byte PTP input report and switches the
+//! trackpad into multitouch mode at every self-managed-I/O init/restart.
 //!
 //! This crate is the WDF glue only. Every decision that does not need WDF (descriptors, identification,
 //! IOCTL routing, feature reports, the input conversion and the power/read state machine) lives in

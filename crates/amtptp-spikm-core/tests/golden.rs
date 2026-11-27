@@ -10,11 +10,9 @@ use amtptp_spikm_core::descriptors::{
 use amtptp_spikm_core::device::{
     APPLE_VENDOR_ID, DeviceConfig, Family, ReportType, family_for_product, lookup_trackpad,
 };
-use amtptp_spikm_core::feature::{
-    DEVICE_CAPS_REPLY, check_xfer_packet, get_feature,
-};
+use amtptp_spikm_core::feature::{DEVICE_CAPS_REPLY, check_xfer_packet, get_feature};
 use amtptp_spikm_core::input::{SpiPacket, build_report, lower_read_length};
-use amtptp_spikm_core::runtime::DeviceRuntime;
+use amtptp_spikm_core::runtime::{DeviceRuntime, ReadTracker};
 use amtptp_spikm_core::status::*;
 use amtptp_spikm_core::wire::{POOL_TAG, SetStatePacket};
 use core::fmt::Write as _;
@@ -348,7 +346,11 @@ fn scan_time_advances_and_wraps_in_spi_reports() {
     let rt = DeviceRuntime::new();
     let frequency = 10_000_000;
     rt.on_d0_entry(frequency);
-    let _status = rt.on_self_managed_io_init_or_restart(STATUS_SUCCESS, || frequency);
+    let _status = rt.on_self_managed_io_init_or_restart(
+        &mut ReadTracker::<u32>::new(),
+        STATUS_SUCCESS,
+        || frequency,
+    );
     let info = lookup_trackpad(APPLE_VENDOR_ID, 0x0272).unwrap();
     let pkt = packet_with_fingers(1, 1, &[(100, 2000, 800, 600, 30)]);
     let scan_time = |counter| {
@@ -360,7 +362,11 @@ fn scan_time_advances_and_wraps_in_spi_reports() {
     assert_eq!(scan_time(start + 256_000), 256);
     assert_eq!(scan_time(start + 65_535_000), u16::MAX);
     assert_eq!(scan_time(start + 65_536_000), 0);
-    let _status = rt.on_self_managed_io_init_or_restart(STATUS_SUCCESS, || frequency);
+    let _status = rt.on_self_managed_io_init_or_restart(
+        &mut ReadTracker::<u32>::new(),
+        STATUS_SUCCESS,
+        || frequency,
+    );
     assert_eq!(scan_time(start + 70_000_000), 0);
 }
 
@@ -396,7 +402,10 @@ fn feature_checks_spec_4_6() {
     assert_eq!(check_xfer_packet(16, true), Ok(()));
     assert_eq!(get_feature(9, 4, true).status, STATUS_NOT_SUPPORTED);
     assert_eq!(get_feature(8, 256, true).status, STATUS_INVALID_BUFFER_SIZE);
-    assert_eq!(get_feature(8, 257, true).write, ptp_hid::feature::HQA_REPORT);
+    assert_eq!(
+        get_feature(8, 257, true).write,
+        ptp_hid::feature::HQA_REPORT
+    );
     let rt = DeviceRuntime::new();
     assert_eq!(rt.set_feature(9, 4, Some(&[9, 1, 2])), STATUS_NOT_SUPPORTED);
 }

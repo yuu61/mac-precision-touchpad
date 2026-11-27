@@ -17,7 +17,7 @@
 mod common;
 
 use amtptp_spikm_core::device::{APPLE_VENDOR_ID, Family, family_for_product, lookup_trackpad};
-use amtptp_spikm_core::runtime::{DeviceRuntime, DeviceStatus};
+use amtptp_spikm_core::runtime::{DeviceRuntime, DeviceStatus, ReadTracker};
 use amtptp_spikm_core::status::{STATUS_BUFFER_TOO_SMALL, STATUS_SUCCESS};
 use amtptp_spikm_core::wire::LOWER_READ_BUFFER_LEN;
 use common::{Tally, load, prefill, wdf_failures};
@@ -74,7 +74,11 @@ fn replay(e: &Expect) -> Tally {
         // Bring the runtime to Configured with LastReportTime = lrt_in through the real API.
         let rt = DeviceRuntime::new();
         rt.on_d0_entry(lrt_in);
-        let smio = rt.on_self_managed_io_init_or_restart(STATUS_SUCCESS, || lrt_in);
+        let smio = rt.on_self_managed_io_init_or_restart(
+            &mut ReadTracker::<u32>::new(),
+            STATUS_SUCCESS,
+            || lrt_in,
+        );
         assert_eq!(smio.start_recovery_timer, None);
         assert_eq!(rt.device_status(), DeviceStatus::D0ActiveAndConfigured);
         assert_eq!(rt.qpc_frequency(), lrt_in);
@@ -152,7 +156,11 @@ fn replay(e: &Expect) -> Tally {
             // Cross-check: reading the whole buffer like C reproduces the C output `out`.
             let rt_c = DeviceRuntime::new();
             rt_c.on_d0_entry(lrt_in);
-            let _status = rt_c.on_self_managed_io_init_or_restart(STATUS_SUCCESS, || lrt_in);
+            let _status = rt_c.on_self_managed_io_init_or_restart(
+                &mut ReadTracker::<u32>::new(),
+                STATUS_SUCCESS,
+                || lrt_in,
+            );
             let whole = rt_c
                 .complete_lower_read(info, LOWER_READ_BUFFER_LEN as u64, &buffer, || qpcf)
                 .expect("b9 records pass the length gate");

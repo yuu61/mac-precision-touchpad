@@ -7,7 +7,10 @@ use amtptp_spikm_core::device::{
     DESIRED_REPORT_TYPE_VALUE_LEN, DESIRED_REPORT_TYPE_VALUE_NAME, PARAMETERS_KEY_ACCESS,
     SharedDeviceConfig, desired_report_type_value,
 };
-use amtptp_spikm_core::runtime::{D0_EXIT_DRAIN_STATUS, DeviceRuntime, RECOVERY_TIMER_PERIOD};
+use amtptp_spikm_core::runtime::{
+    D0_EXIT_DRAIN_STATUS, DeviceRuntime, MAX_IN_FLIGHT_READS, RECOVERY_TIMER_PERIOD, ReadTracker,
+    SuspendedReads,
+};
 use amtptp_spikm_core::wire::{
     DEVICE_INTERFACE_GUID, LOWER_ATTRIBUTES_IOCTL, LOWER_ATTRIBUTES_LEN, LOWER_READ_BUFFER_LEN,
     NO_IO_TARGET_STATUS, POOL_TAG, SET_STATE_IOCTL, SET_STATE_PACKET_LEN, SetStatePacket,
@@ -20,6 +23,7 @@ use wdf_support::init::{
 };
 use wdf_support::ntstatus::{NT_SUCCESS, STATUS_INVALID_DEVICE_STATE, STATUS_SUCCESS};
 use wdf_support::request::Request;
+use wdf_support::sync::SpinLocked;
 use wdf_support::time::query_performance_frequency;
 use wdk_sys::{
     _POOL_TYPE, _WDF_EXECUTION_LEVEL, GUID, NTSTATUS, PWDFDEVICE_INIT, ULONG,
@@ -32,10 +36,11 @@ use crate::{PROVIDER, input, keyword, queue};
 
 /// Port of the C `DEVICE_CONTEXT` (Device.h:56-84). Named `DEVICE_CONTEXT` for `!wdfkd`.
 ///
-/// The four handles are written exactly once, inside [`create_device`], before the device can receive
-/// any request or PnP/power callback; afterwards the context is only accessed through shared references.
-/// All state that changes later is atomic ([`SharedDeviceConfig`], [`DeviceRuntime`]), so concurrent
-/// callbacks at up to `DISPATCH_LEVEL` never race on plain fields (P2 for SPI-B15).
+/// The four handles and the read lock are created exactly once, inside [`create_device`], before the
+/// device can receive any request or PnP/power callback; afterwards the context is only accessed through
+/// shared references. All state that changes later is atomic ([`SharedDeviceConfig`], [`DeviceRuntime`])
+/// or behind the read lock (`reads`), so concurrent callbacks at up to `DISPATCH_LEVEL` never race on
+/// plain fields (P2 for SPI-B15).
 ///
 /// Dropped C fields (dead): `SpiDevice`, `InputPollThreadHandle`. `HidVendorID`, `HidProductID`,
 /// `HidVersionNumber`, `TrackpadInfo` and `ReportType` are in `config`; `DeviceStatus`, the reporting clock,
@@ -53,6 +58,9 @@ pub(crate) struct DeviceContext {
     pub(crate) config: SharedDeviceConfig,
     /// `DeviceStatus`, the reporting clock and the PTP feature flags.
     pub(crate) runtime: DeviceRuntime,
+    /// The lower reads in flight and the current epoch (see [`amtptp_spikm_core::runtime`]). Every
+    /// change of `DeviceStatus` and every claim of a lower read happens under this lock.
+    reads: SpinLocked<ReadTracker<WDFREQUEST>>,
 }
 
 impl DeviceContext {
@@ -66,7 +74,22 @@ impl DeviceContext {
             hid_read_buffer_lookaside: null_mut(),
             config: SharedDeviceConfig::new(),
             runtime: DeviceRuntime::new(),
+            reads: SpinLocked::new(ReadTracker::new()),
         }
+    }
+
+    /// Runs `f` with the runtime and the read tracker while holding the read lock. `f` runs at
+    /// `DISPATCH_LEVEL` and must not send, cancel or complete a request.
+    ///
+    /// # Safety
+    /// The context was set up by [`create_device`] (so the lock exists); IRQL <= `DISPATCH_LEVEL`.
+    pub(crate) unsafe fn with_reads<R, F>(&self, f: F) -> R
+    where
+        F: FnOnce(&DeviceRuntime, &mut ReadTracker<WDFREQUEST>) -> R,
+    {
+        // SAFETY: the lock was created in `initialize_device` (caller contract); `f` only touches the
+        // runtime and the tracker.
+        unsafe { self.reads.with(|reads| f(&self.runtime, reads)) }
     }
 }
 
@@ -125,6 +148,7 @@ pub(crate) unsafe fn create_device(mut device_init: PWDFDEVICE_INIT) -> NTSTATUS
         Some(evt_device_self_managed_io_init_or_restart);
     pnp_power_callbacks.EvtDeviceSelfManagedIoRestart =
         Some(evt_device_self_managed_io_init_or_restart);
+    pnp_power_callbacks.EvtDeviceSelfManagedIoSuspend = Some(evt_device_self_managed_io_suspend);
     // SAFETY: `device_init` is valid and unconsumed (caller contract); the
     // callbacks structure is initialized by WDF_PNPPOWER_EVENT_CALLBACKS_INIT.
     unsafe {
@@ -220,6 +244,15 @@ unsafe fn initialize_device(device: WDFDEVICE, context: *mut DeviceContext) -> N
     };
     if !NT_SUCCESS(status) {
         trace_create_device_failure(b"WdfTimerCreate", status);
+        return status;
+    }
+
+    // The read lock (parent = the device). Not in C: see `DeviceContext::reads`.
+    // SAFETY: PASSIVE_LEVEL; the context is not reachable by any callback yet, and the device outlives
+    // the lock (its child).
+    let status = unsafe { (*context).reads.create(device.cast()) };
+    if !NT_SUCCESS(status) {
+        trace_create_device_failure(b"WdfSpinLockCreate", status);
         return status;
     }
 
@@ -469,9 +502,100 @@ unsafe extern "C" fn evt_device_d0_entry(
         .on_d0_entry(query_performance_frequency())
 }
 
-/// `AmtPtpEvtDeviceD0Exit` (Device.c:353-395): `DeviceStatus = D3`, then every request still in
-/// `HidQueue` is completed with `STATUS_CANCELLED` (Information 0). The recovery timer is not stopped,
-/// in-flight lower reads are not cancelled and the trackpad is not switched off (SPI-B12/B14, preserved).
+/// `EvtDeviceSelfManagedIoSuspend` (not in C): runs before every `D0Exit` (power-down, resource
+/// rebalance, removal and surprise removal).
+///
+/// 1. `DeviceStatus = D3` and a new epoch, under the read lock: no lower read is sent from now on, and
+///    the completion of every read sent before is stale (it leaves `HidQueue` alone).
+/// 2. `WdfTimerStop(Wait = FALSE)`: a pending recovery timer does not fire. A callback that is already
+///    running finds the device suspended and does nothing. It is not waited for, because its mode switch
+///    has no timeout.
+/// 3. `WdfRequestCancelSentRequest` on every read that was in flight. Their completions are not waited
+///    for either; they are dropped whenever they arrive.
+///
+/// Together with the epoch check in the completion routine this fixes SPI-B12/B14 (P3).
+unsafe extern "C" fn evt_device_self_managed_io_suspend(device: WDFDEVICE) -> NTSTATUS {
+    // SAFETY: framework callback for one of our devices, at PASSIVE_LEVEL.
+    let Some(context) = (unsafe { device_context(device) }) else {
+        return STATUS_INVALID_DEVICE_STATE;
+    };
+    // SAFETY: the context belongs to a live device; PASSIVE_LEVEL.
+    let cancelled = unsafe { cancel_in_flight_reads(context, DeviceRuntime::suspend) };
+    // SAFETY: the timer was created in AddDevice and lives as long as the device; Wait = FALSE is
+    // allowed at any IRQL <= DISPATCH_LEVEL.
+    let was_queued = unsafe {
+        call_unsafe_wdf_function_binding!(WdfTimerStop, context.power_on_recovery_timer, 0)
+    };
+    tlg::write_event!(
+        PROVIDER,
+        "SelfManagedIoSuspend",
+        level(Informational),
+        keyword(keyword::DRIVER),
+        u32("CancelledLowerReads", &cancelled),
+        bool8("TimerWasQueued", &(was_queued != 0))
+    );
+    STATUS_SUCCESS
+}
+
+/// Suspends the read pipeline with `suspend` (under the read lock), then cancels every read it handed
+/// out. Returns how many reads were cancelled.
+///
+/// Each read is referenced under the lock: it is still registered there, so its completion routine has
+/// not deleted it yet (the routine unregisters it under the same lock first). The reference keeps the
+/// handle valid while it is cancelled outside the lock (cancelling can run the completion routine
+/// synchronously, which takes the lock). A read that was claimed but not sent yet only gets its IRP's
+/// cancel flag set; it is stale anyway.
+///
+/// # Safety
+/// `context` belongs to a live device set up by [`create_device`]; IRQL <= `DISPATCH_LEVEL`.
+unsafe fn cancel_in_flight_reads<F>(context: &DeviceContext, suspend: F) -> u32
+where
+    F: FnOnce(&DeviceRuntime, &mut ReadTracker<WDFREQUEST>) -> SuspendedReads<WDFREQUEST>,
+{
+    let mut held: [WDFREQUEST; MAX_IN_FLIGHT_READS] = [null_mut(); MAX_IN_FLIGHT_READS];
+    let take = |runtime: &DeviceRuntime, reads: &mut ReadTracker<WDFREQUEST>| {
+        let suspended = suspend(runtime, reads);
+        let mut count = 0_usize;
+        for (slot, read) in held.iter_mut().zip(suspended.iter()) {
+            // SAFETY: a registered lower read is alive (see above); NULL tag, as WdfObjectReference.
+            unsafe {
+                call_unsafe_wdf_function_binding!(
+                    WdfObjectReferenceActual,
+                    read.cast(),
+                    null_mut(),
+                    0,
+                    core::ptr::null()
+                );
+            }
+            *slot = read;
+            count += 1;
+        }
+        count
+    };
+    // SAFETY: caller contract; `take` only references objects (no callback can run from it).
+    let count = unsafe { context.with_reads(take) };
+    for &read in held.iter().take(count) {
+        // SAFETY: referenced above, so the handle is valid even if the read has completed and been
+        // deleted meanwhile; IRQL <= DISPATCH_LEVEL.
+        unsafe {
+            let _cancelled = call_unsafe_wdf_function_binding!(WdfRequestCancelSentRequest, read);
+            call_unsafe_wdf_function_binding!(
+                WdfObjectDereferenceActual,
+                read.cast(),
+                null_mut(),
+                0,
+                core::ptr::null()
+            );
+        }
+    }
+    // At most MAX_IN_FLIGHT_READS (32).
+    u32::try_from(count).unwrap_or(u32::MAX)
+}
+
+/// `AmtPtpEvtDeviceD0Exit` (Device.c:353-395): `DeviceStatus = D3` (again: `SelfManagedIoSuspend` already
+/// suspended the read pipeline, so normally no read is left to cancel), then every request still in
+/// `HidQueue` is completed with `STATUS_CANCELLED` (Information 0). The trackpad is not switched off
+/// (SPI-B14, preserved).
 unsafe extern "C" fn evt_device_d0_exit(
     device: WDFDEVICE,
     target_state: WDF_POWER_DEVICE_STATE,
@@ -480,7 +604,15 @@ unsafe extern "C" fn evt_device_d0_exit(
     let Some(context) = (unsafe { device_context(device) }) else {
         return STATUS_INVALID_DEVICE_STATE;
     };
-    let status = context.runtime.on_d0_exit();
+    let mut status = STATUS_SUCCESS;
+    // SAFETY: the context belongs to a live device; PASSIVE_LEVEL.
+    let _cancelled = unsafe {
+        cancel_in_flight_reads(context, |runtime, reads| {
+            let (d0_exit_status, suspended) = runtime.on_d0_exit(reads);
+            status = d0_exit_status;
+            suspended
+        })
+    };
 
     let mut drained: u32 = 0;
     loop {
@@ -518,8 +650,9 @@ unsafe extern "C" fn evt_device_d0_exit(
 /// `AmtPtpEvtDeviceSelfManagedIoInitOrRestart` (Device.c:397-427), registered for both
 /// `SelfManagedIoInit` and `SelfManagedIoRestart`; `PASSIVE_LEVEL`.
 ///
-/// Runs the mode switch. Success: `DeviceStatus = D0ActiveAndConfigured` and a new reporting session; no lower read is issued for already-queued requests (SPI-B13, preserved). Failure: start the
-/// 5 s recovery timer (re-arming it if it is still pending). Always `STATUS_SUCCESS`.
+/// Runs the mode switch. Success: `DeviceStatus = D0ActiveAndConfigured`, a new reporting session, and
+/// one lower read for every upstream read already waiting in `HidQueue` (P3 fix of SPI-B13). Failure:
+/// start the 5 s recovery timer. Always `STATUS_SUCCESS`.
 unsafe extern "C" fn evt_device_self_managed_io_init_or_restart(device: WDFDEVICE) -> NTSTATUS {
     // SAFETY: framework callback for one of our devices, at PASSIVE_LEVEL.
     let Some(context) = (unsafe { device_context(device) }) else {
@@ -527,9 +660,17 @@ unsafe extern "C" fn evt_device_self_managed_io_init_or_restart(device: WDFDEVIC
     };
     // SAFETY: PASSIVE_LEVEL (SelfManagedIoInit/Restart).
     let set_state = unsafe { spi_set_state(context, true) };
-    let outcome = context
-        .runtime
-        .on_self_managed_io_init_or_restart(set_state, query_performance_frequency);
+    // SAFETY: the context belongs to a live device; PASSIVE_LEVEL.
+    let outcome = unsafe {
+        context.with_reads(|runtime, reads| {
+            runtime.on_self_managed_io_init_or_restart(reads, set_state, query_performance_frequency)
+        })
+    };
+    if outcome.configured {
+        // SAFETY: `device` is live and `context` its context; PASSIVE_LEVEL.
+        let issued = unsafe { input::issue_backlog_reads(device, context) };
+        trace_configured(b"SelfManagedIo", issued);
+    }
     if let Some(due_time) = outcome.start_recovery_timer {
         tlg::write_event!(
             PROVIDER,
@@ -611,9 +752,10 @@ const SET_STATE_PACKET_DESCRIPTOR_LEN: ULONG = {
 /// `AmtPtpPowerRecoveryTimerCallback` (Device.c:541-562): the passive-level timer callback (a framework
 /// work item), 5 s after a failed SelfManagedIoInit/Restart.
 ///
-/// Runs the mode switch again. Success: issue exactly one lower read, then
-/// `DeviceStatus = D0ActiveAndConfigured` (the reporting clock is not refreshed). Failure: nothing, no
-/// reschedule. It runs whatever the current power state is, also after `D0Exit` (SPI-B12, preserved).
+/// Only while the device is in D0 and still waiting for the mode switch (P3 fix of SPI-B12: the C
+/// callback also ran in D3 and after a successful restart): run the mode switch again. Success, unless
+/// the device was suspended meanwhile: `DeviceStatus = D0ActiveAndConfigured`, a new reporting session,
+/// and one lower read for every queued upstream read. Failure: nothing, no reschedule.
 unsafe extern "C" fn power_recovery_timer_callback(timer: WDFTIMER) {
     // SAFETY: `timer` is the framework's timer handle for this callback.
     let device: WDFDEVICE =
@@ -623,18 +765,51 @@ unsafe extern "C" fn power_recovery_timer_callback(timer: WDFTIMER) {
     let Some(context) = (unsafe { device_context(device) }) else {
         return;
     };
+    // SAFETY: the context belongs to a live device; PASSIVE_LEVEL.
+    let Some(ticket) = (unsafe { context.with_reads(|runtime, reads| runtime.begin_recovery(reads)) })
+    else {
+        tlg::write_event!(
+            PROVIDER,
+            "PowerRecoveryTimerSkipped",
+            level(Informational),
+            keyword(keyword::DRIVER),
+            u32("DeviceStatus", &(context.runtime.device_status() as u32))
+        );
+        return;
+    };
     // SAFETY: passive-level timer callback.
     let status = unsafe { spi_set_state(context, true) };
-    let issued = context.runtime.on_recovery_timer(status, || {
-        // SAFETY: `device` is the live parent of the timer and `context` its context; IRQL <= DISPATCH.
-        unsafe { input::spi_input_issue_request(device, context) }
-    });
+    // SAFETY: as above.
+    let configured = unsafe {
+        context.with_reads(|runtime, reads| {
+            runtime.finish_recovery(reads, ticket, status, query_performance_frequency)
+        })
+    };
+    let issued = if configured {
+        // SAFETY: `device` is the live parent of the timer and `context` its context; PASSIVE_LEVEL.
+        unsafe { input::issue_backlog_reads(device, context) }
+    } else {
+        0
+    };
     tlg::write_event!(
         PROVIDER,
         "PowerRecoveryTimer",
         level(Informational),
         keyword(keyword::DRIVER),
         win_ntstatus("Status", &status),
-        bool8("ReadIssued", &issued)
+        bool8("Configured", &configured),
+        u32("ReadsIssued", &issued)
+    );
+}
+
+/// Trace for a transition to configured and the backlog reads issued for it.
+fn trace_configured(source: &[u8], issued: u32) {
+    tlg::write_event!(
+        PROVIDER,
+        "Configured",
+        level(Informational),
+        keyword(keyword::DRIVER),
+        str8("Source", source),
+        u32("BacklogReadsIssued", &issued)
     );
 }

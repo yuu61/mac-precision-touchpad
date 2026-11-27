@@ -6,7 +6,7 @@
 mod common;
 
 use amtptp_spikm_core::ioctl::{InternalIoctl, NOT_SUPPORTED_STATUS, classify_internal_ioctl};
-use amtptp_spikm_core::runtime::{DeviceRuntime, DeviceStatus};
+use amtptp_spikm_core::runtime::{DeviceRuntime, DeviceStatus, ReadTracker};
 use amtptp_spikm_core::status::{STATUS_SUCCESS, STATUS_UNSUCCESSFUL};
 use common::{Record, Tally, load, wdf_failures};
 
@@ -28,11 +28,19 @@ fn runtime_in(ds: u32) -> DeviceRuntime {
         }
         1 => {
             rt.on_d0_entry(10_000_000);
-            let _status = rt.on_self_managed_io_init_or_restart(STATUS_SUCCESS, || 10_000_000);
+            let _status = rt.on_self_managed_io_init_or_restart(
+                &mut ReadTracker::<u32>::new(),
+                STATUS_SUCCESS,
+                || 10_000_000,
+            );
         }
         _ => {
             rt.on_d0_entry(10_000_000);
-            let _status = rt.on_self_managed_io_init_or_restart(STATUS_UNSUCCESSFUL, || 0);
+            let _status = rt.on_self_managed_io_init_or_restart(
+                &mut ReadTracker::<u32>::new(),
+                STATUS_UNSUCCESSFUL,
+                || 0,
+            );
         }
     }
     assert_eq!(rt.device_status() as u32, ds);
