@@ -9,6 +9,13 @@ const UNITS_PER_SECOND: u128 = 10_000;
 ///
 /// The first report establishes the origin. All frames use the same origin until the driver
 /// restarts reporting. The 16-bit value wraps every 6.5536 seconds.
+///
+/// [`Self::restart`] and [`Self::sample`] may run concurrently on different processors (a PnP or
+/// timer callback restarts the session while a read completion samples it). The frequency is
+/// published before the session reset: `restart` stores it and then resets the origin with
+/// `Release`, and `sample` loads the origin with `Acquire` before it loads the frequency. A sample
+/// that sees the reset of a session therefore also sees that session's frequency, so it never
+/// converts a new session's ticks with the frequency of an earlier one (or with the initial 0).
 #[derive(Debug)]
 pub struct ScanClock {
     frequency: AtomicI64,
@@ -39,8 +46,9 @@ impl ScanClock {
 
     /// Starts a new reporting session with the given tick rate per second.
     pub fn restart(&self, frequency: i64) {
-        self.origin.store(NO_ORIGIN, Ordering::Relaxed);
+        // The frequency first, then the reset that publishes it (see the type docs).
         self.frequency.store(frequency, Ordering::Relaxed);
+        self.origin.store(NO_ORIGIN, Ordering::Release);
     }
 
     /// Returns the cached tick rate per second.
@@ -53,17 +61,18 @@ impl ScanClock {
     /// `counter` is the current QPC tick count.
     /// An unavailable or invalid sample yields zero without setting the origin.
     pub fn sample(&self, counter: i64) -> u16 {
-        let frequency = self.frequency();
+        // The origin before the frequency: seeing a session's reset implies seeing its frequency.
+        let origin = self.origin.load(Ordering::Acquire);
+        let frequency = self.frequency.load(Ordering::Relaxed);
         if counter < 0 || frequency <= 0 {
             return 0;
         }
-        let origin = self.origin.load(Ordering::Relaxed);
         let origin = if origin == NO_ORIGIN {
             match self.origin.compare_exchange(
                 NO_ORIGIN,
                 counter,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
+                Ordering::AcqRel,
+                Ordering::Acquire,
             ) {
                 Ok(_) => return 0,
                 Err(origin) => origin,
