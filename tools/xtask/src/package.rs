@@ -261,7 +261,7 @@ fn package_one(cx: &Context<'_>, arch: Arch) -> Result<(), String> {
     for b in &BINARIES {
         let out = cx.build.output_dir(arch);
         let dll = out.join(format!("{}.dll", b.name));
-        process::require_file(&dll, " (expected from the drivers/km build)")?;
+        process::require_file(&dll, " (expected from the drivers build)")?;
         let dest = pkg.join(b.packaged_name());
         copy(&dll, &dest)?;
         payload.push(dest);
@@ -481,6 +481,10 @@ fn print_tree(dir: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    use amtptp_core::spi::device::{family_for_product, lookup_trackpad};
+    use amtptp_usb_bt::bluetooth::Transport;
+    use amtptp_usb_bt::usb::config::{FALLBACK_PIDS, config_for_pid, uses_listed_fallback};
+
     use super::*;
 
     #[test]
@@ -683,20 +687,20 @@ mod tests {
                 "amtptpdevicespikm_device" => {
                     let (vid, pid) = vid_pid(&id);
                     assert!(id.to_ascii_lowercase().starts_with("spi\\"), "{ctx}");
-                    let trackpad = amtptp_spikm_core::device::lookup_trackpad(vid, pid);
+                    let trackpad = lookup_trackpad(vid, pid);
                     assert!(trackpad.is_some(), "{ctx}: no SPI model");
                     assert!(
-                        amtptp_spikm_core::device::family_for_product(pid).is_some(),
+                        family_for_product(pid).is_some(),
                         "{ctx}: no SPI descriptor family"
                     );
                 }
                 "amtptpdeviceusbkm_device" => {
                     let (vid, pid) = vid_pid(&id);
                     assert_eq!(vid, 0x05AC, "{ctx}");
-                    let config = amtptp_usbkm_core::config::config_for_pid(pid);
+                    let config = config_for_pid(pid);
                     if !config.matches(pid) {
                         assert!(
-                            amtptp_usbkm_core::config::uses_listed_fallback(pid),
+                            uses_listed_fallback(pid),
                             "{ctx}: falls back to the generic profile without being listed"
                         );
                         kmdf_fallbacks.insert(pid);
@@ -705,7 +709,7 @@ mod tests {
                 "amtptphidfilter_miniportdevice" => {
                     let (vid, pid) = vid_pid(&id);
                     assert!(
-                        amtptp_hidfilter_core::Transport::from_ids(vid, pid).is_ok(),
+                        Transport::from_ids(vid, pid).is_ok(),
                         "{ctx}: no Magic Trackpad 2 transport"
                     );
                 }
@@ -715,7 +719,7 @@ mod tests {
                     assert!(id.starts_with("bthenum\\{00001124-"), "{ctx}");
                     let (vid, pid) = vid_pid(&id);
                     assert!(
-                        amtptp_hidfilter_core::Transport::from_ids(vid, pid).is_ok(),
+                        Transport::from_ids(vid, pid).is_ok(),
                         "{ctx}: no Magic Trackpad 2 transport"
                     );
                 }
@@ -725,9 +729,7 @@ mod tests {
             }
         }
         // No listed fallback PID is stale.
-        let listed: std::collections::BTreeSet<u16> = amtptp_usbkm_core::config::FALLBACK_PIDS
-            .into_iter()
-            .collect();
+        let listed: std::collections::BTreeSet<u16> = FALLBACK_PIDS.into_iter().collect();
         assert_eq!(kmdf_fallbacks, listed);
     }
 

@@ -1,0 +1,7 @@
+//! Status codes and types used by this driver.
+
+pub use amtptp_core::hid::status::{
+    Completion, NtStatus, STATUS_BUFFER_TOO_SMALL, STATUS_CANCELLED, STATUS_DATA_ERROR,
+    STATUS_INVALID_BUFFER_SIZE, STATUS_INVALID_DEVICE_REQUEST, STATUS_INVALID_DEVICE_STATE,
+    STATUS_NOT_SUPPORTED, STATUS_SUCCESS, STATUS_UNKNOWN_REVISION, nt_success,
+};

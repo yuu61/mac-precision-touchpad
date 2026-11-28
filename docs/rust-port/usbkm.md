@@ -4,9 +4,11 @@ The KMDF driver now also handles the Wellspring MacBooks and the USB Magic Track
 
 The C driver is `src/AmtPtpDeviceUsbKm` at commit 2edb0f2. The Rust port has two parts:
 
-- `crates/amtptp-usbkm-core` (GPL-2.0-only, `no_std`, depends only on `ptp-hid`) holds all the logic that does not
-  need WDF. Its crate-level rustdoc ("How the driver uses this") is the contract for the glue.
-- `drivers/km/AmtPtpDeviceUsbKm` is the KMDF 1.31 glue. Entries below marked *glue* are decisions the
+- `crates/amtptp-usb-bt` (GPL-2.0-only, `no_std`) holds the logic that runs without WDF. USB
+  lifecycle and mode transitions are under `src/application/usb`, and the model table and packet
+  decoders are under `src/infrastructure`. The `src/interface/usb.rs` rustdoc describes the
+  contract for the glue.
+- `drivers/interface/usb` is the KMDF 1.31 glue. Entries below marked *glue* are decisions the
   glue has to implement; the core provides the constants or functions for them.
 
 The porting spec is [`specs/usbkm.md`](specs/usbkm.md), including its verification addendum. Bug IDs `KM-Bn` are the spec's `Bn` (§10.1).
@@ -150,7 +152,7 @@ status is traced in `UsbIo::configure_continuous_reader`.
   and the transfer pair are one step, so two switches never interleave. D0Exit stops the interrupt pipe before it
   takes the lock.
 
-## Driver (stage 2): `drivers/km/AmtPtpDeviceUsbKm`
+## Driver (stage 2): `drivers/interface/usb`
 
 The KMDF glue makes the WDF calls and leaves the hardware-independent decisions to the core.
 

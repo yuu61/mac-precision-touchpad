@@ -44,20 +44,32 @@ The drivers are written in Rust on top of [windows-drivers-rs](https://github.co
 
 | Binary | Bus | Framework | Source |
 |---|---|---|---|
-| `AmtPtpDeviceUsbKm.sys` | USB (Wellspring MacBooks, T2, Magic Trackpad 2) | KMDF 1.31 | `drivers/km/AmtPtpDeviceUsbKm`, `crates/amtptp-usbkm-core` |
-| `AmtPtpDeviceSpiKm.sys` | SPI | KMDF 1.31 | `drivers/km/AmtPtpDeviceSpiKm`, `crates/amtptp-spikm-core` |
-| `AmtPtpHidFilter.sys` | Bluetooth (Magic Trackpad 2) | KMDF 1.31 | `drivers/km/AmtPtpHidFilter`, `crates/amtptp-hidfilter-core` |
-| `AmtPtpBthFilter.sys` | Bluetooth (Magic Trackpad 2), below HidBth | KMDF 1.31 | `drivers/km/AmtPtpBthFilter`, `crates/amtptp-hidfilter-core` (`bth`) |
+| `AmtPtpDeviceUsbKm.sys` | USB (Wellspring MacBooks, T2, Magic Trackpad 2) | KMDF 1.31 | [KMDF](drivers/interface/usb/), [core](crates/amtptp-usb-bt/src/interface/usb/) |
+| `AmtPtpDeviceSpiKm.sys` | SPI | KMDF 1.31 | [KMDF](drivers/interface/spi/), [core](crates/amtptp-core/src/interface/spi/) |
+| `AmtPtpHidFilter.sys` | Bluetooth (Magic Trackpad 2) | KMDF 1.31 | [KMDF](drivers/interface/bluetooth/hid/), [core](crates/amtptp-usb-bt/src/interface/bluetooth/) |
+| `AmtPtpBthFilter.sys` | Bluetooth (Magic Trackpad 2), below HidBth | KMDF 1.31 | [KMDF](drivers/interface/bluetooth/bth/), [core](crates/amtptp-usb-bt/src/infrastructure/bth.rs) |
 
 ### Repository layout
 
 | Directory | Contents |
 |---|---|
-| [`crates/`](crates/) | Hardware-independent `no_std` driver logic, shared Precision Touchpad HID code, and host tests with fixtures recorded from the C drivers. |
-| [`drivers/`](drivers/) | WDK driver code. `km/` is the KMDF workspace. `support/` contains shared WDF glue and the Windows resource compiler helper. |
+| [`crates/amtptp-core/`](crates/amtptp-core/) | MIT `no_std` crate with the touchpad domain, HID codecs and SPI logic. |
+| [`crates/amtptp-usb-bt/`](crates/amtptp-usb-bt/) | GPLv2 `no_std` crate with USB and Bluetooth logic and the shared Apple packet decoder. |
+| [`drivers/`](drivers/) | KMDF workspace with four packages in `interface/` and shared WDF and build code in `infrastructure/`. |
 | [`packaging/`](packaging/) | INF templates and the PowerShell helper for creating CAB files. |
 | [`tools/`](tools/) | The `xtask` build and packaging utility and the WPR profile in `tracing/` for all four drivers. |
 | [`docs/rust-port/`](docs/rust-port/) | Rust port records and the driver packaging guide. |
+
+The input-reporting path is organized into four layers.
+
+| Layer | Responsibility |
+|---|---|
+| Domain | The [contact tracker](crates/amtptp-core/src/domain.rs) maintains identity, confidence and liftoff across frames. |
+| Application | The [reporting use case](crates/amtptp-core/src/application/input.rs) applies surface and button reporting settings to decoded observations. The [USB and Bluetooth policies](crates/amtptp-usb-bt/src/application/) manage device state, power transitions and recovery. |
+| Infrastructure | [Apple model tables and packet codecs](crates/amtptp-usb-bt/src/infrastructure/) supply the transport layout and contact observations. The [HID codecs](crates/amtptp-core/src/infrastructure/hid.rs) encode frames as 30- or 50-byte reports. |
+| Interface | [KMDF callbacks](drivers/interface/) handle Windows requests, queues and power events. The host crates' `interface/` modules translate transport operations into calls to the application layer and codecs. |
+
+Host tests replay the C driver fixtures from the two crates' `tests/` directories.
 
 ### Driver build and tests
 
@@ -105,9 +117,8 @@ I would like to thank projects like [magictrackpad2-dkms](https://github.com/rob
  
 ## License
 
-- The USB driver, the two Bluetooth filters, and `crates/bcm5974` are licensed under [GPLv2](LICENSE-GPL.md).
-- SPI driver is licensed under [MIT](LICENSE-MIT.md).
-- The shared building blocks (`crates/ptp-hid`, `drivers/support/wdf-support`, `drivers/support/rc-embed`) are licensed under [MIT](LICENSE-MIT.md).
+- The USB driver, the two Bluetooth filters, and `amtptp-usb-bt` are licensed under [GPLv2](LICENSE-GPL.md).
+- The SPI driver, `amtptp-core` and the shared KMDF support code are licensed under [MIT](LICENSE-MIT.md).
 
 See [LICENSE.md](LICENSE.md) for the mapping of source directories to licenses.
 

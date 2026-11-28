@@ -5,8 +5,8 @@
 C counterpart: it replaces the HIDCLASS detour of `AmtPtpHidFilter` (see [hidfilter.md](hidfilter.md),
 "The data source").
 
-* `crates/amtptp-hidfilter-core/src/bth.rs`: the pure part, shared with `AmtPtpHidFilter` (host-tested).
-* `drivers/km/AmtPtpBthFilter`: the KMDF glue (`lib.rs`, `brb.rs`, `sdp.rs`, `interrupt.rs`).
+* `crates/amtptp-usb-bt/src/infrastructure/bth.rs`: the pure part, shared with `AmtPtpHidFilter` (host-tested).
+* `drivers/interface/bluetooth/bth`: the KMDF glue (`lib.rs`, `brb.rs`, `sdp.rs`, `interrupt.rs`).
 
 ## Why
 
@@ -156,7 +156,7 @@ driver and device, 0x2 SDP, 0x4 interrupt channel.
 * Error: `CallFailed` (WDF call and status).
 * Verbose, one per report: `ReportPadded` (bytes received), `PadSkipped` (bytes received and left over).
 
-[`VENDOR_TLC`]: ../../crates/amtptp-hidfilter-core/src/bth.rs
-[`augment_sdp_attribute_list`]: ../../crates/amtptp-hidfilter-core/src/bth.rs
-[`pad_interrupt_payload`]: ../../crates/amtptp-hidfilter-core/src/bth.rs
-[`unpad_report`]: ../../crates/amtptp-hidfilter-core/src/bth.rs
+[`VENDOR_TLC`]: ../../crates/amtptp-usb-bt/src/infrastructure/bth.rs
+[`augment_sdp_attribute_list`]: ../../crates/amtptp-usb-bt/src/infrastructure/bth.rs
+[`pad_interrupt_payload`]: ../../crates/amtptp-usb-bt/src/infrastructure/bth.rs
+[`unpad_report`]: ../../crates/amtptp-usb-bt/src/infrastructure/bth.rs

@@ -3,10 +3,6 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
-    [ValidateSet('km')]
-    [string]$Workspace,
-
-    [Parameter(Mandatory)]
     [string]$Target,
 
     [Parameter(Mandatory)]
@@ -42,8 +38,7 @@ foreach ($var in $sanitizedVars) {
     Remove-Item "Env:$var" -ErrorAction SilentlyContinue
 }
 
-$workspaceDir = Join-Path 'drivers' $Workspace
-Push-Location $workspaceDir
+Push-Location 'drivers'
 try {
     if ($LintSupport) {
         if ([string]::IsNullOrWhiteSpace($Toolchain)) {

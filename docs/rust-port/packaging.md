@@ -29,7 +29,7 @@ dependencies). This replaces `AmtPtpDriver.sln`, the driver `.vcxproj` files and
       reads them.
     - xtask does not export `WDKContentRoot` / `Version_Number` to the driver builds to make
       `WDK_ROOT` steer them too. wdk-build emits no `rerun-if-env-changed`, so a changed value
-      would leave stale wdk-sys bindings and link paths in `drivers/km/target`.
+      would leave stale wdk-sys bindings and link paths in `drivers/target`.
   - Tool locations in WDK 10.0.28000: stampinf is in `bin\<ver>\x64`, Inf2Cat only in
     `bin\<ver>\x86`, InfVerif in `Tools\<ver>\x64`, signtool in `bin\<ver>\x64`.
 - LLVM (libclang) for wdk-sys's bindgen. When `LIBCLANG_PATH` is unset and
@@ -51,16 +51,16 @@ cargo xtask help
 
 - `--arch`: defaults to the host architecture. `all` means x64 and arm64.
 - `--release`: uses the release profile. The default is the dev profile.
-- `build`: runs `cargo build --target <triple> [--release]` in `drivers/km` (KMDF: UsbKm, SpiKm,
+- `build`: runs `cargo build --target <triple> [--release]` in `drivers` (KMDF: UsbKm, SpiKm,
   HidFilter and BthFilter).
-  - The binaries go to `drivers/km/target/<triple>/<debug|release>/<Name>.dll` and `.pdb`.
+  - The binaries go to `drivers/target/<triple>/<debug|release>/<Name>.dll` and `.pdb`.
   - The target dir must stay inside each driver workspace, because wdk-build walks up from
     OUT_DIR to the first `Cargo.lock`. `RUSTFLAGS`-style variables would replace the workspace's
     `+crt-static` rustflags. So xtask removes `CARGO_TARGET_DIR`, `CARGO_BUILD_TARGET_DIR`,
     `CARGO_BUILD_TARGET`, `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS` and `CARGO_BUILD_RUSTFLAGS`
     from the driver builds' environment.
 - `package`: resolves one local date and version with StampInf and then builds the KMDF drivers
-  with that version. It uses `drivers/km/target/packaging/` for build output so plain Cargo builds
+  with that version. It uses `drivers/target/packaging/` for build output so plain Cargo builds
   can use the crate version in their own build directory. The one package template is
   `packaging/AmtPtpDevice.inx` (see [One INF](#one-inf)). Then, for each arch:
   1. It empties `target/package/<arch>/AmtPtpDevice/` and `target/package/<arch>/AmtPtpDevice.symbols/`,
@@ -73,7 +73,7 @@ cargo xtask help
   3. It writes `packaging/AmtPtpDevice.inx` as `AmtPtpDevice.inf` with CRLF line endings. The
      `.inx` is LF in git.
   4. It runs `stampinf -f <inf> -d <date> -a amd64|arm64 -c AmtPtpDevice.cat -v <version> -k 1.31`.
-     The KMDF version comes from the workspace metadata in `drivers/km/Cargo.toml`.
+     The KMDF version comes from the workspace metadata in `drivers/Cargo.toml`.
   5. It checks that the stamped file contains the selected `DriverVer`, the expected
      `CatalogFile` and `KmdfLibraryVersion` values, and no unexpanded keywords.
   6. It runs `InfVerif /w <inf>` on the entire stamped INF. A Windows Driver validation error stops
@@ -97,14 +97,14 @@ cargo xtask help
   samples the local time as `h.m.s.ms` at the start of the command. The local date and version
   are shared by both architectures in an `--arch all` build. The explicit package options take
   precedence over the StampInf `PRIVATE_DRIVER_PACKAGE` environment override.
-- `rc-embed` generates `OUT_DIR/version.rc` and links the compiled resource into each KMDF
+- `drivers/infrastructure/version.rs` generates `OUT_DIR/version.rc` and links the compiled resource into each KMDF
   image as `VFT_DRV`. It rebuilds when the package version changes. Plain driver builds,
   including `cargo xtask build`, use the crate version as `major.minor.patch.0`.
 - `test`: runs these steps, all of them, then reports every failure:
   - `cargo test --workspace` in the host workspace (core crates and xtask);
   - Clippy on all host targets, including integration tests.
   - Clippy in the driver workspace via `clippy-driver` as the compiler wrapper.
-    This also checks the shared `wdf-support` and `rc-embed` crates for KMDF.
+    This also checks the shared WDF crate and the driver build script.
 
   [`.cargo/config.toml`](../../.cargo/config.toml) enables the `all`, `pedantic`, `nursery`, and
   `restriction` groups and records the reasons for individual exceptions. The Cargo manifests

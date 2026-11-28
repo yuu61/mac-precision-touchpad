@@ -3,44 +3,20 @@
 version = 4
 
 [[package]]
-name = "amtptp-hidfilter-core"
+name = "amtptp-core"
 version = "0.1.0"
-dependencies = [
- "bcm5974",
- "ptp-hid",
-]
 
 [[package]]
-name = "amtptp-spikm-core"
+name = "amtptp-usb-bt"
 version = "0.1.0"
 dependencies = [
- "ptp-hid",
+ "amtptp-core",
 ]
-
-[[package]]
-name = "amtptp-usbkm-core"
-version = "0.1.0"
-dependencies = [
- "bcm5974",
- "ptp-hid",
-]
-
-[[package]]
-name = "bcm5974"
-version = "0.1.0"
-dependencies = [
- "ptp-hid",
-]
-
-[[package]]
-name = "ptp-hid"
-version = "0.1.0"
 
 [[package]]
 name = "xtask"
 version = "0.1.0"
 dependencies = [
- "amtptp-hidfilter-core",
- "amtptp-spikm-core",
- "amtptp-usbkm-core",
+ "amtptp-core",
+ "amtptp-usb-bt",
 ]

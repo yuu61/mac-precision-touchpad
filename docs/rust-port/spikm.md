@@ -4,8 +4,8 @@ The SPI report descriptor now has 496 bytes. The settings collection and its ven
 
 The C driver is `src/AmtPtpDeviceSpiKm` at commit 2edb0f2. The Rust port has two parts:
 
-- `crates/amtptp-spikm-core` (MIT, `no_std`, depends only on `ptp-hid`) holds all the logic that does not need WDF.
-- `drivers/km/AmtPtpDeviceSpiKm` is the KMDF 1.31 glue.
+- `crates/amtptp-core/src/interface/spi` (MIT, `no_std`) holds all the logic that does not need WDF.
+- `drivers/interface/spi` is the KMDF 1.31 glue.
 
 The porting spec is [`specs/spikm.md`](specs/spikm.md); read its verification addendum too. Bug IDs `SPI-Bn` are the spec's `Bn` (§10.3).
 The policy terms come from the [behavior policy](README.md#behavior-policy):
@@ -77,7 +77,7 @@ The policy terms come from the [behavior policy](README.md#behavior-policy):
   - `EvtIoStop` is omitted.
   - The device interface `{f271e39d-d211-4a6e-a439-63e51940d210}` is kept.
 
-## Fixture coverage (`crates/amtptp-spikm-core/tests/`)
+## Fixture coverage (`crates/amtptp-core/tests/spi/`)
 
 Every record of every fixture file is processed. Each test asserts the exact record count and a per-bucket count. **No record is skipped.**
 
@@ -118,7 +118,7 @@ The README's excluded inputs are covered by unit tests instead:
 - the bitfield encodings;
 - the pool tag.
 
-## Driver glue (stage 2): `drivers/km/AmtPtpDeviceSpiKm`
+## Driver glue (stage 2): `drivers/interface/spi`
 
 The KMDF driver is a thin layer over the core crate. During the port, its WDF call sequence was compared, path by path, with the `ops` field of the C oracle fixtures:
 

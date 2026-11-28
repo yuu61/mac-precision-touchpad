@@ -32,6 +32,8 @@ rustflags = [
     # public re-exports, and descriptive names at module boundaries.
     "-Aclippy::arbitrary_source_item_ordering",
     "-Aclippy::definition_in_module_root",
+    # Use the named module file alongside its child directory.
+    "-Aclippy::self_named_module_files",
     "-Aclippy::single_call_fn",
     "-Aclippy::pub_use",
     "-Aclippy::module_name_repetitions",

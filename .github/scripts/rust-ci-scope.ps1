@@ -17,21 +17,8 @@ $PSNativeCommandUseErrorActionPreference = $false
 
 $ZeroSha = '0000000000000000000000000000000000000000'
 
-$AllHostPackages = @(
-    'ptp-hid',
-    'bcm5974',
-    'amtptp-usbkm-core',
-    'amtptp-spikm-core',
-    'amtptp-hidfilter-core',
-    'xtask'
-)
-$CoreHostPackages = @(
-    'ptp-hid',
-    'bcm5974',
-    'amtptp-usbkm-core',
-    'amtptp-spikm-core',
-    'amtptp-hidfilter-core'
-)
+$AllHostPackages = @('amtptp-core', 'amtptp-usb-bt', 'xtask')
+$UsbBluetoothPackages = @('amtptp-device-usb-km', 'amtptp-hid-filter', 'amtptp-bth-filter')
 $AllKmPackages = @(
     'amtptp-device-usb-km',
     'amtptp-device-spi-km',
@@ -156,52 +143,34 @@ else {
             continue
         }
 
-        # Shared core crates (tests/ only affects the host test/clippy of that crate).
-        if ($path -like 'crates/ptp-hid/tests/*') {
-            [void]$hostSet.Add('ptp-hid')
+        # Test changes only affect their host package.
+        if ($path -like 'crates/amtptp-core/tests/*') {
+            [void]$hostSet.Add('amtptp-core')
             continue
         }
-        if ($path -like 'crates/ptp-hid/*') {
-            Add-All $hostSet $CoreHostPackages
-            # xtask's INF test reads the core crates' model tables (dev-dependencies).
-            [void]$hostSet.Add('xtask')
-            Add-All $kmSet $AllKmPackages
+        if ($path -like 'crates/amtptp-usb-bt/tests/*') {
+            [void]$hostSet.Add('amtptp-usb-bt')
             continue
         }
-        if ($path -like 'crates/bcm5974/*') {
-            Add-All $hostSet @('bcm5974', 'amtptp-usbkm-core', 'amtptp-hidfilter-core', 'xtask')
-            Add-All $kmSet @('amtptp-device-usb-km', 'amtptp-hid-filter', 'amtptp-bth-filter')
-            continue
-        }
-        if ($path -like 'crates/amtptp-usbkm-core/tests/*') {
-            [void]$hostSet.Add('amtptp-usbkm-core')
-            continue
-        }
-        if ($path -like 'crates/amtptp-usbkm-core/*') {
-            [void]$hostSet.Add('amtptp-usbkm-core')
-            [void]$hostSet.Add('xtask')
-            [void]$kmSet.Add('amtptp-device-usb-km')
-            continue
-        }
-        if ($path -like 'crates/amtptp-spikm-core/tests/*') {
-            [void]$hostSet.Add('amtptp-spikm-core')
-            continue
-        }
-        if ($path -like 'crates/amtptp-spikm-core/*') {
-            [void]$hostSet.Add('amtptp-spikm-core')
-            [void]$hostSet.Add('xtask')
+        # Transport-specific source changes also reach xtask's INF model table tests.
+        if ($path -like 'crates/amtptp-core/src/interface/spi/*') {
+            Add-All $hostSet @('amtptp-core', 'xtask')
             [void]$kmSet.Add('amtptp-device-spi-km')
             continue
         }
-        if ($path -like 'crates/amtptp-hidfilter-core/tests/*') {
-            [void]$hostSet.Add('amtptp-hidfilter-core')
+        if ($path -like 'crates/amtptp-usb-bt/src/interface/usb/*') {
+            Add-All $hostSet @('amtptp-usb-bt', 'xtask')
+            [void]$kmSet.Add('amtptp-device-usb-km')
             continue
         }
-        if ($path -like 'crates/amtptp-hidfilter-core/*') {
-            [void]$kmSet.Add('amtptp-bth-filter')
-            [void]$hostSet.Add('amtptp-hidfilter-core')
-            [void]$hostSet.Add('xtask')
-            [void]$kmSet.Add('amtptp-hid-filter')
+        if ($path -like 'crates/amtptp-usb-bt/src/interface/bluetooth/*') {
+            Add-All $hostSet @('amtptp-usb-bt', 'xtask')
+            Add-All $kmSet @('amtptp-hid-filter', 'amtptp-bth-filter')
+            continue
+        }
+        if ($path -like 'crates/amtptp-usb-bt/*') {
+            Add-All $hostSet @('amtptp-usb-bt', 'xtask')
+            Add-All $kmSet $UsbBluetoothPackages
             continue
         }
         if ($path -like 'crates/*') {
@@ -217,54 +186,28 @@ else {
             continue
         }
 
-        # Shared driver support crates used by the KMDF workspace.
-        if ($path -like 'drivers/support/wdf-support/*') {
-            Add-All $kmSet $AllKmPackages
-            $kmLintSupport = $true
-            continue
-        }
-        if ($path -like 'drivers/support/rc-embed/*') {
-            Add-All $kmSet $AllKmPackages
-            $kmLintSupport = $true
-            continue
-        }
-        if ($path -like 'drivers/support/*') {
-            Add-All $kmSet $AllKmPackages
-            $kmLintSupport = $true
-            continue
-        }
-
-        # KMDF driver workspace.
-        if ($path -like 'drivers/km/AmtPtpDeviceUsbKm/*') {
-            [void]$kmSet.Add('amtptp-device-usb-km')
-            continue
-        }
-        if ($path -like 'drivers/km/AmtPtpDeviceSpiKm/*') {
-            [void]$kmSet.Add('amtptp-device-spi-km')
-            continue
-        }
-        if ($path -like 'drivers/km/AmtPtpBthFilter/*') {
-            [void]$kmSet.Add('amtptp-bth-filter')
-            continue
-        }
-        if ($path -like 'drivers/km/AmtPtpHidFilter/*') {
-            [void]$hostSet.Add('amtptp-hidfilter-core')
+        # The HID filter's callbacks are also exercised by the Bluetooth host tests.
+        if ($path -like 'drivers/interface/bluetooth/hid/*') {
+            [void]$hostSet.Add('amtptp-usb-bt')
             [void]$kmSet.Add('amtptp-hid-filter')
             continue
         }
-        if ($path -eq 'drivers/km/Cargo.toml') {
-            Add-All $kmSet $AllKmPackages
-            $kmLintSupport = $true
-            # xtask verifies KMDF version in drivers/km/Cargo.toml.
+        if ($path -like 'drivers/interface/bluetooth/bth/*') {
+            [void]$kmSet.Add('amtptp-bth-filter')
+            continue
+        }
+        if ($path -like 'drivers/interface/usb/*') {
+            [void]$kmSet.Add('amtptp-device-usb-km')
+            continue
+        }
+        if ($path -like 'drivers/interface/spi/*') {
+            [void]$kmSet.Add('amtptp-device-spi-km')
+            continue
+        }
+        if ($path -eq 'drivers/Cargo.toml') {
+            # xtask verifies the KMDF version in the driver workspace manifest.
             [void]$hostSet.Add('xtask')
-            continue
         }
-        if ($path -like 'drivers/km/*') {
-            Add-All $kmSet $AllKmPackages
-            $kmLintSupport = $true
-            continue
-        }
-
         if ($path -like 'drivers/*') {
             Add-All $kmSet $AllKmPackages
             $kmLintSupport = $true
@@ -286,7 +229,6 @@ if ($kmPackages.Count -gt 0) {
     $kmPkgStr = $kmPackages -join ' '
     foreach ($a in $arches) {
         $driverInclude.Add([ordered]@{
-                workspace    = 'km'
                 label        = 'KMDF'
                 arch         = $a.Name
                 target       = $a.Target

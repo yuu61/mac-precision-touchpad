@@ -111,7 +111,6 @@ jobs:
       run:
         shell: pwsh
     env:
-      DRIVER_WORKSPACE: ${{ matrix.workspace }}
       DRIVER_ARCH: ${{ matrix.arch }}
       DRIVER_TARGET: ${{ matrix.target }}
       DRIVER_PACKAGES: ${{ matrix.packages }}
@@ -129,14 +128,14 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: "v1-${{ matrix.workspace }}-${{ matrix.arch }}-${{ matrix.lint_support }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.KIT_PACKAGE_VERSION }}"
-          workspaces: "drivers/${{ matrix.workspace }} -> target"
+          prefix-key: "v1-kmdf-${{ matrix.arch }}-${{ matrix.lint_support }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.KIT_PACKAGE_VERSION }}"
+          workspaces: "drivers -> target"
 
       - name: Driver Clippy (${{ matrix.packages }})
-        run: ./.github/scripts/rust-ci-driver.ps1 -Workspace $env:DRIVER_WORKSPACE -Target $env:DRIVER_TARGET -Packages $env:DRIVER_PACKAGES -Toolchain $env:RUSTUP_TOOLCHAIN -LintSupport:($env:LINT_SUPPORT -eq 'true')
+        run: ./.github/scripts/rust-ci-driver.ps1 -Target $env:DRIVER_TARGET -Packages $env:DRIVER_PACKAGES -Toolchain $env:RUSTUP_TOOLCHAIN -LintSupport:($env:LINT_SUPPORT -eq 'true')
 
       - name: Check driver Cargo.lock
-        run: git diff --exit-code -- "drivers/$env:DRIVER_WORKSPACE/Cargo.lock"
+        run: git diff --exit-code -- drivers/Cargo.lock
 
   package:
     # Builds and links the KMDF workspace (release) and runs the whole packaging pipeline on the
@@ -177,7 +176,7 @@ jobs:
           prefix-key: "v1-package-${{ matrix.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.KIT_PACKAGE_VERSION }}"
           workspaces: |
             . -> target
-            drivers/km -> target
+            drivers -> target
 
       - name: Build and package (release, unsigned)
         run: cargo xtask package --arch $env:PACKAGE_ARCH --release
@@ -186,7 +185,7 @@ jobs:
         run: ./.github/scripts/rust-ci-package-version.ps1 -Arch $env:PACKAGE_ARCH
 
       - name: Check Cargo.lock files
-        run: git diff --exit-code -- Cargo.lock drivers/km/Cargo.lock
+        run: git diff --exit-code -- Cargo.lock drivers/Cargo.lock
 
   ci:
     name: Rust CI

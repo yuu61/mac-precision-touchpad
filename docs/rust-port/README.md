@@ -48,7 +48,7 @@ VendorID 0x8910, are unchanged.
 
 - The hardware-independent logic lives in the `no_std` crates under `crates/`. Their tests replay
   fixtures recorded by compiling the original, unmodified C sources against a recording fake of
-  KMDF/UMDF and executing them (`crates/*/tests/fixtures/README.md` describes each fixture set).
+  KMDF/UMDF and executing them (`crates/*/tests/*/fixtures/README.md` describes each fixture set).
   Every record is replayed; records whose C result is undefined behavior or a P2 defect are
   checked against the fixed behavior instead and counted explicitly.
 - The WDF glue under `drivers/` is not covered by those fixtures. It was reviewed against the C

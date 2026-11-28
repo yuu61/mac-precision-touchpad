@@ -4,8 +4,10 @@ The WDF driver now owns request dispatch and power callbacks. The core returns i
 
 This file records the port of `src/AmtPtpHidFilter` (KMDF lower filter, Bluetooth Magic Trackpad 2) to Rust:
 
-* `crates/amtptp-hidfilter-core`: all hardware-independent logic, host-tested against the C oracle fixtures.
-* `drivers/km/AmtPtpHidFilter`: the KMDF 1.31 glue.
+* `crates/amtptp-usb-bt/src/interface/bluetooth`: Bluetooth read classification and HID entry points.
+* `crates/amtptp-usb-bt/src/application/bluetooth.rs`: device state, power transitions and read recovery.
+* `crates/amtptp-usb-bt/src/infrastructure/magic_trackpad.rs`: Magic Trackpad 2 transport layouts and packet decoding.
+* `drivers/interface/bluetooth/hid`: the KMDF 1.31 glue.
 
 The C driver read the trackpad through a patch of HIDCLASS's dispatch table (the detour). The port
 replaced it (2026-11-27) with a *data source*: a vendor collection that the new lower filter
@@ -40,7 +42,7 @@ The C driver patched `HidBth`'s `IRP_MJ_INTERNAL_DEVICE_CONTROL` slot with the r
 
 The port reads the trackpad as an ordinary HID client instead:
 
-* `AmtPtpBthFilter` (below `HidBth`) appends a vendor collection with input `0x31` and feature `0xF1` to the SDP descriptor and pads each `0x31` report to its declared length (140 bytes, the real length in the last byte); a mouse report becomes a *mode-lost marker*. HIDCLASS then exposes the collection as `Col03`, a sibling of `Col01`. Details in [bthfilter.md](bthfilter.md); the format is `amtptp_hidfilter_core::bth`.
+* `AmtPtpBthFilter` (below `HidBth`) appends a vendor collection with input `0x31` and feature `0xF1` to the SDP descriptor and pads each `0x31` report to its declared length (140 bytes, the real length in the last byte); a mouse report becomes a *mode-lost marker*. HIDCLASS then exposes the collection as `Col03`, a sibling of `Col01`. Details in [bthfilter.md](bthfilter.md); the format is `amtptp_usb_bt::bluetooth::bth`.
 * `source.rs` (glue) registers for `GUID_DEVINTERFACE_HID` arrivals in `SelfManagedIoInit`, opens the matching `Col03` link from a work item (read/write, shared; never from the notification callback), checks that its parent device node is this collection's parent, reads its strings and calls the core's `source_opened`. Query-remove calls `source_closed` and closes the target (so the Bluetooth device can be disabled or updated); a cancelled removal reopens it; `SelfManagedIoCleanup` unregisters and closes.
 * The core: `SelfManagedIoInit` sets the static identity and configures only if the source is already open; `source_opened` configures the device like the recovery timer (mode switch, then the backlog of reads); `source_closed` unconfigures it, stops the timer and cancels the reads in flight (their completions are stale). `SelfManagedIoRestart` before the source opened does nothing. `DeviceState.source_open` replaces C's `IsHidIoDetourCompleted` and `HidIoTarget != NULL`.
 * The completion routine un-pads before the core sees the read: a multitouch report keeps its bytes and gets its real length; a marker becomes a one-byte report of the original ID, which the core treats as another report (it sends the mode switch again, HF-B8).
@@ -88,7 +90,7 @@ The port reads the trackpad as an ordinary HID client instead:
 * **Out-of-bounds reads.** Finger and button bytes outside the buffer read as 0. That never happens with the 1024-byte buffer: every input record was replayed with the tail filled with 0x00 and again with 0xFF, with identical results.
 * **Alignment.** The mode-switch packet buffer is `#[repr(C, align(8))]`. The C `UCHAR[32]` is not guaranteed to be 8-aligned.
 
-## Fixture coverage (`crates/amtptp-hidfilter-core/tests/fixtures`)
+## Fixture coverage (`crates/amtptp-usb-bt/tests/bluetooth/fixtures`)
 
 Every record is processed, except the 3 named skips in `lifecycle.txt` and the records of the removed detour and attribute query (13 in `lifecycle.txt`, 7 in `wire.txt`), which are counted by name. Each test asserts its per-file total and the count per category.
 
@@ -136,7 +138,7 @@ Cases excluded by the fixture harness itself (README section 6) are covered as f
 * NULL-handle sends (HF-B25) are guarded and have no fixture;
 * the spec's Appendix D golden vectors are in `tests/golden.rs`.
 
-## Driver crate (`drivers/km/AmtPtpHidFilter`, KMDF 1.31)
+## Driver crate (`drivers/interface/bluetooth/hid`, KMDF 1.31)
 
 The glue makes every WDF and kernel call of the C driver that the oracle records, with the C arguments, and nothing else.
 Pure accessors have no effect and are not recorded (fixtures README section 1). They differ from C in two places:

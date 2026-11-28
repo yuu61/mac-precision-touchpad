@@ -1,0 +1,35 @@
+# Shared WDF glue for the AmtPtp drivers. The driver workspace (../..)
+# uses this path dependency with its KMDF bindings. Its build script reads the workspace's
+# [workspace.metadata.wdk.driver-model] (via wdk-build) and emits
+# cfg(driver_model__driver_type = "KMDF").
+#
+# Not a workspace member => no `workspace = true` inheritance here; versions are
+# pinned to the same exact versions the driver workspace uses so they unify.
+#
+# MIT, and must stay free of GPL-derived code: AmtPtpDeviceSpiKm (MIT) uses it.
+[package]
+name = "wdf-support"
+description = "WDF glue shared by the AmtPtp KMDF drivers: WDF_*_INIT helpers, object-context macro, request completion guard, WDM IRP helpers"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91"
+publish = false
+license = "MIT"
+build = "build.rs"
+
+[lib]
+path = "lib.rs"
+test = false
+doctest = false
+
+[build-dependencies]
+wdk-build = "=0.6.0"
+
+[dependencies]
+# USB setup structures and the KMDF HID transfer-packet type.
+wdk-sys = { version = "=0.5.2", features = ["hid", "usb"] }
+
+[lints.clippy]
+cargo = { level = "deny", priority = -1 }
+# Dependency versions are checked against the driver workspace lockfile.
+multiple_crate_versions = "allow"

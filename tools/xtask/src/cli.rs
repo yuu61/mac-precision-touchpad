@@ -4,7 +4,7 @@ pub const USAGE: &str = "\
 Usage: cargo xtask <command> [options]
 
 Commands:
-  build      Build the driver workspace drivers/km (KMDF).
+  build      Build the driver workspace drivers (KMDF).
   package    Set the version, build, then assemble, verify, catalog and optionally sign
              the driver package (packaging/AmtPtpDevice.inx, all four drivers)
              under target/package/<arch>/AmtPtpDevice/.

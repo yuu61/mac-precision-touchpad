@@ -43,7 +43,7 @@ fn run(args: &[String]) -> Result<(), String> {
             drivers::build_drivers(&opts.arches, build)?;
             for &arch in &opts.arches {
                 println!(
-                    "xtask: [{}] drivers/km -> {}",
+                    "xtask: [{}] drivers -> {}",
                     arch.name(),
                     build.output_dir(arch).display()
                 );

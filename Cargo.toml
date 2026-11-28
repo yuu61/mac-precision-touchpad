@@ -4,11 +4,8 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/ptp-hid",
-    "crates/bcm5974",
-    "crates/amtptp-usbkm-core",
-    "crates/amtptp-spikm-core",
-    "crates/amtptp-hidfilter-core",
+    "crates/amtptp-core",
+    "crates/amtptp-usb-bt",
     "tools/xtask",
 ]
 exclude = ["drivers"]

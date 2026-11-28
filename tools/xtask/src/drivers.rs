@@ -1,4 +1,4 @@
-//! The KMDF driver workspace (`drivers/km`): building,
+//! The KMDF driver workspace (`drivers`): building,
 //! linting, and reading their WDF framework version.
 
 use std::env;
@@ -31,7 +31,7 @@ const DRIVER_TARGET_ENV: [&str; 3] = [
 ];
 
 fn driver_dir() -> PathBuf {
-    repo_root().join("drivers/km")
+    repo_root().join("drivers")
 }
 
 /// Packaging uses its own Cargo target directory because a plain build
@@ -156,10 +156,7 @@ pub fn build_drivers(arches: &[Arch], build: DriverBuild<'_>) -> Result<(), Stri
         if build.release {
             cmd.arg("--release");
         }
-        process::run(
-            &mut cmd,
-            &format!("building drivers/km for {}", arch.name()),
-        )?;
+        process::run(&mut cmd, &format!("building drivers for {}", arch.name()))?;
     }
     Ok(())
 }
@@ -189,7 +186,7 @@ pub fn test_all() -> Result<(), String> {
     steps.push(("cargo clippy (host workspace)".into(), host_clippy));
 
     // Cargo Clippy only wraps workspace members. Use Clippy as the rustc wrapper
-    // so the driver build also lints wdf-support and rc-embed in their build graph.
+    // so the driver build also lints wdf-support in the build graph.
     let clippy_driver = Path::new(&cargo_program()).with_file_name("clippy-driver.exe");
     {
         let mut clippy = driver_cargo();
@@ -203,7 +200,7 @@ pub fn test_all() -> Result<(), String> {
                 "--config",
                 r#"build.rustflags=["-Dwarnings"]"#,
             ]);
-        steps.push(("Clippy (drivers/km)".into(), clippy));
+        steps.push(("Clippy (drivers)".into(), clippy));
     }
 
     let mut failed = Vec::new();

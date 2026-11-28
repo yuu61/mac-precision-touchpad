@@ -9,7 +9,7 @@ Scope: four Windows drivers, the universal INF, packaging, CI, and the contract 
 Method:
 - I diffed every duplicated header textually (`diff --strip-trailing-cr`).
 - I also expanded every HID report descriptor to real bytes. To do this I compiled each driver's own headers with MinGW gcc against a stub `hidport.h` and dumped the arrays and struct sizes.
-- The byte dumps (`um.txt`, `km.txt`, `spi.txt`, `flt.txt`, plus `hqa.txt`) are kept as golden fixtures in `crates/ptp-hid/tests/fixtures/`; they are the host-test oracle for "byte-for-byte". The harness sources were not kept.
+- The byte dumps (`um.txt`, `km.txt`, `spi.txt`, `flt.txt`, plus `hqa.txt`) are kept as golden fixtures in `crates/amtptp-core/tests/hid/fixtures/`; they are the host-test oracle for "byte-for-byte". The harness sources were not kept.
 
 ---
 
