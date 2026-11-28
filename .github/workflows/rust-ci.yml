@@ -140,7 +140,7 @@ jobs:
 
   package:
     # Builds and links the KMDF workspace (release) and runs the whole packaging pipeline on the
-    # one INF: stampinf, InfVerif /w and Inf2Cat. Catches link errors, Resource.rc and INF
+    # one INF: stampinf, InfVerif /w and Inf2Cat. Catches link, VERSIONINFO and INF
     # regressions that Clippy cannot see. Unsigned; nothing is uploaded.
     name: Driver package (${{ matrix.arch }})
     needs: scope
@@ -181,6 +181,9 @@ jobs:
 
       - name: Build and package (release, unsigned)
         run: cargo xtask package --arch $env:PACKAGE_ARCH --release
+
+      - name: Check SYS versions against DriverVer
+        run: ./.github/scripts/rust-ci-package-version.ps1 -Arch $env:PACKAGE_ARCH
 
       - name: Check Cargo.lock files
         run: git diff --exit-code -- Cargo.lock drivers/km/Cargo.lock

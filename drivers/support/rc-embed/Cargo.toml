@@ -1,11 +1,8 @@
-# Build-script helper (build-dependency only): compiles a Win32 resource script
-# with the Windows SDK rc.exe that wdk-build already locates, and links the
-# .res into the cdylib being built (KMDF .sys or UMDF .dll). Used by
-# the KMDF drivers for their VERSIONINFO resources.
-# A member of neither driver workspace; pinned to the same wdk-build version.
+# Build-script helper for generating the KMDF drivers' VERSIONINFO resources.
+# Uses the same Windows SDK and wdk-build version as the driver workspace.
 [package]
 name = "rc-embed"
-description = "Compile a .rc file with the Windows SDK rc.exe and link the .res into a WDK cdylib (build scripts only)"
+description = "Generate and link Windows driver VERSIONINFO resources"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.91"

@@ -1,50 +1,42 @@
-# Windows Precision Touchpad Implementation for Apple MacBook family/Magic Trackpad 2
+# Windows Precision Touchpad driver for Apple trackpads
 
-This project implements Windows Precision Touchpad Protocol for Apple MacBook family/Magic Trackpad 2 on Windows 10. Both USB (traditional and T2), SPI and Bluetooth trackpads are supported.
+[![Rust CI](https://github.com/yuu61/mac-precision-touchpad/actions/workflows/rust-ci.yml/badge.svg?branch=main)](https://github.com/yuu61/mac-precision-touchpad/actions/workflows/rust-ci.yml)
 
-## Donation?
+This Rust driver adds Windows Precision Touchpad support for Apple Magic Trackpad 2 and supported
+Intel MacBook trackpads over USB, SPI, or Bluetooth. It targets Windows 10 21H2 (build 19044,
+including LTSC 2021) and later on x64 and ARM64.
 
-A few people asked me why I removed donation. My current financial situation doesn't require me to accept donation for the budget of future development. If you are considering donation, please consider other meaningful projects and foundations, such as [Electronic Frontier Foundation](https://www.eff.org/).
+## Apple Boot Camp
 
-## Official Driver?
+Apple provides Windows support software for compatible Intel Macs. See [Apple's Boot Camp instructions](https://support.apple.com/en-us/102622).
 
-Bootcamp 6.1.5 offers official driver for T2-based model and Magic Trackpad 2. You can also consider using the official driver if you have such Mac. If you have an older model (e.g. MacBooks before 2018/2019), this is the only implementation for these models (yet). 
+## Issues
 
-## Future Plans and feature tracking
-
-Use the [Azure DevOps Board](https://ligstd.visualstudio.com/Apple%20PTP%20Trackpad/_workitems/) to track feature and device support plans. Bug reports should go to Github issues.
+Report bugs and hardware support requests in [GitHub Issues](https://github.com/yuu61/mac-precision-touchpad/issues).
+Include your Windows build, architecture, hardware ID, and connection type.
 
 ## See it in action (YouTube video)
 
 [![Watch the video](https://img.youtube.com/vi/-GWlfw7omdo/hqdefault.jpg)](https://youtu.be/-GWlfw7omdo)
 
-## Converged Installation Guide
+## Driver packages and installation
 
-**IMPORTANT:** Given changes in Microsoft driver code signing policy, and the compliance need of EV certificate, CI auto builds beyond 2021/01/06 04:00AM EST will not be automatically signed with normal code signing certificate. These builds are still supposed via TestSigning, but not recommended for normal users. Proper WHQL and EV dual-signed packages will be released manually, which can be downloaded from the release page.
+Build the Rust package for your architecture using the [driver build commands](#driver-build-and-tests).
+The CI workflow builds unsigned packages for validation. Prepare the test machine for test signing,
+then sign the local package before installation. [Microsoft's test-signing guide](https://learn.microsoft.com/en-us/windows-hardware/drivers/install/test-signing) · [Package signing commands](docs/rust-port/packaging.md#signing)
 
-0. Make sure you uninstalled `Trackpad++` completely if you have previously does so
-1. Go to the release tab in Github and download the newest version for your architecture
-2. Right click `AmtPtpDevice.inf` and install it
-3. If you have a Magic Trackpad 2 and want to use it in Bluetooth mode: manaully pair it in PC Settings.
+1. Uninstall Trackpad++ if it is installed for the device.
+2. Open an elevated terminal in the signed package directory and run
+   `pnputil /add-driver .\AmtPtpDevice.inf /install`.
+3. For a Bluetooth Magic Trackpad 2, pair it in Windows Settings.
 
-**Note: it is unnecessary to enable test signing, or install the certificate manually. Doing so may cause problems in installation. See [this issue](https://github.com/imbushuo/mac-precision-touchpad/issues/228#issuecomment-538689587) for detailed explanation.**
+To uninstall, run `pnputil /enum-drivers` and find the published `oemNNN.inf` for
+`AmtPtpDevice.inf` by matching the provider and driver version. Then run
+`pnputil /delete-driver oemNNN.inf /uninstall` in an elevated terminal.
 
-## Also Uninstallation (extremely important for reinstallation `Trackpad++` and such)
-
-See also [here](https://magicutilities.net/magic-trackpad/help/mac-precision-touchpad-driver-installed).
-
-1. Go to device manager
-2. Find the "Apple Precision Touch Device", "Apple Multi-touch Trackpad HID filter" and "Apple Multi-touch Auxiliary Services"
-3. Right click "remove the device" and also check "uninstall driver"
-4. Rescan devices
-
-## Installation with Chocolatey
-
-The drivers are available as a [Chocolatey package](https://chocolatey.org/packages/mac-precision-touchpad/). To install using [Chocolatey](https://chocolatey.org) run:
-
-```
-choco install mac-precision-touchpad
-```
+The [upstream releases](https://github.com/imbushuo/mac-precision-touchpad/releases) and
+[Chocolatey package](https://community.chocolatey.org/packages/mac-precision-touchpad) distribute
+the original C driver.
 
 ## For developers
 
@@ -69,34 +61,23 @@ The drivers are written in Rust on top of [windows-drivers-rs](https://github.co
 
 ### Driver build and tests
 
-The drivers target x64 and ARM64 on Windows 10 21H2 (build 19044) and later, including
-Windows 10 LTSC 2021 and Windows 11. See [KMDF version and OS requirements](docs/rust-port/packaging.md#framework-version-and-os-floor).
-
-Requirements: Rust (stable, with the `aarch64-pc-windows-msvc` target for ARM64), Visual Studio with the C++ build tools (x64 and ARM64), the Windows Driver Kit, and LLVM (`winget install LLVM.LLVM`, used by bindgen).
+Use Rust stable with the MSVC target for each architecture you build, the Visual Studio C++ build
+tools, the Windows SDK and WDK, and LLVM for bindgen. See the [build requirements](docs/rust-port/packaging.md#requirements).
 
 ```
-cargo xtask test                                   # host unit tests + clippy for all workspaces
+cargo xtask test                                   # host tests and host/KMDF Clippy
 cargo xtask build --arch all --release             # build the drivers for x64 and ARM64
-cargo xtask package --arch x64 --release           # assemble target/package/x64/AmtPtpDevice (unsigned)
-cargo xtask package --arch arm64 --release --sign <signtool arguments>
+cargo xtask package --arch all --release           # unsigned packages under target/package/
 ```
 
-See [docs/rust-port/packaging.md](docs/rust-port/packaging.md) for all options, signing, and the INF changes.
+Each package includes one INF, four drivers, and a catalog. `--driver-version a.b.c.d` sets the
+version shared by the INF and all four SYS files. See the [packaging guide](docs/rust-port/packaging.md) for signing and other options.
 
 ## Device support
 
-There is a bring-up issue for certain MacBook Pro and MacBook Air. I am looking into it. If you have such device with Windows installed, please contact me so I can look into the issue remotely (as I don't have many devices).
-
-- [x] Non-Retina MacBook 
-- [x] Some non-Retina MacBook Pro (2011 and 2012)
-- [x] MacBook Pro with Retina Display (MacBookPro 10,1, MacBookPro10,2 & MacBookPro11,1)
-- [x] All recent MacBook Air (Please report if your model is not supported)
-- [x] MacBook Pro with Retina Display (2013, 2014, 2015, 13-inch & 15-inch)
-- [x] New MacBook (12-inch)
-- [x] MacBook Pro 2015, 2016, 2017 (a few SPI devices are in work-in-progress state)
-- [x] T2-based devices: MacBook Air 2018, MacBook Pro 2017/2018/2019/2020: Use default fallback, experience might not be optimal. Open a issue if you encountered dead touch regions.
-- [x] Magic Trackpad 2 & 3 (USB)
-- [x] Magic Trackpad 2 & 3 (Bluetooth connection)
+The INF matches specific hardware IDs for Wellspring and T2 USB trackpads, Apple SPI trackpads, and
+Magic Trackpad 2 (PID `0265`) over USB and Bluetooth. Check the device's hardware ID in Device
+Manager against the [INF model list](packaging/AmtPtpDevice.inx#L29).
 
 ## Roadmap
 
@@ -110,7 +91,6 @@ There is a bring-up issue for certain MacBook Pro and MacBook Air. I am looking 
 - [x] Refine input experience (gesture experience)
 - [x] More Models
 - [x] SPI
-- [x] KM Driver cross-cert
 - [x] Bluetooth
 - [ ] Defuzz
 - [ ] Input sensitivity configuration
@@ -125,7 +105,7 @@ I would like to thank projects like [magictrackpad2-dkms](https://github.com/rob
  
 ## License
 
-- USB drivers, the Magic Trackpad 2 HID filter and `crates/bcm5974` are licensed under [GPLv2](LICENSE-GPL.md).
+- The USB driver, the two Bluetooth filters, and `crates/bcm5974` are licensed under [GPLv2](LICENSE-GPL.md).
 - SPI driver is licensed under [MIT](LICENSE-MIT.md).
 - The shared building blocks (`crates/ptp-hid`, `drivers/support/wdf-support`, `drivers/support/rc-embed`) are licensed under [MIT](LICENSE-MIT.md).
 
