@@ -7,7 +7,10 @@
 //! The WDF calls are behind [`UsbHardware`]; the order of the calls, which failures are returned and
 //! which are ignored, and every context update live here.
 
-use amtptp_core::hid::status::{NtStatus, STATUS_INVALID_DEVICE_STATE, STATUS_SUCCESS, nt_success};
+use amtptp_core::hid::status::{
+    NtStatus, STATUS_CANCELLED, STATUS_DELETE_PENDING, STATUS_DEVICE_NOT_CONNECTED,
+    STATUS_INVALID_DEVICE_STATE, STATUS_NO_SUCH_DEVICE, STATUS_SUCCESS, nt_success,
+};
 
 use super::state::{DeviceState, UsbDeviceIds};
 use super::wellspring::{ControlTransfer, set_wellspring_mode};
@@ -118,8 +121,8 @@ pub trait UsbHardware: ControlTransfer {
     fn query_performance_frequency(&mut self) -> i64;
 }
 
-/// `ContinuousReaderConfig` for the device's config row, or `None` for an unknown trackpad type (C:
-/// `transferLength <= 0` → `STATUS_UNKNOWN_REVISION`, which is masked anyway; no table row has one).
+/// `ContinuousReaderConfig` for the device's config row, or `None` for an unknown trackpad type.
+/// Uses `num_pending_reads = 1` so interrupt packets arrive in hardware order.
 pub fn continuous_reader_config(state: &DeviceState) -> Option<ContinuousReaderConfig> {
     let transfer_length = reader_transfer_length(state.config().profile.tp_type);
     if transfer_length == 0 {
@@ -129,7 +132,7 @@ pub fn continuous_reader_config(state: &DeviceState) -> Option<ContinuousReaderC
         transfer_length,
         header_length: 0,
         trailer_length: 0,
-        num_pending_reads: 0,
+        num_pending_reads: 1,
     })
 }
 
@@ -226,21 +229,19 @@ pub fn prepare_hardware<H: UsbHardware + ?Sized>(state: &DeviceState, hw: &mut H
 
 /// `AmtPtpEvtDeviceD0Entry`.
 ///
-/// 1. wellspring mode on; a failure is ignored (spec B11, preserved: the device then stays in mouse mode).
-///    C switched only if `PtpReportButton || IsWellspringModeOn`, which was always true while selective
-///    reporting was ignored; now that `SET_FEATURE` 0x06 can clear `PtpReportButton`, the mode no longer
-///    depends on it (P3);
-/// 2. cache the QPC frequency and restart the reporting clock;
-/// 3. start the interrupt pipe's I/O target (starts the continuous reader) and return its status.
-///
-/// The mode switch happens before the reader starts. Without an interrupt pipe (impossible: KMDF calls
-/// `D0Entry` only after a successful `PrepareHardware`, which guarantees one) the C would dereference NULL;
-/// this returns `STATUS_INVALID_DEVICE_STATE` instead.
+/// 1. Switch wellspring multitouch mode on; if the mode switch fails, fail `D0Entry` with that
+///    status instead of starting the pipe in mouse mode.
+/// 2. Reset the reader failure counter, cache the QPC frequency, and restart the reporting clock.
+/// 3. Start the interrupt pipe's I/O target (starts the continuous reader) and return its status.
 pub fn d0_entry<H: UsbHardware + ?Sized>(state: &DeviceState, hw: &mut H) -> NtStatus {
-    let _ignored = hw.serialized(|hw| {
+    state.reset_reader_failures();
+    let mode_status = hw.serialized(|hw| {
         state.request_raw(true);
         set_wellspring_mode(state, hw, true)
     });
+    if !nt_success(mode_status) {
+        return mode_status;
+    }
     state.set_qpc_frequency(hw.query_performance_frequency());
     match state.interrupt_pipe() {
         Some(pipe) => hw.start_pipe(pipe),
@@ -278,11 +279,42 @@ pub fn d0_exit<H: UsbHardware + ?Sized>(state: &DeviceState, hw: &mut H) -> D0Ex
     }
 }
 
-/// `AmtPtpEvtUsbInterruptReadersFailed`: always `TRUE` ("reset the pipe and restart the readers"),
-/// whatever the status. Retries indefinitely.
+/// Maximum consecutive continuous-reader pipe restarts before escalating to `WdfDeviceSetFailed`.
+pub const MAX_READER_RESTARTS: u32 = 3;
+
+/// Decision returned by [`on_readers_failed`] for `EvtUsbTargetPipeReadersFailed`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReaderFailureAction {
+    /// Return `TRUE` so WDF resets the pipe and restarts the continuous reader.
+    Restart,
+    /// Return `FALSE` quietly (e.g. cancelled during power-down or device removed).
+    Stop,
+    /// Return `FALSE` and call `WdfDeviceSetFailed(WdfDeviceFailedAttemptRestart)`.
+    FailDevice,
+}
+
+/// Evaluates a continuous-reader failure against terminal removal/cancellation statuses and the
+/// consecutive-restart budget ([`MAX_READER_RESTARTS`]).
 #[must_use]
-pub const fn readers_failed(_status: NtStatus, _usbd_status: i32) -> bool {
-    true
+pub fn on_readers_failed(
+    state: &DeviceState,
+    status: NtStatus,
+    _usbd_status: i32,
+) -> ReaderFailureAction {
+    if matches!(
+        status,
+        STATUS_CANCELLED
+            | STATUS_DEVICE_NOT_CONNECTED
+            | STATUS_NO_SUCH_DEVICE
+            | STATUS_DELETE_PENDING
+    ) {
+        return ReaderFailureAction::Stop;
+    }
+    if state.note_reader_failure() <= MAX_READER_RESTARTS {
+        ReaderFailureAction::Restart
+    } else {
+        ReaderFailureAction::FailDevice
+    }
 }
 
 /// What `AmtPtpDeviceUsbKmEvtIoStop` does with a request.
@@ -546,10 +578,34 @@ mod tests {
     }
 
     #[test]
-    fn constants() {
-        assert!(readers_failed(0, 0));
+    fn constants_and_reader_failure_budget() {
+        let state = DeviceState::new();
         assert_eq!(io_stop(1), IoStopAction::None);
-        let cfg = continuous_reader_config(&DeviceState::new());
-        assert_eq!(cfg.map(|c| c.transfer_length), Some(526));
+        let cfg = continuous_reader_config(&state).expect("reader config");
+        assert_eq!((cfg.transfer_length, cfg.num_pending_reads), (526, 1));
+
+        assert_eq!(
+            on_readers_failed(&state, STATUS_CANCELLED, 0),
+            ReaderFailureAction::Stop
+        );
+        assert_eq!(
+            on_readers_failed(&state, STATUS_DEVICE_NOT_CONNECTED, 0),
+            ReaderFailureAction::Stop
+        );
+        for _ in 0..MAX_READER_RESTARTS {
+            assert_eq!(
+                on_readers_failed(&state, -1, 0),
+                ReaderFailureAction::Restart
+            );
+        }
+        assert_eq!(
+            on_readers_failed(&state, -1, 0),
+            ReaderFailureAction::FailDevice
+        );
+        state.reset_reader_failures();
+        assert_eq!(
+            on_readers_failed(&state, -1, 0),
+            ReaderFailureAction::Restart
+        );
     }
 }

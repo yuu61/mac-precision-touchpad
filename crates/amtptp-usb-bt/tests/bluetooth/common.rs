@@ -10,8 +10,8 @@ use core::fmt::Write as _;
 use std::collections::VecDeque;
 
 use amtptp_usb_bt::bluetooth::{
-    Bcm5974Param, ContactTracker, DeviceSnapshot, NtStatus, ReadTicket, ReadTracker, XferPacket,
-    XferPacketMut,
+    Bcm5974Param, CompletionQueue, ContactTracker, DeviceSnapshot, DeviceState, EnqueueOutcome,
+    NtStatus, PostSendAction, ReadTicket, ReadTracker, XferPacket, XferPacketMut,
 };
 
 // ------------------------------------------------------------------------------------------------
@@ -312,6 +312,8 @@ pub struct Mock {
     pub tracker: ReadTracker<usize>,
     /// Per-device contact lifecycle tracker (not in the C oracle).
     pub contacts: ContactTracker,
+    /// FIFO serializer for upper `READ_REPORT` completions (not in the C oracle).
+    pub completions: CompletionQueue<(usize, NtStatus)>,
     /// `WdfTimerStop` calls (not in the C oracle).
     pub timer_stops: usize,
     /// Reads `cancel_in_flight_reads` cancelled (not in the C oracle).
@@ -591,15 +593,73 @@ impl Mock {
         self.rec("WdfObjectDelete(obj=lower_mem)".into());
     }
 
-    fn with_reads<R, F: FnOnce(&mut ReadTracker<usize>) -> R>(&mut self, f: F) -> R {
-        f(&mut self.tracker)
+    fn in_flight_reads(&self) -> usize {
+        self.tracker.in_flight()
     }
 
-    fn with_contacts<R, F: FnOnce(&mut ContactTracker) -> R>(&mut self, f: F) -> R {
-        f(&mut self.contacts)
+    fn reset_contacts(&mut self) {
+        self.contacts.reset();
+    }
+
+    fn prepare_lower_read(&mut self, state: &DeviceState, read: usize) -> Option<ReadTicket> {
+        if state.device_configured() {
+            self.tracker.prepare(read)
+        } else {
+            None
+        }
+    }
+
+    fn complete_lower_read_send(
+        &mut self,
+        read: usize,
+        ticket: ReadTicket,
+        sent: bool,
+    ) -> PostSendAction {
+        let action = self.tracker.complete_send(read, ticket, sent);
+        if action == PostSendAction::CancelSent {
+            self.cancelled_reads += 1;
+        }
+        action
+    }
+
+    fn pack_completion(request: usize, status: NtStatus) -> (usize, NtStatus) {
+        (request, status)
+    }
+
+    fn with_pipeline<R, F>(&mut self, f: F) -> R
+    where
+        F: FnOnce(
+            &mut Self,
+            &mut ReadTracker<usize>,
+            &mut ContactTracker,
+            &mut CompletionQueue<(usize, NtStatus)>,
+        ) -> R,
+    {
+        let mut tracker = core::mem::take(&mut self.tracker);
+        let mut contacts = core::mem::take(&mut self.contacts);
+        let mut completions = core::mem::take(&mut self.completions);
+        let out = f(self, &mut tracker, &mut contacts, &mut completions);
+        self.tracker = tracker;
+        self.contacts = contacts;
+        self.completions = completions;
+        out
+    }
+
+    fn drain_upper_completions(&mut self, outcome: EnqueueOutcome<(usize, NtStatus)>) {
+        match outcome {
+            EnqueueOutcome::Queued => {}
+            EnqueueOutcome::Overflow((req, st)) => self.complete(req, st),
+            EnqueueOutcome::StartDrain((first_req, first_st)) => {
+                self.complete(first_req, first_st);
+                while let Some((req, st)) = self.completions.next_to_complete() {
+                    self.complete(req, st);
+                }
+            }
+        }
     }
 
     fn cancel_in_flight_reads(&mut self) -> usize {
+        self.contacts.reset();
         let cancelled = self.tracker.suspend().iter().count();
         self.cancelled_reads += cancelled;
         cancelled
@@ -777,6 +837,7 @@ type Filter<'a> = Mock;
 type UpperRequest = usize;
 type LowerRead = usize;
 type ReadMemory = ();
+type QueuedCompletion = (usize, NtStatus);
 /// `WDF_DEVICE_FAILED_ACTION` for `WdfDeviceSetFailed`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FailedAction {

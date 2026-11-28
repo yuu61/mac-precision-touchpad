@@ -12,7 +12,7 @@ use amtptp_core::spi::device::{
     desired_report_type_value,
 };
 use amtptp_core::spi::runtime::{
-    DeviceRuntime, DeviceStatus, RECOVERY_TIMER_DUE_TIME, ReadTracker,
+    DeviceRuntime, DeviceStatus, RECOVERY_TIMER_DUE_TIME, ReadTracker, RecoveryAction,
 };
 use amtptp_core::spi::status::{
     NtStatus, STATUS_BUFFER_OVERFLOW, STATUS_OBJECT_NAME_NOT_FOUND, STATUS_SUCCESS,
@@ -247,7 +247,10 @@ fn wire_records() {
                 assert_eq!(r.get("status"), "-", "{ctx}");
                 let mut tracker = ReadTracker::<u32>::new();
                 let ticket = rt.begin_recovery(&tracker).expect("unconfigured device");
-                assert!(rt.finish_recovery(&mut tracker, ticket, lower_status, || QPC_FREQUENCY));
+                assert_eq!(
+                    rt.finish_recovery(&mut tracker, ticket, lower_status, || QPC_FREQUENCY),
+                    RecoveryAction::Configured
+                );
                 // SPI-B12 (P3): the C callback issued exactly one read whatever was queued; the port
                 // issues one per queued upstream read, and nothing is queued in this record.
                 assert_eq!(r.dec::<u32>("lower_reads"), 1, "{ctx}: C lower_reads");

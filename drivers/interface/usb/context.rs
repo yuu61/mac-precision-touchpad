@@ -20,9 +20,12 @@ use amtptp_usb_bt::usb::wellspring::WELLSPRING_DATA_LEN;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
+use amtptp_core::hid::delivery::CompletionQueue;
 use amtptp_usb_bt::usb::input::ContactTracker;
 use amtptp_usb_bt::usb::state::DeviceState;
+use amtptp_usb_bt::usb::status::Completion;
 use wdf_support::declare_context_type;
+use wdf_support::request::Request;
 use wdf_support::sync::{SpinLocked, WaitLock};
 use wdk_sys::{
     WDFQUEUE, WDFQUEUE__, WDFUSBDEVICE, WDFUSBDEVICE__, WDFUSBINTERFACE, WDFUSBINTERFACE__,
@@ -30,6 +33,9 @@ use wdk_sys::{
 };
 
 const RELAXED: Ordering = Ordering::Relaxed;
+
+/// Serialized input-report state: active contacts paired with the FIFO completion queue.
+pub(crate) type InputPipeline = (ContactTracker, CompletionQueue<(Request, Completion)>);
 
 /// Per-device context (`DEVICE_CONTEXT`).
 pub(crate) struct DeviceContext {
@@ -41,14 +47,16 @@ pub(crate) struct DeviceContext {
     usb_interface: AtomicPtr<WDFUSBINTERFACE__>,
     /// `InputQueue`: the manual queue of pended `READ_REPORTs`.
     input_queue: AtomicPtr<WDFQUEUE__>,
+    /// Parallel `WdfExecutionLevelPassive` queue for `GET_STRING` and `SET_FEATURE`.
+    passive_queue: AtomicPtr<WDFQUEUE__>,
     pub(crate) recovery_pending: AtomicBool,
     pub(crate) mode_recovery: AtomicPtr<wdk_sys::WDFWORKITEM__>,
     /// Serializes the wellspring mode switches (not in C): created in `create_device`, held by
     /// `UsbIo::serialized` around each outermost `GET_REPORT`/`SET_REPORT` sequence.
     pub(crate) mode_switch_lock: WaitLock<[u8; WELLSPRING_DATA_LEN]>,
-    /// Persistent `ContactID` and liftoff state, protected by a `WDFSPINLOCK` created in
-    /// `create_device`. Never held across synchronous USB control transfers.
-    pub(crate) contacts: SpinLocked<ContactTracker>,
+    /// Persistent `ContactID` state and FIFO completion serializer, protected by a `WDFSPINLOCK`
+    /// created in `create_device`. Never held across synchronous USB transfers or `WdfRequestComplete`.
+    pub(crate) pipeline: SpinLocked<InputPipeline>,
     /// Everything else (core).
     pub(crate) state: DeviceState,
 }
@@ -64,10 +72,11 @@ impl DeviceContext {
             interrupt_pipe: AtomicPtr::new(ptr::null_mut()),
             usb_interface: AtomicPtr::new(ptr::null_mut()),
             input_queue: AtomicPtr::new(ptr::null_mut()),
+            passive_queue: AtomicPtr::new(ptr::null_mut()),
             recovery_pending: AtomicBool::new(false),
             mode_recovery: AtomicPtr::new(ptr::null_mut()),
             mode_switch_lock: WaitLock::new([0; WELLSPRING_DATA_LEN]),
-            contacts: SpinLocked::new(ContactTracker::new()),
+            pipeline: SpinLocked::new((ContactTracker::new(), CompletionQueue::new())),
             state: DeviceState::new(),
         }
     }
@@ -118,5 +127,22 @@ impl DeviceContext {
 
     pub(crate) fn set_input_queue(&self, queue: WDFQUEUE) {
         self.input_queue.store(queue, RELAXED);
+    }
+
+    pub(crate) fn passive_queue(&self) -> WDFQUEUE {
+        self.passive_queue.load(RELAXED)
+    }
+
+    pub(crate) fn set_passive_queue(&self, queue: WDFQUEUE) {
+        self.passive_queue.store(queue, RELAXED);
+    }
+
+    /// Resets tracked contacts under the pipeline spinlock.
+    ///
+    /// # Safety
+    /// `pipeline.create` succeeded; IRQL <= `DISPATCH_LEVEL`.
+    pub(crate) unsafe fn reset_contacts(&self) {
+        // SAFETY: caller guarantees initialized lock and IRQL <= DISPATCH_LEVEL; `reset` is pure.
+        unsafe { self.pipeline.with(|(contacts, _)| contacts.reset()) };
     }
 }

@@ -189,8 +189,10 @@ fn mt2_hardware_id_tracking_and_liftoff_synthesis() {
     assert_eq!((r1[1], r1[2]), (0x03, 7));
     assert_eq!((r1[10], r1[11]), (0x02, 12));
 
-    // ID 7 disappears implicitly while ID 12 shrinks (Confidence must stay latched 0!) and lifts explicitly.
-    let lift = h("31 00 00 00 64 00 19 00 00 14 00 00 0c");
+    // ID 7 disappears implicitly while ID 12 shrinks (Confidence must stay latched 0!), shifts raw
+    // coordinates in the liftoff record, and lifts explicitly; liftoff still reports its last touch
+    // coordinates (3778, 2279).
+    let lift = h("31 00 00 00 00 00 00 00 00 14 00 00 0c");
     let r2 = build_report(
         &BT,
         lift.len(),
@@ -209,6 +211,14 @@ fn mt2_hardware_id_tracking_and_liftoff_synthesis() {
         (r2[10], r2[11]),
         (0x00, 12),
         "ID 12 explicit liftoff keeps Confidence=0 latched"
+    );
+    assert_eq!(
+        (
+            u16::from_le_bytes([r2[15], r2[16]]),
+            u16::from_le_bytes([r2[17], r2[18]])
+        ),
+        (3778, 2279),
+        "ID 12 explicit liftoff preserves last touch coordinates"
     );
 
     // Subsequent empty header emits ContactCount = 0.

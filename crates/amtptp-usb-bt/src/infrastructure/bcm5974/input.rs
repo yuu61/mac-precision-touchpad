@@ -10,6 +10,8 @@ use crate::bcm5974::config::{Bcm5974Config, MAGIC_TRACKPAD_2, TrackpadType};
 pub const TRACKPAD_FINGER_LEN: usize = 28;
 /// Size of a packed TYPE5 finger record.
 pub const MT2_FINGER_LEN: usize = 9;
+/// Multitouch HID report ID on USB Magic Trackpad 2 (`TRACKPAD2_USB_REPORT_ID`).
+pub const MT2_USB_REPORT_ID: u8 = 0x02;
 /// Upper bound on doubled `touch_major` / `touch_minor` before a Wellspring/T2 contact is flagged
 /// as an unintended palm (`Confidence = 0`). Matches `SpiKm`'s `CONFIDENCE_TOUCH_LIMIT`.
 pub const WELLSPRING_CONFIDENCE_LIMIT: i32 = 2500;
@@ -19,6 +21,17 @@ const FINGER_ABS_X: usize = 2;
 const FINGER_ABS_Y: usize = 4;
 const FINGER_TOUCH_MAJOR: usize = 16;
 const FINGER_TOUCH_MINOR: usize = 18;
+
+/// Counts the raw contacts in a frame with a complete header, valid report ID (for `Type5`), and
+/// whole finger records.
+#[must_use]
+pub const fn usb_frame_contacts(format: TrackpadType, packet: &[u8]) -> Option<usize> {
+    if matches!(format, TrackpadType::Type5) && !matches!(packet.first(), Some(&MT2_USB_REPORT_ID))
+    {
+        return None;
+    }
+    usb_contact_count(format, packet.len())
+}
 
 /// Counts the raw contacts in a frame with a complete header and whole finger records.
 #[must_use]
@@ -227,5 +240,15 @@ mod tests {
 
         let high = wellspring_contact(&TEST_CFG, &make_finger(9000, -9000, 120, 40), 0, None);
         assert_eq!((high.x, high.y), (x_max, y_max));
+    }
+
+    #[test]
+    fn type5_usb_requires_report_id_0x02() {
+        let mut pkt = [0_u8; 21];
+        assert_eq!(usb_frame_contacts(TrackpadType::Type5, &pkt), None);
+        pkt[0] = 0x31;
+        assert_eq!(usb_frame_contacts(TrackpadType::Type5, &pkt), None);
+        pkt[0] = MT2_USB_REPORT_ID;
+        assert_eq!(usb_frame_contacts(TrackpadType::Type5, &pkt), Some(1));
     }
 }

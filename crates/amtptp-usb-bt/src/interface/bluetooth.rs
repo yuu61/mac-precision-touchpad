@@ -16,10 +16,11 @@ mod input;
 mod status;
 
 pub use amtptp_core::domain::ContactTracker;
+pub use amtptp_core::hid::delivery::{CompletionQueue, EnqueueOutcome};
 pub use amtptp_core::hid::hidport::{XferPacket, XferPacketMut};
 pub use amtptp_core::hid::ioctl::InternalIoctl;
 pub use amtptp_core::hid::read_tracker::{
-    LowerReadOrigin, ReadTicket, ReadTracker, SuspendedReads,
+    LowerReadOrigin, PostSendAction, ReadTicket, ReadTracker, SuspendedReads,
 };
 pub use descriptor::{
     DEVICE_VERSION, HID_DESCRIPTOR, MT2_AXES, REPORT_DESCRIPTOR, device_attributes,

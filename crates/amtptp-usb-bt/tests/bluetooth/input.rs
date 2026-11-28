@@ -78,17 +78,14 @@ fn ev_for_act(act: &str) -> Vec<String> {
         .collect()
 }
 
-/// The C `ev` with the P2 completion of the leaked upper request inserted after `SetFailed`.
+/// The C `ev` with per-request `SetFailed(attempt_restart)` replaced by completing the upper request
+/// with its failure status (HF-B9 + Stage 2 §4: no device restart on single-request buffer error).
 fn with_b9_completion(mut ev: Vec<String>) -> Vec<String> {
     let at = ev
         .iter()
         .position(|e| e == "WdfDeviceSetFailed(dev=device,action=attempt_restart)")
-        .expect("SetFailed(attempt_restart)")
-        + 1;
-    ev.insert(
-        at,
-        format!("WdfRequestComplete(req=upper1,status=0xc0000023,info={INFO_IN})"),
-    );
+        .expect("SetFailed(attempt_restart)");
+    ev[at] = format!("WdfRequestComplete(req=upper1,status=0xc0000023,info={INFO_IN})");
     ev
 }
 

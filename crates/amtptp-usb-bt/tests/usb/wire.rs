@@ -21,6 +21,9 @@ use common::{Record, Tally, hex, load, num, status, status_str};
 /// P3 fix of B10: the `D0Exit` wellspring-OFF transfer failed, which C returned from the callback; the port
 /// returns `STATUS_SUCCESS` (the transfer status itself still matches the C return value).
 const P3_D0_EXIT_BEST_EFFORT: &str = "p3_fixed/d0_exit_best_effort_B10";
+/// Stage 2 §5: `D0Entry` returns the failed Wellspring mode-switch status instead of starting the
+/// continuous reader in mouse mode.
+const P3_D0_ENTRY_MODE_REQUIRED: &str = "p3_fixed/d0_entry_mode_required";
 
 struct Scenario {
     state: Option<DeviceState>,
@@ -108,15 +111,23 @@ fn device_add(s: &mut Scenario) -> (i32, Vec<String>) {
     (0, ops)
 }
 
-fn step(s: &mut Scenario, r: &Record) -> &'static str {
-    let id = r.id();
-    let arg = r.req("arg");
-    let call = r.req("call");
+fn is_directive(call: &str) -> bool {
+    matches!(
+        call,
+        "harness_inject"
+            | "harness_pipes"
+            | "harness_descriptor"
+            | "harness_ctl_read_response"
+            | "note"
+    )
+}
+
+fn run_directive(s: &mut Scenario, id: &str, call: &str, arg: &str) -> &'static str {
     match call {
         "harness_inject" => {
             let (point, st) = arg.split_once(':').expect("inject");
             s.hw.set_inject(point, status(st));
-            return "harness_directive";
+            "harness_directive"
         }
         "harness_pipes" => {
             s.hw.pipes = if arg == "none" {
@@ -129,17 +140,17 @@ fn step(s: &mut Scenario, r: &Record) -> &'static str {
                     })
                     .collect()
             };
-            return "harness_directive";
+            "harness_directive"
         }
         "harness_descriptor" => {
             let (vid, pid) = arg.split_once(':').expect("vid:pid");
             s.hw.ids.vendor_id = u16::from_str_radix(vid, 16).expect("vid");
             s.hw.ids.product_id = u16::from_str_radix(pid, 16).expect("pid");
-            return "harness_directive";
+            "harness_directive"
         }
         "harness_ctl_read_response" => {
             s.hw.ctl_read_response = hex(arg);
-            return "harness_directive";
+            "harness_directive"
         }
         "note" => {
             let tags = arg.strip_prefix("tags:").expect("note tags");
@@ -149,9 +160,18 @@ fn step(s: &mut Scenario, r: &Record) -> &'static str {
                     "{id}: unknown note tag {t}"
                 );
             }
-            return "harness_note";
+            "harness_note"
         }
-        _ => {}
+        other => panic!("{id}: unknown directive {other}"),
+    }
+}
+
+fn step(s: &mut Scenario, r: &Record) -> &'static str {
+    let id = r.id();
+    let arg = r.req("arg");
+    let call = r.req("call");
+    if is_directive(call) {
+        return run_directive(s, &id, call, arg);
     }
 
     let expected_status = r.req("status");
@@ -193,6 +213,17 @@ fn step(s: &mut Scenario, r: &Record) -> &'static str {
             let st = lifecycle::prepare_hardware(state, &mut s.hw);
             let (ops, wire) = s.hw.take_logs();
             assert_eq!(wire, r.req("wire"), "{id}");
+            // Stage 2 §2 sets NumPendingReads = 1 to guarantee hardware-order interrupt delivery.
+            let expected_ops: Vec<String> = expected_ops
+                .into_iter()
+                .map(|op| {
+                    if op.starts_with("pipe_config_cont_reader:") {
+                        op.replacen("npending=0", "npending=1", 1)
+                    } else {
+                        op
+                    }
+                })
+                .collect();
             if s.stale_pipe_note && s.prepare_calls == 2 {
                 // B20 (P2): C keeps the stale (deleted) pipe handle and succeeds; the port resets the
                 // pipe and fails with STATUS_INVALID_DEVICE_STATE without configuring a reader.
@@ -263,8 +294,24 @@ fn step(s: &mut Scenario, r: &Record) -> &'static str {
                 (outcome.mode_switch_status, failed)
             };
             let (ops, wire) = s.hw.take_logs();
-            assert_eq!(status_str(st), expected_status, "{id}");
             assert_eq!(wire, r.req("wire"), "{id}: wire");
+            if call == "d0_entry" && st != 0 && expected_status == "0x00000000" {
+                // Stage 2 §5: C ignored `set_wellspring_mode` failure in D0Entry, sampled QPC, and
+                // started the interrupt reader anyway; the port fails D0Entry immediately.
+                let port_ops: Vec<String> = expected_ops
+                    .into_iter()
+                    .filter(|o| o != "qpc" && !o.starts_with("iotarget_start:"))
+                    .collect();
+                assert_eq!(ops, port_ops, "{id}: ops");
+                let expected = r.req("ctx_out").replace("lrt:10000000", "lrt:0");
+                assert_eq!(ctx_string(s), expected, "{id}: ctx_out");
+                return if null_deletes > 0 {
+                    "p2_fixed/c_bugcheck_B4"
+                } else {
+                    P3_D0_ENTRY_MODE_REQUIRED
+                };
+            }
+            assert_eq!(status_str(st), expected_status, "{id}");
             assert_eq!(ops, expected_ops, "{id}: ops");
             if null_deletes > 0 {
                 // C called WdfObjectDelete(NULL) after the failed WdfMemoryCreate (B4); the port does
@@ -343,7 +390,7 @@ fn wire_fixture() {
         240,
         &[
             ("driver/cleanup_noop", 7),
-            ("driver/d0_entry", 45),
+            ("driver/d0_entry", 43),
             ("driver/d0_exit", 24),
             ("driver/prepare_hardware", 37),
             ("framework/device_add", 41),
@@ -352,6 +399,7 @@ fn wire_fixture() {
             ("harness_note", 5),
             ("p2_fixed/c_bugcheck_B4", 2),
             ("p2_fixed/c_stale_handle_B20", 1),
+            (P3_D0_ENTRY_MODE_REQUIRED, 2),
             (P3_D0_EXIT_BEST_EFFORT, 2),
             ("p3_fixed/interrupt_in_pipe", 1),
             ("p3_fixed/reader_error_returned", 1),

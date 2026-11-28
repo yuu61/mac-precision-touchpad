@@ -531,3 +531,83 @@ fn the_source_opening_out_of_d0_waits_for_the_restart() {
     assert!(state.device_configured());
     assert_eq!(m.sends.len(), 1);
 }
+
+#[test]
+fn suspend_between_prepare_and_send_cancels_once_sent() {
+    use amtptp_usb_bt::bluetooth::PostSendAction;
+
+    let (state, mut m) = bluetooth();
+    start(&state, &mut m);
+
+    // Phase 1: lower read is prepared while configured, before WdfRequestSend runs.
+    let ticket = m.tracker.prepare(42).expect("prepared");
+    assert_eq!(m.in_flight(), 1);
+
+    // Concurrent D0Exit runs before WdfRequestSend returns: must NOT cancel an unsent request,
+    // only mark it CancelWhenSent.
+    assert_eq!(d0_exit(&mut m, &state), 0);
+    assert_eq!(
+        m.cancelled_reads, 0,
+        "unsent request must not be cancelled early"
+    );
+
+    // Phase 2: WdfRequestSend succeeds; complete_send now returns CancelSent.
+    let action = m.tracker.complete_send(42, ticket, true);
+    assert_eq!(action, PostSendAction::CancelSent);
+}
+
+#[test]
+fn per_request_buffer_error_does_not_fail_device_or_consume_liftoff() {
+    let (state, mut m) = bluetooth();
+    start(&state, &mut m);
+
+    // Frame 1: touch down delivered to host (contact ID 4 at positive tip pressure).
+    let touch_req = read_report(&state, &mut m);
+    let sent1 = *m.tickets.last().expect("sent 1");
+    let mut touch_pkt = [0_u8; 13];
+    touch_pkt[0] = 0x31;
+    touch_pkt[4 + 4] = 30; // tip pressure > 0
+    touch_pkt[4 + 8] = 4; // hw contact id 4
+    assert_eq!(
+        complete(&mut m, &state, sent1, STATUS_SUCCESS, &touch_pkt),
+        LowerReadOutcome::Handled(LowerReadClass::Report { length: 13 })
+    );
+    assert_eq!(m.uppers[touch_req].completed, Some((0, PTP_REPORT_LEN)));
+    assert_eq!(m.uppers[touch_req].buf[48], 1);
+
+    // Frame 2: empty packet (liftoff), but upper request buffer is too short (10 bytes).
+    // Must complete ONLY that request with BUFFER_TOO_SMALL, WITHOUT WdfDeviceSetFailed,
+    // and WITHOUT advancing ContactTracker past the liftoff!
+    let bad_upper = m.add_upper(Upper::with_output(10, 0xEE));
+    dispatch_internal_ioctl(&mut m, &state, bad_upper, 10, 0, IOCTL_HID_READ_REPORT);
+    let sent2 = *m.tickets.last().expect("sent 2");
+    m.ev.clear();
+    let empty_pkt = [0x31, 0, 0, 0];
+    assert_eq!(
+        complete(&mut m, &state, sent2, STATUS_SUCCESS, &empty_pkt),
+        LowerReadOutcome::Handled(LowerReadClass::Report { length: 4 })
+    );
+    assert!(
+        !m.ev.iter().any(|e| e.starts_with("WdfDeviceSetFailed(")),
+        "single-request buffer error must not restart device: {:?}",
+        m.ev
+    );
+    assert_eq!(
+        m.uppers[bad_upper].completed,
+        Some((0xC000_0023_u32 as i32, INFO_IN))
+    );
+
+    // Frame 3: next valid upper READ_REPORT receives the preserved liftoff report!
+    let next_req = read_report(&state, &mut m);
+    let sent3 = *m.tickets.last().expect("sent 3");
+    assert_eq!(
+        complete(&mut m, &state, sent3, STATUS_SUCCESS, &empty_pkt),
+        LowerReadOutcome::Handled(LowerReadClass::Report { length: 4 })
+    );
+    assert_eq!(m.uppers[next_req].completed, Some((0, PTP_REPORT_LEN)));
+    assert_eq!(
+        (m.uppers[next_req].buf[1] & 0x02, m.uppers[next_req].buf[48]),
+        (0x00, 1),
+        "liftoff frame delivered to the next valid READ_REPORT"
+    );
+}

@@ -5,7 +5,7 @@ use amtptp_core::domain::ContactMatching;
 pub use amtptp_core::domain::ContactTracker;
 use amtptp_core::hid::input::{PTP_REPORT_LEN, PtpReport};
 
-use crate::bcm5974::input::{decode_usb_contacts, usb_button_pressed, usb_contact_count};
+use crate::bcm5974::input::{decode_usb_contacts, usb_button_pressed, usb_frame_contacts};
 use crate::usb::config::{Firmware, TrackpadType, UsbModel};
 use crate::usb::output::OutputMemory;
 use crate::usb::state::{DeviceState, InputGates};
@@ -45,7 +45,7 @@ fn parse_packet_with_clock<F: FnOnce() -> u16>(
     scan_time: F,
 ) -> PacketAction {
     let format = cfg.profile.tp_type;
-    let Some(raw_count) = usb_contact_count(format, packet.len()) else {
+    let Some(raw_count) = usb_frame_contacts(format, packet) else {
         return PacketAction::Discard;
     };
     let count = if gates.report_touch { raw_count } else { 0 };
@@ -73,10 +73,49 @@ fn parse_packet_with_clock<F: FnOnce() -> u16>(
     PacketAction::Deliver(PtpReport::from_frame(&frame, scan_time()).to_bytes())
 }
 
-/// Whether this packet requires a passive-level mode reset on a legacy USB controller.
+/// Whether `packet` is a valid multitouch frame for the device's current format.
 #[must_use]
-pub fn needs_mode_recovery(state: &DeviceState, length: usize) -> bool {
-    state.can_recover_mode() && usb_contact_count(state.config().profile.tp_type, length).is_none()
+pub fn is_valid_packet(state: &DeviceState, packet: &[u8]) -> bool {
+    usb_frame_contacts(state.config().profile.tp_type, packet).is_some()
+}
+
+/// Whether this packet requires a passive-level mode reset (a mouse/other packet while raw mode
+/// is requested).
+#[must_use]
+pub fn needs_mode_recovery(state: &DeviceState, packet: &[u8]) -> bool {
+    state.can_recover_mode() && !is_valid_packet(state, packet)
+}
+
+/// Delivers a validated packet to a retrieved upper `READ_REPORT`, committing `contacts` **only**
+/// when the 50-byte report is successfully copied to the host buffer so `contacts` always reflects
+/// the last contact state seen by the host.
+#[must_use]
+pub fn deliver_packet_to<M: OutputMemory + ?Sized>(
+    state: &DeviceState,
+    contacts: &mut ContactTracker,
+    packet: &[u8],
+    counter: i64,
+    output: Result<&mut M, NtStatus>,
+) -> Option<([u8; PTP_REPORT_LEN], Completion)> {
+    if !state.wellspring_mode_on() {
+        contacts.reset();
+        return None;
+    }
+    let mut staged = *contacts;
+    let PacketAction::Deliver(report) = parse_packet_with_clock(
+        state.config(),
+        packet,
+        state.input_gates(),
+        &mut staged,
+        || state.scan_clock.sample(counter),
+    ) else {
+        return None;
+    };
+    let completion = complete_read_report_to(&report, output);
+    if nt_success(completion.status) {
+        *contacts = staged;
+    }
+    Some((report, completion))
 }
 
 /// Parses a packet using the device's selected config, wellspring mode gate, input gates,
@@ -223,5 +262,68 @@ mod tests {
             Completion::success(50)
         );
         assert_eq!(long[50], 0xa5);
+    }
+
+    #[test]
+    fn dropped_packets_and_failed_copies_keep_host_contact_state() {
+        use crate::usb::state::DeviceStateSnapshot;
+
+        let state = DeviceState::new();
+        state.on_device_create();
+        state.restore(DeviceStateSnapshot {
+            wellspring_mode_on: true,
+            report_touch: true,
+            report_button: true,
+            config_index: Some(1),
+            ..Default::default()
+        });
+        let mut contacts = ContactTracker::new();
+
+        // Frame 1: finger touches down and is delivered to host.
+        let mut touch_pkt = [0_u8; 76];
+        touch_pkt[64..66].copy_from_slice(&150_i16.to_le_bytes());
+        let mut host_buf = [0_u8; 50];
+        let (_, c1) = deliver_packet_to(
+            &state,
+            &mut contacts,
+            &touch_pkt,
+            100,
+            Ok(&mut host_buf[..]),
+        )
+        .expect("delivered");
+        assert_eq!(c1, Completion::success(50));
+        assert_eq!((host_buf[1], host_buf[48]), (0x03, 1));
+
+        // Frame 2: empty packet (liftoff), but upper buffer is too small -> ContactTracker MUST NOT
+        // consume the liftoff yet!
+        let empty_pkt = [0_u8; 46];
+        let mut short_buf = [0_u8; 10];
+        let (_, c2) = deliver_packet_to(
+            &state,
+            &mut contacts,
+            &empty_pkt,
+            200,
+            Ok(&mut short_buf[..]),
+        )
+        .expect("attempted");
+        assert_eq!(c2, Completion::status(STATUS_BUFFER_TOO_SMALL));
+        assert!(contacts.has_active_contacts());
+
+        // Frame 3: next valid upper request still receives the 1-frame liftoff!
+        let (_, c3) = deliver_packet_to(
+            &state,
+            &mut contacts,
+            &empty_pkt,
+            300,
+            Ok(&mut host_buf[..]),
+        )
+        .expect("delivered");
+        assert_eq!(c3, Completion::success(50));
+        assert_eq!(
+            (host_buf[1], host_buf[48]),
+            (0x01, 1),
+            "liftoff synthesized from last host-delivered contact"
+        );
+        assert!(!contacts.has_active_contacts());
     }
 }

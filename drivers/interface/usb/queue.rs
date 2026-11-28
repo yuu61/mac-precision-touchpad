@@ -1,17 +1,12 @@
 //! Queues and the internal-IOCTL dispatcher (Queue.c, Hid.c).
 //!
-//! - Default queue: `WDF_IO_QUEUE_CONFIG_INIT_DEFAULT_QUEUE(Parallel)`, `PowerManaged = WdfUseDefault`
-//!   (= not power-managed for a filter), `EvtIoInternalDeviceControl` + `EvtIoStop`, no attributes. The
-//!   handle is not kept. Request types without a callback are forwarded down by WDF (filter).
-//! - `InputQueue`: `WDF_IO_QUEUE_CONFIG_INIT(Manual)`, `PowerManaged = WdfFalse`, no callbacks, handle in the
-//!   context. Never started, stopped or purged by the driver.
-//!
-//! Every internal IOCTL is completed here (none is forwarded) except `READ_REPORT`, which is forwarded to the
-//! `InputQueue` and completed later by the reader (`crate::interrupt`). Requests are completed the way the C
-//! does it: `WdfRequestSetInformation` exactly where the C calls it (non-zero Information), then
-//! `WdfRequestComplete(status)`; see [`complete`].
+//! - Default queue: `WDF_IO_QUEUE_CONFIG_INIT_DEFAULT_QUEUE(Parallel)`, `PowerManaged = WdfUseDefault`,
+//!   inheriting execution level so `IOCTL_HID_READ_REPORT` and descriptor/feature-read IOCTLs run
+//!   directly at up to `DISPATCH_LEVEL` without hopping to a worker thread.
+//! - `PassiveQueue`: non-power-managed parallel queue with `WdfExecutionLevelPassive` for
+//!   `IOCTL_HID_GET_STRING` and `IOCTL_HID_SET_FEATURE`, which issue synchronous USB control transfers.
+//! - `InputQueue`: `WDF_IO_QUEUE_CONFIG_INIT(Manual)`, `PowerManaged = WdfFalse`, drained on `D0Exit`.
 
-use amtptp_core::domain::ContactTracker;
 use amtptp_usb_bt::usb::lifecycle::io_stop;
 use core::marker::PhantomData;
 use core::ptr;
@@ -25,11 +20,13 @@ use amtptp_usb_bt::usb::output::OutputMemory;
 use amtptp_usb_bt::usb::status::{Completion, NtStatus};
 use tracelogging as tlg;
 use wdf_support::hid as wdf_hid;
+use wdf_support::init::{io_queue_config_init, object_attributes_init};
 use wdf_support::ntstatus::{NT_SUCCESS, STATUS_INVALID_DEVICE_STATE, STATUS_NOT_SUPPORTED};
 use wdf_support::request::Request;
 use wdk_sys::{
-    HID_XFER_PACKET, NTSTATUS, ULONG, ULONG_PTR, WDF_NO_OBJECT_ATTRIBUTES, WDFDEVICE, WDFMEMORY,
-    WDFQUEUE, WDFREQUEST, call_unsafe_wdf_function_binding,
+    _WDF_EXECUTION_LEVEL, _WDF_IO_QUEUE_DISPATCH_TYPE, _WDF_TRI_STATE, HID_XFER_PACKET, NTSTATUS,
+    ULONG, ULONG_PTR, WDF_NO_OBJECT_ATTRIBUTES, WDFDEVICE, WDFMEMORY, WDFQUEUE, WDFREQUEST,
+    call_unsafe_wdf_function_binding,
 };
 
 use crate::PROVIDER;
@@ -39,8 +36,8 @@ use crate::usb::UsbIo;
 
 const _: () = assert!(size_of::<HID_XFER_PACKET>() == HID_XFER_PACKET_LEN);
 
-/// `AmtPtpDeviceUsbKmQueueInitialize` (Queue.c:24-103): the default queue, then the `InputQueue`. Returns
-/// the first failure. `PASSIVE_LEVEL`, `PAGE` as in C.
+/// Initializes the dispatch-capable default queue, the manual `InputQueue`, and the passive-level
+/// control queue. Returns the first failure. `PASSIVE_LEVEL`, `PAGE`.
 ///
 /// # Safety
 /// `device` is the live device that owns `context`; `PASSIVE_LEVEL`.
@@ -50,12 +47,11 @@ pub(crate) unsafe fn queue_initialize(device: WDFDEVICE, context: &DeviceContext
 
     let mut config =
         wdf_hid::default_queue_config(Some(evt_io_internal_device_control), Some(evt_io_stop));
-    let mut attributes = wdf_support::init::object_attributes_init();
-    attributes.ExecutionLevel = wdk_sys::_WDF_EXECUTION_LEVEL::WdfExecutionLevelPassive;
     let mut queue: WDFQUEUE = ptr::null_mut();
-    // SAFETY: live device; `config` initialized; WDF_NO_OBJECT_ATTRIBUTES (parent = device) as in C.
-    let status =
-        unsafe { wdf_hid::create_queue(device, &mut config, &raw mut attributes, &raw mut queue) };
+    // SAFETY: live device; `config` initialized; `WDF_NO_OBJECT_ATTRIBUTES` inherits execution level.
+    let status = unsafe {
+        wdf_hid::create_queue(device, &mut config, WDF_NO_OBJECT_ATTRIBUTES, &raw mut queue)
+    };
     if !NT_SUCCESS(status) {
         tlg::write_event!(
             PROVIDER,
@@ -78,12 +74,39 @@ pub(crate) unsafe fn queue_initialize(device: WDFDEVICE, context: &DeviceContext
             &raw mut input_queue,
         )
     };
-    // The C passes &pDeviceContext->InputQueue directly.
     context.set_input_queue(input_queue);
     if !NT_SUCCESS(status) {
         tlg::write_event!(
             PROVIDER,
             "InputQueueCreateFailed",
+            level(Error),
+            keyword(KW_QUEUE),
+            win_ntstatus("Status", &status)
+        );
+        return status;
+    }
+
+    let mut passive_config =
+        io_queue_config_init(_WDF_IO_QUEUE_DISPATCH_TYPE::WdfIoQueueDispatchParallel);
+    passive_config.PowerManaged = _WDF_TRI_STATE::WdfFalse;
+    passive_config.EvtIoInternalDeviceControl = Some(evt_io_passive_device_control);
+    let mut passive_attrs = object_attributes_init();
+    passive_attrs.ExecutionLevel = _WDF_EXECUTION_LEVEL::WdfExecutionLevelPassive;
+    let mut passive_queue: WDFQUEUE = ptr::null_mut();
+    // SAFETY: live device at `PASSIVE_LEVEL`; initialized config and passive execution attributes.
+    let status = unsafe {
+        wdf_hid::create_queue(
+            device,
+            &mut passive_config,
+            &raw mut passive_attrs,
+            &raw mut passive_queue,
+        )
+    };
+    context.set_passive_queue(passive_queue);
+    if !NT_SUCCESS(status) {
+        tlg::write_event!(
+            PROVIDER,
+            "PassiveQueueCreateFailed",
             level(Error),
             keyword(KW_QUEUE),
             win_ntstatus("Status", &status)
@@ -373,31 +396,11 @@ unsafe extern "C" fn evt_io_internal_device_control(
             trace_failure("GetReportDescriptor", &completion);
             complete(request, completion);
         }
-        InternalIoctl::GetString => {
-            let completion = usb_string(&mut request, context);
-            complete(request, completion);
+        InternalIoctl::GetString | InternalIoctl::SetFeature => {
+            forward_to_device_queue(request, context.passive_queue());
         }
         InternalIoctl::ReadReport => {
-            // AmtPtpDispatchReadReportRequests (Queue.c:184-219): pend in the InputQueue. No buffer check
-            // here (spec B25, preserved).
-            let input_queue = context.input_queue();
-            if input_queue.is_null() {
-                // Unreachable (the queue exists before any request arrives); the C would bugcheck.
-                complete(request, Completion::status(STATUS_INVALID_DEVICE_STATE));
-                return;
-            }
-            // SAFETY: `input_queue` is the live InputQueue of the request's device.
-            if let Err(rejected) = unsafe { request.forward_to_io_queue(input_queue) } {
-                tlg::write_event!(
-                    PROVIDER,
-                    "WdfRequestForwardToIoQueueFailed",
-                    level(Error),
-                    keyword(KW_QUEUE),
-                    win_ntstatus("Status", &rejected.status)
-                );
-                let completion = hid::read_report_forward_failed(rejected.status);
-                complete(rejected.request, completion);
-            }
+            forward_to_device_queue(request, context.input_queue());
         }
         InternalIoctl::GetFeature => {
             // AmtPtpReportFeatures (Hid.c:287-418).
@@ -412,34 +415,6 @@ unsafe extern "C" fn evt_io_internal_device_control(
             trace_failure("GetFeature", &completion);
             complete(request, completion);
         }
-        InternalIoctl::SetFeature => {
-            // AmtPtpSetFeatures (Hid.c:420-559). Input mode 3 may switch wellspring mode with synchronous
-            // control transfers, so PASSIVE_LEVEL is required. As in C, which has no IRQL guard either,
-            // this relies on hidclass sending SET_FEATURE at PASSIVE_LEVEL. KMDF checks the IRQL
-            // (FxVerifierCheckIrqlLevel -> STATUS_INVALID_DEVICE_REQUEST) only with KMDF verifier on; in
-            // retail the request is sent and the framework blocks in its synchronous wait, which is illegal
-            // at DISPATCH_LEVEL (expected bugcheck). Risk documented in docs/rust-port/usbkm.md.
-            let parameters = request.parameters();
-            // SAFETY: an internal device-control request, so `DeviceIoControl` is the active member.
-            let input_length = unsafe { parameters.Parameters.DeviceIoControl.InputBufferLength };
-            // SAFETY: `device` owns `context`; PASSIVE_LEVEL as documented above.
-            let mut io = unsafe { UsbIo::new(device, context) };
-            let completion = feature::set_feature(
-                input_length,
-                // SAFETY: SET_FEATURE from hidclass; the core calls it only after the 16-byte check.
-                || unsafe { set_feature_packet(&request) },
-                &context.state,
-                &mut io,
-            );
-            if !context.state.wellspring_mode_on() || !context.state.input_gates().report_touch {
-                // SAFETY: live device context; spinlock created in `create_device`; no WDF calls.
-                unsafe {
-                    context.contacts.with(ContactTracker::reset);
-                };
-            }
-            trace_failure("SetFeature", &completion);
-            complete(request, completion);
-        }
         InternalIoctl::NotSupported => {
             tlg::write_event!(
                 PROVIDER,
@@ -450,6 +425,80 @@ unsafe extern "C" fn evt_io_internal_device_control(
             );
             complete(request, hid::not_supported());
         }
+    }
+}
+
+/// Forwards `request` to one of the device's auxiliary queues (`InputQueue` or `PassiveQueue`),
+/// completing it on error.
+fn forward_to_device_queue(request: Request, target_queue: WDFQUEUE) {
+    if target_queue.is_null() {
+        complete(request, Completion::status(STATUS_INVALID_DEVICE_STATE));
+        return;
+    }
+    // SAFETY: `target_queue` belongs to the same `WDFDEVICE` as `request`.
+    if let Err(rejected) = unsafe { request.forward_to_io_queue(target_queue) } {
+        tlg::write_event!(
+            PROVIDER,
+            "WdfRequestForwardToIoQueueFailed",
+            level(Error),
+            keyword(KW_QUEUE),
+            win_ntstatus("Status", &rejected.status)
+        );
+        let completion = hid::read_report_forward_failed(rejected.status);
+        complete(rejected.request, completion);
+    }
+}
+
+/// Passive-level dispatcher for `IOCTL_HID_GET_STRING` and `IOCTL_HID_SET_FEATURE`, which perform
+/// synchronous USB control transfers.
+unsafe extern "C" fn evt_io_passive_device_control(
+    queue: WDFQUEUE,
+    request: WDFREQUEST,
+    _output_buffer_length: usize,
+    _input_buffer_length: usize,
+    io_control_code: ULONG,
+) {
+    // SAFETY: framework-presented request owned by this callback and completed once below.
+    let mut request = unsafe { Request::from_raw(request, STATUS_NOT_SUPPORTED) };
+    // SAFETY: `queue` is the live `PassiveQueue` of this callback.
+    let device = unsafe { call_unsafe_wdf_function_binding!(WdfIoQueueGetDevice, queue) };
+    // SAFETY: `device` is this driver's live device.
+    let Some(context) = (unsafe { DeviceContext::of(device) }) else {
+        request.complete(STATUS_INVALID_DEVICE_STATE);
+        return;
+    };
+
+    match hid::route_internal_ioctl(io_control_code) {
+        InternalIoctl::GetString => {
+            let completion = usb_string(&mut request, context);
+            complete(request, completion);
+        }
+        InternalIoctl::SetFeature => {
+            let parameters = request.parameters();
+            // SAFETY: an internal device-control request, so `DeviceIoControl` is the active member.
+            let input_length = unsafe { parameters.Parameters.DeviceIoControl.InputBufferLength };
+            // SAFETY: `device` owns `context`; `PassiveQueue` guarantees `PASSIVE_LEVEL`.
+            let mut io = unsafe { UsbIo::new(device, context) };
+            let completion = feature::set_feature(
+                input_length,
+                // SAFETY: SET_FEATURE from hidclass; the core calls it only after the 16-byte check.
+                || unsafe { set_feature_packet(&request) },
+                &context.state,
+                &mut io,
+            );
+            if !context.state.wellspring_mode_on() || !context.state.input_gates().report_touch {
+                // SAFETY: live device context; spinlock created in `create_device`; no WDF calls.
+                unsafe { context.reset_contacts() };
+            }
+            trace_failure("SetFeature", &completion);
+            complete(request, completion);
+        }
+        InternalIoctl::GetDeviceDescriptor
+        | InternalIoctl::GetDeviceAttributes
+        | InternalIoctl::GetReportDescriptor
+        | InternalIoctl::ReadReport
+        | InternalIoctl::GetFeature
+        | InternalIoctl::NotSupported => complete(request, hid::not_supported()),
     }
 }
 
