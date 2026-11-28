@@ -48,16 +48,12 @@ pub(crate) unsafe fn queue_initialize(device: WDFDEVICE, context: &DeviceContext
 
     let mut config =
         wdf_hid::default_queue_config(Some(evt_io_internal_device_control), Some(evt_io_stop));
+    let mut attributes = wdf_support::init::object_attributes_init();
+    attributes.ExecutionLevel = wdk_sys::_WDF_EXECUTION_LEVEL::WdfExecutionLevelPassive;
     let mut queue: WDFQUEUE = ptr::null_mut();
     // SAFETY: live device; `config` initialized; WDF_NO_OBJECT_ATTRIBUTES (parent = device) as in C.
-    let status = unsafe {
-        wdf_hid::create_queue(
-            device,
-            &mut config,
-            WDF_NO_OBJECT_ATTRIBUTES,
-            &raw mut queue,
-        )
-    };
+    let status =
+        unsafe { wdf_hid::create_queue(device, &mut config, &raw mut attributes, &raw mut queue) };
     if !NT_SUCCESS(status) {
         tlg::write_event!(
             PROVIDER,
@@ -160,6 +156,82 @@ fn retrieve_attributes_buffer(request: &mut Request) -> Result<&mut [u8], NtStat
     // ours until the request is completed, which the exclusive borrow of `request` rules out while the
     // slice lives.
     Ok(unsafe { slice::from_raw_parts_mut(buffer, length) })
+}
+
+/// Returns a USB string in the NUL-terminated UTF-16 form required by HIDCLASS.
+fn usb_string(request: &mut Request, context: &DeviceContext) -> Completion {
+    use ptp_hid::hidport::{
+        HID_STRING_ID_IMANUFACTURER, HID_STRING_ID_IPRODUCT, HID_STRING_ID_ISERIALNUMBER,
+    };
+    let device = context.usb_device();
+    if device.is_null() {
+        return Completion::status(STATUS_INVALID_DEVICE_STATE);
+    }
+    // SAFETY: this is an internal device control request. HIDCLASS encodes
+    // the ID and language in Type3InputBuffer itself.
+    let value = unsafe {
+        request
+            .parameters()
+            .Parameters
+            .DeviceIoControl
+            .Type3InputBuffer
+    }
+    .addr();
+    let mut descriptor = wdk_sys::USB_DEVICE_DESCRIPTOR::default();
+    // SAFETY: device is the live USB target and descriptor is writable.
+    unsafe {
+        call_unsafe_wdf_function_binding!(
+            WdfUsbTargetDeviceGetDeviceDescriptor,
+            device,
+            &raw mut descriptor
+        );
+    }
+    let index = match value as u16 {
+        HID_STRING_ID_IMANUFACTURER => descriptor.iManufacturer,
+        HID_STRING_ID_IPRODUCT => descriptor.iProduct,
+        HID_STRING_ID_ISERIALNUMBER => descriptor.iSerialNumber,
+        _ => return Completion::status(STATUS_NOT_SUPPORTED),
+    };
+    if index == 0 {
+        return Completion::status(STATUS_NOT_SUPPORTED);
+    }
+    // A USB string descriptor has an 8-bit byte length including its two-byte header.
+    let mut units = [0_u16; 128];
+    let mut length = 127_u16;
+    let mut options = wdf_support::init::sync_send_options(0);
+    // SAFETY: passive queue, valid target and synchronous borrowed buffers.
+    let status = unsafe {
+        call_unsafe_wdf_function_binding!(
+            WdfUsbTargetDeviceQueryString,
+            device,
+            ptr::null_mut(),
+            &raw mut options,
+            units.as_mut_ptr(),
+            &raw mut length,
+            index,
+            (value >> 16) as u16
+        )
+    };
+    if !NT_SUCCESS(status) {
+        return Completion::status(status);
+    }
+    let Some(text) = hid::terminated_usb_string(&units, length) else {
+        return Completion::status(STATUS_INVALID_DEVICE_STATE);
+    };
+    let size = size_of_val(text);
+    // SAFETY: text contains initialized UTF-16 code units on little-endian Windows and stays live during the copy.
+    let bytes = unsafe { slice::from_raw_parts(text.as_ptr().cast::<u8>(), size) };
+    match retrieve_output_memory(request) {
+        Ok(mut memory) => {
+            let status = memory.copy_from_buffer(bytes);
+            if NT_SUCCESS(status) {
+                Completion::success(size)
+            } else {
+                Completion::status(status)
+            }
+        }
+        Err(status) => Completion::status(status),
+    }
 }
 
 /// `GET_FEATURE` packet: the caller's report buffer as `&mut [u8]`; a NULL `reportBuffer` becomes an empty
@@ -299,6 +371,10 @@ unsafe extern "C" fn evt_io_internal_device_control(
             trace_failure("GetReportDescriptor", &completion);
             complete(request, completion);
         }
+        InternalIoctl::GetString => {
+            let completion = usb_string(&mut request, context);
+            complete(request, completion);
+        }
         InternalIoctl::ReadReport => {
             // AmtPtpDispatchReadReportRequests (Queue.c:184-219): pend in the InputQueue. No buffer check
             // here (spec B25, preserved).
@@ -355,7 +431,11 @@ unsafe extern "C" fn evt_io_internal_device_control(
             );
             if !context.state.wellspring_mode_on() || !context.state.input_gates().report_touch {
                 // SAFETY: live device context; spinlock created in `create_device`; no WDF calls.
-                unsafe { context.contacts.with(amtptp_usbkm_core::input::ContactTracker::reset) };
+                unsafe {
+                    context
+                        .contacts
+                        .with(amtptp_usbkm_core::input::ContactTracker::reset);
+                };
             }
             trace_failure("SetFeature", &completion);
             complete(request, completion);

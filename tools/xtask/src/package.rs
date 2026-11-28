@@ -2,11 +2,11 @@
 //! sign the driver package.
 //!
 //! There is one package, built from `packaging/AmtPtpDevice.inx`, which
-//! installs all four drivers (as the signed C release did). Layout (under the
+//! installs all four drivers. Layout (under the
 //! host workspace's target dir):
 //! ```text
 //! target/package/<arch>/AmtPtpDevice/            AmtPtpDevice.inf + .cat, AmtPtpDeviceUsbKm.sys,
-//!                                                AmtPtpDeviceUsbUm.dll, AmtPtpDeviceSpiKm.sys,
+//!                                                AmtPtpDeviceSpiKm.sys,
 //!                                                AmtPtpHidFilter.sys, AmtPtpBthFilter.sys
 //! target/package/<arch>/AmtPtpDevice.symbols/    the matching .pdb files of that package
 //! ```
@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::cli::{Arch, PackageOpts};
-use crate::drivers::{self, Workspace};
+use crate::drivers;
 use crate::paths::{package_arch_dir, repo_root};
 use crate::process;
 use crate::wdk::{Tools, Wdk};
@@ -29,37 +29,25 @@ use crate::wdk::{Tools, Wdk};
 /// `[SourceDisksFiles]` expects KMDF images as `<name>.sys`.
 #[derive(Debug)]
 struct Binary {
-    ws: Workspace,
     name: &'static str,
 }
 
 impl Binary {
     fn packaged_name(&self) -> String {
-        match self.ws {
-            Workspace::Km => format!("{}.sys", self.name),
-            Workspace::Um => format!("{}.dll", self.name),
-        }
+        format!("{}.sys", self.name)
     }
 }
 
 const USB_KM: Binary = Binary {
-    ws: Workspace::Km,
     name: "AmtPtpDeviceUsbKm",
 };
-const USB_UM: Binary = Binary {
-    ws: Workspace::Um,
-    name: "AmtPtpDeviceUsbUm",
-};
 const SPI_KM: Binary = Binary {
-    ws: Workspace::Km,
     name: "AmtPtpDeviceSpiKm",
 };
 const HID_FILTER: Binary = Binary {
-    ws: Workspace::Km,
     name: "AmtPtpHidFilter",
 };
 const BTH_FILTER: Binary = Binary {
-    ws: Workspace::Km,
     name: "AmtPtpBthFilter",
 };
 
@@ -72,7 +60,7 @@ const PACKAGE: &str = "AmtPtpDevice";
 const OBSOLETE_PACKAGES: [&str; 2] = ["AmtPtpHidFilter", "AmtPtpHidFilter.symbols"];
 
 /// The driver binaries of the package. Must match the INF's `[SourceDisksFiles]`.
-const BINARIES: [Binary; 5] = [USB_KM, USB_UM, SPI_KM, HID_FILTER, BTH_FILTER];
+const BINARIES: [Binary; 4] = [USB_KM, SPI_KM, HID_FILTER, BTH_FILTER];
 
 /// `packaging/AmtPtpDevice.inx`.
 fn inx() -> PathBuf {
@@ -84,7 +72,6 @@ struct Context<'a> {
     tools: Tools,
     signtool: Option<PathBuf>,
     kmdf: String,
-    umdf: String,
 }
 
 pub fn package(opts: &PackageOpts) -> Result<(), String> {
@@ -96,10 +83,9 @@ pub fn package(opts: &PackageOpts) -> Result<(), String> {
         None => None,
     };
     process::require_file(&inx(), " (the INF source of the package)")?;
-    let kmdf = Workspace::Km.framework_version()?;
-    let umdf = Workspace::Um.framework_version()?;
+    let kmdf = drivers::framework_version()?;
     println!(
-        "xtask: WDK {} at {}; KMDF {kmdf}, UMDF {umdf}",
+        "xtask: WDK {} at {}; KMDF {kmdf}",
         wdk.version,
         wdk.root.display()
     );
@@ -110,14 +96,13 @@ pub fn package(opts: &PackageOpts) -> Result<(), String> {
         println!("xtask: signtool: {}", s.display());
     }
 
-    drivers::build_drivers(&opts.arches, opts.release, &Workspace::ALL)?;
+    drivers::build_drivers(&opts.arches, opts.release)?;
 
     let cx = Context {
         opts,
         tools,
         signtool,
         kmdf,
-        umdf,
     };
     for &arch in &opts.arches {
         package_one(&cx, arch).map_err(|e| format!("[{} {PACKAGE}] {e}", arch.name()))?;
@@ -146,7 +131,11 @@ fn package_one(cx: &Context<'_>, arch: Arch) -> Result<(), String> {
     let symbols = arch_dir.join(format!("{PACKAGE}.symbols"));
     let inf_file = format!("{PACKAGE}.inf");
     let cat_file = format!("{PACKAGE}.cat");
-    println!("xtask: === [{}] {PACKAGE} -> {}", arch.name(), pkg.display());
+    println!(
+        "xtask: === [{}] {PACKAGE} -> {}",
+        arch.name(),
+        pkg.display()
+    );
 
     // The standalone HidFilter package of older xtask versions must not be
     // mistaken for a current one.
@@ -185,18 +174,11 @@ fn package_one(cx: &Context<'_>, arch: Arch) -> Result<(), String> {
     // 1. Binaries (KMDF .dll -> .sys) and their PDBs.
     let mut payload = Vec::new();
     for b in &BINARIES {
-        let out = b.ws.output_dir(arch, opts.release);
+        let out = drivers::output_dir(arch, opts.release);
         let dll = out.join(format!("{}.dll", b.name));
-        process::require_file(
-            &dll,
-            &format!(" (expected from the drivers/{} build)", b.ws.dir_name()),
-        )?;
+        process::require_file(&dll, " (expected from the drivers/km build)")?;
         let dest = pkg.join(b.packaged_name());
         copy(&dll, &dest)?;
-        // Before signtool and Inf2Cat hash the image (see clear_force_integrity).
-        if matches!(b.ws, Workspace::Um) {
-            clear_force_integrity(&dest)?;
-        }
         payload.push(dest);
         let pdb = out.join(format!("{}.pdb", b.name));
         if pdb.is_file() {
@@ -212,7 +194,7 @@ fn package_one(cx: &Context<'_>, arch: Arch) -> Result<(), String> {
         fs::read_to_string(&inx).map_err(|e| format!("cannot read {}: {e}", inx.display()))?;
     write(&pkg.join(&inf_file), &to_crlf(&text))?;
 
-    // 3. stampinf: $ARCH$, $KMDFVERSION$, $UMDFVERSION$, DriverVer, CatalogFile.
+    // 3. stampinf: $ARCH$, $KMDFVERSION$, DriverVer, CatalogFile.
     let version = opts.driver_version.as_deref().unwrap_or("*");
     let mut cmd = Command::new(&cx.tools.stampinf);
     cmd.current_dir(&pkg).args([
@@ -228,13 +210,11 @@ fn package_one(cx: &Context<'_>, arch: Arch) -> Result<(), String> {
         version,
         "-k",
         &cx.kmdf,
-        "-u",
-        &cx.umdf,
     ]);
     process::run(&mut cmd, "stampinf")?;
     let stamped = fs::read_to_string(pkg.join(&inf_file))
         .map_err(|e| format!("cannot read stamped {inf_file}: {e}"))?;
-    check_stamped(&stamped, &cx.kmdf, &cx.umdf, &cat_file)
+    check_stamped(&stamped, &cx.kmdf, &cat_file)
         .map_err(|e| format!("stampinf output check failed for {inf_file}: {e}"))?;
 
     // 4. InfVerif in Universal mode (/u): the C package's
@@ -301,57 +281,6 @@ fn sign(signtool: &Path, args: &[String], files: &[PathBuf]) -> Result<(), Strin
     process::run_redacted(&mut cmd, "signtool sign", &["/p", "-p"])
 }
 
-/// `IMAGE_DLLCHARACTERISTICS_FORCE_INTEGRITY` (winnt.h).
-const FORCE_INTEGRITY: u16 = 0x0080;
-
-/// wdk-build 0.6.0 (lib.rs:1305) links every driver with `/INTEGRITYCHECK`.
-/// link.exe cannot undo that: `/INTEGRITYCHECK:NO` is ignored (LNK4056) and
-/// still sets the flag. The C AmtPtpDeviceUsbUm.dll never had
-/// `FORCE_INTEGRITY` (shipped binary: `DllCharacteristics` 0x4160), and with the
-/// flag an unsigned or test-signed UMDF DLL fails to load with 577 (P1).
-/// So clear the bit in the packaged copy, before signtool and `Inf2Cat` hash it.
-/// The KM `.sys` images keep it: signatures are enforced for them anyway, and
-/// their non-zero PE checksum would have to be recomputed.
-fn clear_force_integrity(path: &Path) -> Result<(), String> {
-    let mut img = fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    clear_force_integrity_bytes(&mut img).map_err(|e| format!("{}: {e}", path.display()))?;
-    fs::write(path, &img).map_err(|e| format!("cannot write {}: {e}", path.display()))
-}
-
-fn clear_force_integrity_bytes(img: &mut [u8]) -> Result<(), String> {
-    if !img.starts_with(b"MZ") {
-        return Err("not a PE image (no MZ)".into());
-    }
-    let pe = u32::from_le_bytes(
-        *img.get(0x3C..)
-            .and_then(<[u8]>::first_chunk)
-            .ok_or("truncated DOS header")?,
-    ) as usize;
-    let pe_header = img.get_mut(pe..).ok_or("no PE signature")?;
-    if !pe_header.starts_with(b"PE\0\0") {
-        return Err("no PE signature".into());
-    }
-    // The optional header follows the 4-byte signature and 20-byte file header.
-    let optional = pe_header.get_mut(24..).ok_or("not a PE32+ image")?;
-    if optional
-        .first_chunk()
-        .map(|magic| u16::from_le_bytes(*magic))
-        != Some(0x20B)
-    {
-        return Err("not a PE32+ image".into());
-    }
-    // A non-zero CheckSum would also have to be recomputed; the UMDF link sets none.
-    if optional.get(64..68) != Some([0; 4].as_slice()) {
-        return Err("non-zero PE CheckSum; clearing FORCE_INTEGRITY would leave it stale".into());
-    }
-    let characteristics = optional
-        .get_mut(70..)
-        .and_then(<[u8]>::first_chunk_mut)
-        .ok_or("truncated optional header")?;
-    *characteristics = (u16::from_le_bytes(*characteristics) & !FORCE_INTEGRITY).to_le_bytes();
-    Ok(())
-}
-
 fn remove_dir(d: &Path) -> Result<(), String> {
     fs::remove_dir_all(d)
         .map_err(|e| format!("cannot remove {} (is a file in it open?): {e}", d.display()))
@@ -400,7 +329,7 @@ fn unreplaced_token(line: &str) -> Option<&str> {
 
 /// Sanity-check stampinf's output: every keyword replaced, `DriverVer` and
 /// `CatalogFile` set, framework versions as requested.
-fn check_stamped(text: &str, kmdf: &str, umdf: &str, cat: &str) -> Result<(), String> {
+fn check_stamped(text: &str, kmdf: &str, cat: &str) -> Result<(), String> {
     let mut problems = Vec::new();
     let mut driver_ver = None;
     let mut catalog = None;
@@ -418,10 +347,6 @@ fn check_stamped(text: &str, kmdf: &str, umdf: &str, cat: &str) -> Result<(), St
             "catalogfile" => catalog = Some(value.to_owned()),
             "kmdflibraryversion" if value != kmdf => problems.push(format!(
                 "line {}: KmdfLibraryVersion = {value}, expected {kmdf}",
-                n + 1
-            )),
-            "umdflibraryversion" if value != umdf => problems.push(format!(
-                "line {}: UmdfLibraryVersion = {value}, expected {umdf}",
                 n + 1
             )),
             _ => {}
@@ -490,7 +415,6 @@ mod tests {
             unreplaced_token("KmdfLibraryVersion = $KMDFVERSION$"),
             Some("$KMDFVERSION$")
         );
-        assert_eq!(unreplaced_token("UmdfLibraryVersion=2.15.0"), None);
     }
 
     #[test]
@@ -498,14 +422,14 @@ mod tests {
         let good = "[Version]\nSignature = \"$WINDOWS NT$\"\nCatalogFile = A.cat\n\
                     DriverVer = 11/26/2026,1.2.3.4\n[Manufacturer]\n\
                     %M%=Standard,NTamd64.10.0...16299 ; NT$ARCH$ in a comment is fine\n\
-                    [w]\nKmdfLibraryVersion = 1.23\n[u]\nUmdfLibraryVersion=2.15.0\n";
-        assert_eq!(check_stamped(good, "1.23", "2.15.0", "A.cat"), Ok(()));
-        assert!(check_stamped(good, "1.25", "2.15.0", "A.cat").is_err());
-        assert!(check_stamped(good, "1.23", "2.15.0", "B.cat").is_err());
+                    [w]\nKmdfLibraryVersion = 1.23\n";
+        assert_eq!(check_stamped(good, "1.23", "A.cat"), Ok(()));
+        assert!(check_stamped(good, "1.25", "A.cat").is_err());
+        assert!(check_stamped(good, "1.23", "B.cat").is_err());
         let unstamped = good.replace("NTamd64", "NT$ARCH$");
-        assert!(check_stamped(&unstamped, "1.23", "2.15.0", "A.cat").is_err());
+        assert!(check_stamped(&unstamped, "1.23", "A.cat").is_err());
         let no_ver = good.replace("DriverVer = 11/26/2026,1.2.3.4", "DriverVer =");
-        assert!(check_stamped(&no_ver, "1.23", "2.15.0", "A.cat").is_err());
+        assert!(check_stamped(&no_ver, "1.23", "A.cat").is_err());
     }
 
     #[test]
@@ -544,10 +468,9 @@ mod tests {
     #[test]
     fn universal_models_have_unique_supported_hardware_ids() {
         let text = fs::read_to_string(inx()).unwrap();
-        for (build, usb_section) in [
-            ("16299", "amtptpdeviceusbkm_device"),
-            ("17134", "amtptpdeviceusbum_install"),
-        ] {
+        {
+            let build = "16299";
+            let usb_section = "amtptpdeviceusbkm_device";
             let heading = format!("[Standard.NT$ARCH$.10.0...{build}]");
             let models = text
                 .lines()
@@ -581,7 +504,9 @@ mod tests {
     fn vid_pid(id: &str) -> (u16, u16) {
         let id = id.to_ascii_lowercase();
         let field = |key: &str| {
-            let (_, rest) = id.split_once(key).unwrap_or_else(|| panic!("{key} in {id}"));
+            let (_, rest) = id
+                .split_once(key)
+                .unwrap_or_else(|| panic!("{key} in {id}"));
             let digits: String = rest.chars().take_while(char::is_ascii_hexdigit).collect();
             let value = u32::from_str_radix(&digits, 16).unwrap_or_else(|e| panic!("{id}: {e}"));
             u16::try_from(value & 0xFFFF).unwrap()
@@ -607,7 +532,9 @@ mod tests {
         for line in text.lines() {
             let line = strip_inf_comment(line).trim();
             if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
-                section = name.starts_with("Standard.NT$ARCH$.").then(|| name.to_owned());
+                section = name
+                    .starts_with("Standard.NT$ARCH$.")
+                    .then(|| name.to_owned());
                 continue;
             }
             let Some(section) = &section else { continue };
@@ -627,7 +554,7 @@ mod tests {
     }
 
     /// Every binding of the INF template resolves to a model definition of the driver it installs:
-    /// SPI and UMDF to a table entry that also selects a report descriptor, the USB KMDF driver to a table
+    /// SPI to a table entry that also selects a report descriptor, the USB KMDF driver to a table
     /// row or a listed fallback PID, and the filter to a supported Magic Trackpad 2 transport.
     #[test]
     fn model_bindings_resolve_to_model_definitions() {
@@ -645,23 +572,11 @@ mod tests {
                         "{ctx}: no SPI descriptor family"
                     );
                 }
-                "amtptpdeviceusbum_install" => {
-                    let (vid, pid) = vid_pid(&id);
-                    assert_eq!(vid, 0x05AC, "{ctx}");
-                    assert!(
-                        amtptp_usbum_core::config::lookup_config(pid).is_some(),
-                        "{ctx}: no UMDF config row"
-                    );
-                    assert!(
-                        amtptp_usbum_core::descriptors::HidRegistry::for_pid(pid).is_some(),
-                        "{ctx}: no UMDF report descriptor"
-                    );
-                }
                 "amtptpdeviceusbkm_device" => {
                     let (vid, pid) = vid_pid(&id);
                     assert_eq!(vid, 0x05AC, "{ctx}");
                     let config = amtptp_usbkm_core::config::config_for_pid(pid);
-                    if config.identification != pid {
+                    if !config.matches(pid) {
                         assert!(
                             amtptp_usbkm_core::config::uses_listed_fallback(pid),
                             "{ctx}: falls back to the generic profile without being listed"
@@ -692,8 +607,9 @@ mod tests {
             }
         }
         // No listed fallback PID is stale.
-        let listed: std::collections::BTreeSet<u16> =
-            amtptp_usbkm_core::config::FALLBACK_PIDS.into_iter().collect();
+        let listed: std::collections::BTreeSet<u16> = amtptp_usbkm_core::config::FALLBACK_PIDS
+            .into_iter()
+            .collect();
         assert_eq!(kmdf_fallbacks, listed);
     }
 
@@ -709,58 +625,5 @@ mod tests {
             vid_pid("HID\\VID_05AC&PID_0265&REV_0855&MI_01&Col01"),
             (0x05AC, 0x0265)
         );
-    }
-
-    /// Minimal PE32+ header: `e_lfanew` = 0x40, optional header at 0x58.
-    fn pe32plus(dll_characteristics: u16, checksum: u32) -> Vec<u8> {
-        let mut img = vec![0_u8; 0x100];
-        img[0..2].copy_from_slice(b"MZ");
-        img[0x3C..0x40].copy_from_slice(&0x40_u32.to_le_bytes());
-        img[0x40..0x44].copy_from_slice(b"PE\0\0");
-        img[0x58..0x5A].copy_from_slice(&0x20B_u16.to_le_bytes());
-        img[0x58 + 64..0x58 + 68].copy_from_slice(&checksum.to_le_bytes());
-        img[0x58 + 70..0x58 + 72].copy_from_slice(&dll_characteristics.to_le_bytes());
-        img
-    }
-
-    fn dll_characteristics(img: &[u8]) -> u16 {
-        u16::from_le_bytes([img[0x58 + 70], img[0x58 + 71]])
-    }
-
-    #[test]
-    fn clears_force_integrity_only() {
-        // What wdk-build's link produces: 0x1E0 = HIGH_ENTROPY_VA | DYNAMIC_BASE
-        // | FORCE_INTEGRITY | NX_COMPAT.
-        let mut img = pe32plus(0x01E0, 0);
-        let before = img.clone();
-        assert_eq!(clear_force_integrity_bytes(&mut img), Ok(()));
-        assert_eq!(dll_characteristics(&img), 0x0160);
-        // Only those two bytes change.
-        let changed: Vec<usize> = (0..img.len()).filter(|&i| img[i] != before[i]).collect();
-        assert_eq!(changed, vec![0x58 + 70]);
-        // Idempotent, and a clear flag stays clear.
-        assert_eq!(clear_force_integrity_bytes(&mut img), Ok(()));
-        assert_eq!(dll_characteristics(&img), 0x0160);
-    }
-
-    #[test]
-    fn force_integrity_rejects_unexpected_images() {
-        assert!(clear_force_integrity_bytes(&mut pe32plus(0x01E0, 0x1234)).is_err());
-        let mut no_mz = pe32plus(0x01E0, 0);
-        no_mz[0] = b'X';
-        assert!(clear_force_integrity_bytes(&mut no_mz).is_err());
-        let mut no_pe = pe32plus(0x01E0, 0);
-        no_pe[0x41] = b'X';
-        assert!(clear_force_integrity_bytes(&mut no_pe).is_err());
-        let mut pe32 = pe32plus(0x01E0, 0);
-        pe32[0x58..0x5A].copy_from_slice(&0x10B_u16.to_le_bytes());
-        assert!(clear_force_integrity_bytes(&mut pe32).is_err());
-        let mut truncated = pe32plus(0x01E0, 0);
-        truncated.truncate(0x58 + 71);
-        assert!(clear_force_integrity_bytes(&mut truncated).is_err());
-        assert!(clear_force_integrity_bytes(&mut []).is_err());
-        let mut bad_lfanew = pe32plus(0x01E0, 0);
-        bad_lfanew[0x3C..0x40].copy_from_slice(&u32::MAX.to_le_bytes());
-        assert!(clear_force_integrity_bytes(&mut bad_lfanew).is_err());
     }
 }

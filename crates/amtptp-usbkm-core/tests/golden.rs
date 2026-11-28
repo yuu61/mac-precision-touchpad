@@ -12,15 +12,12 @@ use amtptp_usbkm_core::hid::{
     HID_DESCRIPTOR, REPORT_DESCRIPTOR, REPORT_DESCRIPTOR_LEN, REPORT_DESCRIPTOR_T2_13,
     get_device_attributes, get_report_descriptor, get_report_descriptor_for,
 };
-use amtptp_usbkm_core::input::{
-    PacketAction, ReadReportResult, complete_read_report, parse_packet, process_packet,
-};
+use amtptp_usbkm_core::input::{PacketAction, parse_packet, process_packet};
 use amtptp_usbkm_core::lifecycle;
 use amtptp_usbkm_core::state::{DeviceState, InputGates, UsbDeviceIds};
-use amtptp_usbkm_core::status::{Completion, STATUS_DATA_ERROR, STATUS_INVALID_BUFFER_SIZE};
+use amtptp_usbkm_core::status::{Completion, STATUS_INVALID_BUFFER_SIZE};
 use amtptp_usbkm_core::wellspring::{
-    ControlTransfer as _, POOL_TAG_PTP_CONTROL, set_wellspring_mode, wellspring_read_setup,
-    wellspring_write_setup,
+    ControlTransfer as _, set_wellspring_mode, wellspring_read_setup, wellspring_write_setup,
 };
 use common::fake::FakeHw;
 use common::{hex, to_legacy_c_u32};
@@ -42,8 +39,8 @@ C5150026FF007508960001B102C0050D090EA10185040922A10209521500251075089501B102C0A1
 
 fn report(action: PacketAction) -> [u8; 50] {
     match action {
-        PacketAction::Deliver(ReadReportResult::Report(r)) => r,
-        other @ (PacketAction::Discard | PacketAction::Deliver(ReadReportResult::DataError)) => {
+        PacketAction::Deliver(r) => r,
+        other @ PacketAction::Discard => {
             panic!("expected a report, got {other:?}");
         }
     }
@@ -126,7 +123,7 @@ fn golden_b_two_fingers_fallback() {
         "05 03 00 00 00 00 1c 25 58 1b 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
          00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 00",
     );
-    for pid in [0xffff, 0x027c, 0x027d, 0x0273, 0x1234] {
+    for pid in [0xffff, 0x027c, 0x027d, 0x0277, 0x1234] {
         let r = report(parse_packet(
             config_for_pid(pid),
             &packet,
@@ -159,25 +156,21 @@ fn golden_b_prime_13_inch() {
 }
 
 #[test]
-fn golden_c_six_fingers_data_error() {
-    let packet = vec![0_u8; 226];
-    let action = parse_packet(
+fn six_fingers_are_limited_to_five_contacts() {
+    let mut packet = [0_u8; 226];
+    for finger in packet[46..].as_chunks_mut::<30>().0 {
+        finger[18] = 110;
+    }
+    let PacketAction::Deliver(bytes) = parse_packet(
         &FALLBACK_CONFIG,
         &packet,
         InputGates::ON,
         0,
         &mut ContactTracker::new(),
-    );
-    assert_eq!(action, PacketAction::Deliver(ReadReportResult::DataError));
-    let mut out = [0xa5_u8; 50];
-    let PacketAction::Deliver(result) = action else {
-        panic!("expected a delivered data error");
+    ) else {
+        panic!("expected a report")
     };
-    assert_eq!(
-        complete_read_report(&result, Ok(&mut out)),
-        Completion::status(STATUS_DATA_ERROR)
-    );
-    assert_eq!(out, [0xa5; 50]);
+    assert_eq!(bytes[48], 5);
 }
 
 #[test]
@@ -299,8 +292,7 @@ fn input_scan_time_restarts_on_d0_entry() {
         PacketAction::Discard
     );
     let mut scan_time = |counter| {
-        let PacketAction::Deliver(ReadReportResult::Report(report)) =
-            process_packet(&state, &mut contacts, &pack, counter)
+        let PacketAction::Deliver(report) = process_packet(&state, &mut contacts, &pack, counter)
         else {
             panic!("valid input packet did not produce a report");
         };
@@ -338,8 +330,14 @@ fn multi_finger_tracking_liftoff_and_mode0_gate() {
     let mut contacts = ContactTracker::new();
     let r0 = report(process_packet(&state, &mut contacts, &f0, 0));
     assert_eq!(r0[48], 2);
-    assert_eq!((r0[1], u32::from_le_bytes([r0[2], r0[3], r0[4], r0[5]])), (0x03, 0));
-    assert_eq!((r0[10], u32::from_le_bytes([r0[11], r0[12], r0[13], r0[14]])), (0x03, 1));
+    assert_eq!(
+        (r0[1], u32::from_le_bytes([r0[2], r0[3], r0[4], r0[5]])),
+        (0x03, 0)
+    );
+    assert_eq!(
+        (r0[10], u32::from_le_bytes([r0[11], r0[12], r0[13], r0[14]])),
+        (0x03, 1)
+    );
 
     // Finger 0 lifts: 1-finger packet containing only finger 1 near (1510, 3000).
     let mut f1 = vec![0_u8; 46 + 30];
@@ -348,27 +346,42 @@ fn multi_finger_tracking_liftoff_and_mode0_gate() {
     f1[64..66].copy_from_slice(&150_i16.to_le_bytes());
     let r1 = report(process_packet(&state, &mut contacts, &f1, 100));
     assert_eq!(r1[48], 2, "slot 0 liftoff + slot 1 active");
-    assert_eq!((r1[1], u32::from_le_bytes([r1[2], r1[3], r1[4], r1[5]])), (0x01, 0));
-    assert_eq!((r1[10], u32::from_le_bytes([r1[11], r1[12], r1[13], r1[14]])), (0x03, 1));
+    assert_eq!(
+        (r1[1], u32::from_le_bytes([r1[2], r1[3], r1[4], r1[5]])),
+        (0x01, 0)
+    );
+    assert_eq!(
+        (r1[10], u32::from_le_bytes([r1[11], r1[12], r1[13], r1[14]])),
+        (0x03, 1)
+    );
 
     // Next frame: liftoff finished, only ID 1 remains.
     let r2 = report(process_packet(&state, &mut contacts, &f1, 200));
     assert_eq!(r2[48], 1);
-    assert_eq!((r2[1], u32::from_le_bytes([r2[2], r2[3], r2[4], r2[5]])), (0x03, 1));
+    assert_eq!(
+        (r2[1], u32::from_le_bytes([r2[2], r2[3], r2[4], r2[5]])),
+        (0x03, 1)
+    );
 
     // Mode 0 switches Wellspring mode off; packets are discarded and tracker is reset.
     let mode0 = [0x04_u8, 0x00];
     assert_eq!(
         set_feature(
             16,
-            || Some(SetFeaturePacket { report_id: 0x04, report_buffer: &mode0 }),
+            || Some(SetFeaturePacket {
+                report_id: 0x04,
+                report_buffer: &mode0
+            }),
             &state,
             &mut hw,
         ),
         Completion::status(0)
     );
     assert!(!state.wellspring_mode_on());
-    assert_eq!(process_packet(&state, &mut contacts, &f1, 300), PacketAction::Discard);
+    assert_eq!(
+        process_packet(&state, &mut contacts, &f1, 300),
+        PacketAction::Discard
+    );
     assert!(!contacts.has_active_contacts());
 }
 
@@ -382,7 +395,6 @@ fn wellspring_wire_bytes_6_3() {
         wellspring_write_setup(&FALLBACK_CONFIG).to_bytes(),
         [0x21, 0x09, 0x02, 0x03, 0x02, 0x00, 0x04, 0x00]
     );
-    assert_eq!(POOL_TAG_PTP_CONTROL, 0x5054_5043);
 
     let state = DeviceState::new();
     state.on_device_create();
@@ -395,7 +407,10 @@ fn wellspring_wire_bytes_6_3() {
         "in:a101020302000400:0200:00000000;out:2109020302000400:02010000:00000000"
     );
     assert!(state.wellspring_mode_on());
-    assert_eq!(hw.serialized(|hw| set_wellspring_mode(&state, hw, false)), 0);
+    assert_eq!(
+        hw.serialized(|hw| set_wellspring_mode(&state, hw, false)),
+        0
+    );
     assert_eq!(
         hw.take_logs().1,
         "in:a101020302000400:0200:00000000;out:2109020302000400:02000000:00000000"
@@ -445,7 +460,10 @@ fn feature_reports_5_5_and_5_6() {
     assert_eq!(
         set_feature(
             16,
-            || Some(SetFeaturePacket { report_id: 0x04, report_buffer: &[0x04] }),
+            || Some(SetFeaturePacket {
+                report_id: 0x04,
+                report_buffer: &[0x04]
+            }),
             &state,
             &mut hw,
         ),
@@ -457,7 +475,10 @@ fn feature_reports_5_5_and_5_6() {
     assert_eq!(
         set_feature(
             16,
-            || Some(SetFeaturePacket { report_id: 0x04, report_buffer: &mode0 }),
+            || Some(SetFeaturePacket {
+                report_id: 0x04,
+                report_buffer: &mode0
+            }),
             &state,
             &mut hw,
         ),
@@ -473,7 +494,10 @@ fn feature_reports_5_5_and_5_6() {
     assert_eq!(
         set_feature(
             16,
-            || Some(SetFeaturePacket { report_id: 0x04, report_buffer: &mode3 }),
+            || Some(SetFeaturePacket {
+                report_id: 0x04,
+                report_buffer: &mode3
+            }),
             &state,
             &mut hw,
         ),
@@ -557,4 +581,89 @@ fn attributes_5_3() {
         [0x20, 0, 0, 0, 0xac, 0x05, 0x73, 0x02, 0x01, 0x00]
     );
     assert_eq!(out[10..], [0; 22]);
+}
+
+/// Original UMDF fixture inputs and reports, with corrected MT2 Y origin from Step 2.
+#[test]
+fn legacy_usb_families_report_through_kmdf() {
+    for line in include_str!("fixtures/legacy_usb.txt").lines() {
+        let fields: Vec<_> = line.split_whitespace().collect();
+        let [case, pids, input, output] = fields.as_slice() else {
+            panic!("invalid fixture")
+        };
+        for pid in pids.split(',') {
+            let model = config_for_pid(u16::from_str_radix(pid, 16).unwrap());
+            let mut contacts = ContactTracker::new();
+            let bytes = report(parse_packet(
+                model,
+                &hex(input),
+                InputGates::ON,
+                0xff,
+                &mut contacts,
+            ));
+            assert_eq!(bytes.as_slice(), hex(output), "{case} PID {pid}");
+            let empty = vec![0; model.profile.tp_type.header() as usize];
+            let up = report(parse_packet(
+                model,
+                &empty,
+                InputGates::ON,
+                0x100,
+                &mut contacts,
+            ));
+            assert_eq!((up[1], up[48]), (1, 1), "{case} liftoff");
+            assert_eq!(
+                &up[2..10],
+                &bytes[2..10],
+                "{case} liftoff ID and coordinates"
+            );
+        }
+    }
+}
+
+#[test]
+fn legacy_recovery_obeys_input_mode_and_power() {
+    use amtptp_usbkm_core::{input::needs_mode_recovery, wellspring::recover_mode};
+    let state = DeviceState::new();
+    let mut hw = FakeHw::new(0x0265);
+    assert_eq!(lifecycle::prepare_hardware(&state, &mut hw), 0);
+    assert_eq!(lifecycle::d0_entry(&state, &mut hw), 0);
+    assert!(needs_mode_recovery(&state, 3));
+    assert!(!needs_mode_recovery(&state, 21));
+    let _entry = hw.take_logs();
+    recover_mode(&state, &mut hw);
+    let (_, register) = hw.take_logs();
+    assert!(register.contains("out:2109020301000400:02000000"));
+    assert!(register.ends_with("out:2109020301000400:02010000:00000000"));
+    assert_eq!(
+        set_feature(
+            16,
+            || Some(SetFeaturePacket {
+                report_id: 4,
+                report_buffer: &[4, 0]
+            }),
+            &state,
+            &mut hw
+        ),
+        Completion::success(0)
+    );
+    let _mouse = hw.take_logs();
+    recover_mode(&state, &mut hw);
+    assert_eq!(hw.take_logs().1, "-");
+    assert_eq!(lifecycle::d0_exit(&state, &mut hw).status, 0);
+    let _exit = hw.take_logs();
+    recover_mode(&state, &mut hw);
+    assert_eq!(hw.take_logs().1, "-");
+}
+
+#[test]
+fn wellspring8_enters_raw_mode_without_a_transfer() {
+    for pid in [0x0290, 0x0291, 0x0292] {
+        let state = DeviceState::new();
+        let mut hw = FakeHw::new(pid);
+        assert_eq!(lifecycle::prepare_hardware(&state, &mut hw), 0);
+        assert_eq!(lifecycle::d0_entry(&state, &mut hw), 0);
+        assert!(state.wellspring_mode_on());
+        assert!(!state.can_recover_mode());
+        assert_eq!(hw.take_logs().1, "-");
+    }
 }

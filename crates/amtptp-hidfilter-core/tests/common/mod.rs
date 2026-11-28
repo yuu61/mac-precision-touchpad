@@ -9,8 +9,8 @@ use core::fmt::Write as _;
 use std::collections::VecDeque;
 
 use amtptp_hidfilter_core::{
-    AddDeviceIo, Bcm5974Param, ContactTracker, DeviceSnapshot, FailedAction, FilterIo, NtStatus,
-    ReadTicket, ReadTracker, XferBuffer, XferPacket, XferPacketMut,
+    Bcm5974Param, ContactTracker, DeviceSnapshot, NtStatus, ReadTicket, ReadTracker, XferPacket,
+    XferPacketMut,
 };
 
 // ------------------------------------------------------------------------------------------------
@@ -322,6 +322,48 @@ pub struct Mock {
 }
 
 impl Mock {
+    fn fdo_init_set_filter(&mut self) {
+        self.rec("WdfFdoInitSetFilter".into());
+    }
+
+    fn set_pnp_power_event_callbacks(&mut self) {
+        self.rec("WdfDeviceInitSetPnpPowerEventCallbacks".into());
+    }
+
+    fn create_device(&mut self) -> NtStatus {
+        self.add_step("WdfDeviceCreate")
+    }
+
+    fn store_wdm_device_object(&mut self) -> bool {
+        self.rec("WdfDeviceWdmGetDeviceObject".into());
+        !self.faults.wdm_null
+    }
+
+    fn create_read_buffer_lookaside(&mut self) -> NtStatus {
+        self.add_step("WdfLookasideListCreate")
+    }
+
+    fn create_recovery_timer(&mut self) -> NtStatus {
+        self.add_step("WdfTimerCreate")
+    }
+
+    fn create_recovery_work_item(&mut self) -> NtStatus {
+        self.add_step("WdfWorkItemCreate")
+    }
+
+    fn create_default_queue(&mut self) -> NtStatus {
+        self.add_step("WdfIoQueueCreate")
+    }
+
+    fn create_read_queue(&mut self) -> NtStatus {
+        let s = match self.faults.add {
+            Some(("ReadQueue", s)) => s,
+            _ => 0,
+        };
+        self.rec(format!("WdfIoQueueCreate={}", st(s)));
+        s
+    }
+
     fn add_step(&mut self, name: &'static str) -> NtStatus {
         let s = match self.faults.add {
             Some((n, s)) if n == name => s,
@@ -357,16 +399,6 @@ impl Mock {
     fn up(req: usize) -> String {
         format!("upper{}", req + 1)
     }
-}
-
-impl FilterIo for Mock {
-    type Request = usize;
-    type Memory = usize;
-    /// A lower read's id.
-    type LowerRead = usize;
-    type LowerMemory = ();
-    type ModeSwitchRequest = ();
-    type ModeSwitchMemory = ();
 
     fn complete(&mut self, request: usize, status: NtStatus) {
         let info = self.uppers[request].info;
@@ -453,7 +485,7 @@ impl FilterIo for Mock {
             })
     }
 
-    fn set_feature_packet(&mut self, request: usize) -> Option<XferPacket<'_>> {
+    fn set_feature_packet(&self, request: usize) -> Option<XferPacket<'_>> {
         self.uppers[request].feature.as_ref().map(|f| XferPacket {
             report_id: f.rid,
             report_buffer: &f.buf[..f.rblen],
@@ -489,7 +521,7 @@ impl FilterIo for Mock {
         }
     }
 
-    fn parked_read_count(&mut self) -> usize {
+    fn parked_read_count(&self) -> usize {
         // A pure query: the C oracle logs no getters.
         self.read_queue.len()
     }
@@ -543,7 +575,7 @@ impl FilterIo for Mock {
         ok
     }
 
-    fn lower_read_buffer(&mut self, _memory: ()) -> &[u8] {
+    fn lower_read_buffer(&self, _memory: ()) -> &[u8] {
         &self.lower_buf
     }
 
@@ -599,6 +631,33 @@ impl FilterIo for Mock {
         self.freq
     }
 
+    fn send_mode_report(&mut self, report: amtptp_hidfilter_core::ModeSwitch) -> NtStatus {
+        // Project the class transfer onto the historical oracle's events.
+        if let Err(status) = self.create_mode_switch_request() {
+            return status;
+        }
+        let status = ptp_hid::hidport::with_xfer_packet::<32, _, _>(
+            report.report_id,
+            report.payload,
+            |bytes| {
+                if let Err(status) = self.create_mode_switch_memory((), bytes) {
+                    return status;
+                }
+                let status = self.format_mode_switch((), ());
+                if status < 0 {
+                    return status;
+                }
+                if !self.set_mode_switch_user_buffer((), bytes) {
+                    return amtptp_hidfilter_core::STATUS_UNSUCCESSFUL;
+                }
+                self.send_mode_switch_synchronously(());
+                self.mode_switch_status(())
+            },
+        )
+        .unwrap();
+        self.delete_mode_switch_request(());
+        status
+    }
     fn create_mode_switch_request(&mut self) -> Result<(), NtStatus> {
         let s = self.faults.cfg_create.unwrap_or(0);
         self.rec(format!(
@@ -610,14 +669,10 @@ impl FilterIo for Mock {
         if s == 0 { Ok(()) } else { Err(s) }
     }
 
-    fn create_mode_switch_memory(
-        &mut self,
-        _r: (),
-        packet: &mut XferBuffer,
-    ) -> Result<(), NtStatus> {
+    fn create_mode_switch_memory(&mut self, _r: (), packet: &[u8; 32]) -> Result<(), NtStatus> {
         let s = self.faults.cfg_mem.unwrap_or(0);
-        self.rec(format!("WdfMemoryCreatePreallocated(ctx=null,parent=cfg_req,exec=inherit,sync=inherit,cleanup=null,destroy=null,size={})={}", packet.as_bytes().len(), st(s)));
-        self.cfg_mem_addr = Some(packet.as_mut_ptr() as usize);
+        self.rec(format!("WdfMemoryCreatePreallocated(ctx=null,parent=cfg_req,exec=inherit,sync=inherit,cleanup=null,destroy=null,size={})={}", packet.len(), st(s)));
+        self.cfg_mem_addr = Some(packet.as_ptr() as usize);
         if s == 0 { Ok(()) } else { Err(s) }
     }
 
@@ -627,12 +682,12 @@ impl FilterIo for Mock {
         s
     }
 
-    fn set_mode_switch_user_buffer(&mut self, _r: (), packet: &mut XferBuffer) -> bool {
+    fn set_mode_switch_user_buffer(&mut self, _r: (), packet: &[u8; 32]) -> bool {
         if self.faults.irp_null {
             self.rec("WdfRequestWdmGetIrp(req=cfg_req)=null".into());
             return false;
         }
-        self.cfg_user_buffer = Some((packet.as_mut_ptr() as usize, *packet.as_bytes()));
+        self.cfg_user_buffer = Some((packet.as_ptr() as usize, *packet));
         true
     }
 
@@ -682,56 +737,6 @@ impl FilterIo for Mock {
     }
 }
 
-/// `AddDevice` events are recorded as `Name=result` (or `Name`); tests compare them with the fixture's
-/// names and results, and check the fixture's arguments against `amtptp_hidfilter_core::config`.
-impl AddDeviceIo for Mock {
-    fn fdo_init_set_filter(&mut self) {
-        self.rec("WdfFdoInitSetFilter".into());
-    }
-
-    fn set_pnp_power_event_callbacks(&mut self) {
-        self.rec("WdfDeviceInitSetPnpPowerEventCallbacks".into());
-    }
-
-    fn create_device(&mut self) -> NtStatus {
-        self.add_step("WdfDeviceCreate")
-    }
-
-    fn store_wdm_device_object(&mut self) -> bool {
-        self.rec("WdfDeviceWdmGetDeviceObject".into());
-        !self.faults.wdm_null
-    }
-
-    fn create_device_interface(&mut self) -> NtStatus {
-        self.add_step("WdfDeviceCreateDeviceInterface")
-    }
-
-    fn create_read_buffer_lookaside(&mut self) -> NtStatus {
-        self.add_step("WdfLookasideListCreate")
-    }
-
-    fn create_recovery_timer(&mut self) -> NtStatus {
-        self.add_step("WdfTimerCreate")
-    }
-
-    fn create_recovery_work_item(&mut self) -> NtStatus {
-        self.add_step("WdfWorkItemCreate")
-    }
-
-    fn create_default_queue(&mut self) -> NtStatus {
-        self.add_step("WdfIoQueueCreate")
-    }
-
-    fn create_read_queue(&mut self) -> NtStatus {
-        let s = match self.faults.add {
-            Some(("ReadQueue", s)) => s,
-            _ => 0,
-        };
-        self.rec(format!("WdfIoQueueCreate={}", st(s)));
-        s
-    }
-}
-
 /// Counts records per named category and checks the totals at the end.
 #[derive(Debug, Default)]
 pub struct Tally {
@@ -767,3 +772,27 @@ impl Tally {
         got.iter().map(|(_, n)| n).sum()
     }
 }
+
+type Filter<'a> = Mock;
+type UpperRequest = usize;
+type LowerRead = usize;
+type ReadMemory = ();
+/// `WDF_DEVICE_FAILED_ACTION` for `WdfDeviceSetFailed`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FailedAction {
+    /// `WdfDeviceFailedAttemptRestart`.
+    AttemptRestart,
+    /// `WdfDeviceFailedNoRestart`.
+    NoRestart,
+}
+
+#[path = "../../../../drivers/km/AmtPtpHidFilter/src/io/dispatch.rs"]
+pub(crate) mod dispatch;
+#[path = "../../../../drivers/km/AmtPtpHidFilter/src/io/pipeline.rs"]
+pub(crate) mod pipeline;
+#[path = "../../../../drivers/km/AmtPtpHidFilter/src/io/pnp.rs"]
+pub(crate) mod pnp;
+
+type AddDevice = Mock;
+#[path = "../../../../drivers/km/AmtPtpHidFilter/src/device/add.rs"]
+pub(crate) mod add;

@@ -1,5 +1,7 @@
 # Rust port records
 
+USB devices now share the KMDF driver. The settings app and its vendor report have been retired. The records below document the earlier port. See the [current packaging guide](packaging.md).
+
 The four drivers were rewritten from C (commit 2edb0f2) to Rust. These documents record how
 the port was done and what changed.
 

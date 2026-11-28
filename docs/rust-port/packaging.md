@@ -29,7 +29,7 @@ dependencies). This replaces `AmtPtpDriver.sln`, the driver `.vcxproj` files and
       reads them.
     - xtask does not export `WDKContentRoot` / `Version_Number` to the driver builds to make
       `WDK_ROOT` steer them too. wdk-build emits no `rerun-if-env-changed`, so a changed value
-      would leave stale wdk-sys bindings and link paths in `drivers/<km|um>/target`.
+      would leave stale wdk-sys bindings and link paths in `drivers/km/target`.
   - Tool locations in WDK 10.0.28000: stampinf is in `bin\<ver>\x64`, Inf2Cat only in
     `bin\<ver>\x86`, InfVerif in `Tools\<ver>\x64`, signtool in `bin\<ver>\x64`.
 - LLVM (libclang) for wdk-sys's bindgen. When `LIBCLANG_PATH` is unset and
@@ -52,33 +52,28 @@ cargo xtask help
 - `--arch`: defaults to the host architecture. `all` means x64 and arm64.
 - `--release`: uses the release profile. The default is the dev profile.
 - `build`: runs `cargo build --target <triple> [--release]` in `drivers/km` (KMDF: UsbKm, SpiKm,
-  HidFilter) and in `drivers/um` (UMDF: UsbUm), with `current_dir` set to each workspace.
-  - The binaries go to `drivers/<km|um>/target/<triple>/<debug|release>/<Name>.dll` and `.pdb`.
+  HidFilter and BthFilter).
+  - The binaries go to `drivers/km/target/<triple>/<debug|release>/<Name>.dll` and `.pdb`.
   - The target dir must stay inside each driver workspace, because wdk-build walks up from
     OUT_DIR to the first `Cargo.lock`. `RUSTFLAGS`-style variables would replace the workspace's
     `+crt-static` rustflags. So xtask removes `CARGO_TARGET_DIR`, `CARGO_BUILD_TARGET_DIR`,
     `CARGO_BUILD_TARGET`, `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS` and `CARGO_BUILD_RUSTFLAGS`
     from the driver builds' environment.
-- `package`: builds both workspaces first. There is one package, `packaging/AmtPtpDevice.inx`
+- `package`: builds the KMDF workspace first. There is one package, `packaging/AmtPtpDevice.inx`
   with all four drivers (see [One INF](#one-inf)). Then, for each arch:
   1. It empties `target/package/<arch>/AmtPtpDevice/` and `target/package/<arch>/AmtPtpDevice.symbols/`,
      so no stale `.cat`, `.inf` or `.pdb` is left. It also removes, when they exist, the shared
      `target/package/<arch>/symbols/` directory and the standalone `AmtPtpHidFilter/` and
      `AmtPtpHidFilter.symbols/` package directories of older xtask versions.
-  2. It copies the binaries. KMDF `<Name>.dll` becomes `<Name>.sys`, because the INF's
-     `[SourceDisksFiles]` fixes these names; the UMDF `.dll` keeps its name. The PDBs go to the
-     sibling `target/package/<arch>/AmtPtpDevice.symbols/`, outside the package directory, so
-     Inf2Cat does not catalog them. In the packaged `AmtPtpDeviceUsbUm.dll` it clears
-     `IMAGE_DLLCHARACTERISTICS_FORCE_INTEGRITY` (0x80); see
-     [FORCE_INTEGRITY](#force_integrity-on-the-umdf-dll).
+  2. It copies the binaries. KMDF `<Name>.dll` becomes `<Name>.sys`, because the INF
+     lists those filenames in its `[SourceDisksFiles]` section. The matching PDBs go to
+     `target/package/<arch>/AmtPtpDevice.symbols/`.
   3. It writes `packaging/AmtPtpDevice.inx` as `AmtPtpDevice.inf` with CRLF line endings. The
      `.inx` is LF in git.
-  4. It runs `stampinf -f <inf> -d * -a amd64|arm64 -c AmtPtpDevice.cat -v <version|*> -k 1.23
-     -u 2.15.0`. The KMDF and UMDF versions are read from `[workspace.metadata.wdk.driver-model]`
-     in `drivers/km/Cargo.toml` and `drivers/um/Cargo.toml`, so the INF always matches the
-     framework the binaries were built against.
+  4. It runs `stampinf -f <inf> -d * -a amd64|arm64 -c AmtPtpDevice.cat -v <version|*> -k 1.23`.
+     The KMDF version comes from the workspace metadata in `drivers/km/Cargo.toml`.
   5. It checks the stamped file: no `$KEYWORD$` left, `DriverVer` and `CatalogFile` set, and every
-     `KmdfLibraryVersion` and `UmdfLibraryVersion` value as requested.
+     `KmdfLibraryVersion` value as requested.
   6. It runs `InfVerif /u <inf>`. See [InfVerif mode](#infverif-mode) for why `/u`.
   7. With `--sign`, it signs the binaries.
   8. It runs `Inf2Cat /driver:<dir> /os:<list> /uselocaltime` and checks that the `.cat` exists.
@@ -105,8 +100,8 @@ cargo xtask help
 - `test`: runs these steps, all of them, then reports every failure:
   - `cargo test --workspace` in the host workspace (core crates and xtask);
   - Clippy on all host targets, including integration tests.
-  - Clippy in both driver workspaces via `clippy-driver` as the compiler wrapper.
-    This also checks the shared `wdf-support` and `rc-embed` crates with each WDK model.
+  - Clippy in the driver workspace via `clippy-driver` as the compiler wrapper.
+    This also checks the shared `wdf-support` and `rc-embed` crates for KMDF.
 
   [`.cargo/config.toml`](../../.cargo/config.toml) enables the `all`, `pedantic`, `nursery`, and
   `restriction` groups and records the reasons for individual exceptions. The Cargo manifests
@@ -122,10 +117,10 @@ cargo xtask help
 ```text
 target/package/<x64|arm64>/
   AmtPtpDevice/              AmtPtpDevice.inf  AmtPtpDevice.cat
-                             AmtPtpDeviceUsbKm.sys  AmtPtpDeviceUsbUm.dll
+                             AmtPtpDeviceUsbKm.sys
                              AmtPtpDeviceSpiKm.sys  AmtPtpHidFilter.sys
                              AmtPtpBthFilter.sys
-  AmtPtpDevice.symbols/      AmtPtpDeviceUsbKm.pdb  AmtPtpDeviceUsbUm.pdb
+  AmtPtpDevice.symbols/      AmtPtpDeviceUsbKm.pdb
                              AmtPtpDeviceSpiKm.pdb  AmtPtpHidFilter.pdb
                              AmtPtpBthFilter.pdb
 ```
@@ -165,62 +160,18 @@ target/package/<x64|arm64>/
   The MSBuild DriverSign flow took the certificate from a project property and passed no
   password.
 
-### FORCE_INTEGRITY on the UMDF DLL
+## Framework version and OS floor
 
-- wdk-build 0.6.0 (`lib.rs:1303-1305`) links **every** driver, UMDF included, with
-  `/INTEGRITYCHECK`, which sets `IMAGE_DLLCHARACTERISTICS_FORCE_INTEGRITY` (0x80). The raw cargo
-  output has DllCharacteristics 0x1E0.
-- The C binaries never had it. The shipped C package (DriverVer 06/02/2021, 2021.3979.1.1000)
-  has DllCharacteristics 0x4160 on AmtPtpDeviceUsbUm.dll, UsbKm.sys, SpiKm.sys and
-  HidFilter.sys. The vcxprojs pass no `/INTEGRITYCHECK`, and it is off by default.
-- With the flag, the memory manager refuses to map an image that has no signature valid for
-  code integrity. This applies in user mode too: an unsigned `/INTEGRITYCHECK` DLL fails
-  `LoadLibraryW` with 577 (`ERROR_INVALID_IMAGE_HASH`), and the same DLL without the flag loads.
-  - An unsigned package's UsbUm DLL could not load in WUDFHost, even with testsigning on,
-    because there is no signature at all. The C one loads, because UMDF requires no signature.
-  - A test-signed one is expected to fail on a machine without testsigning. This was not tested.
-    With testsigning on, it most likely loads.
-  - Devices bound only to UsbUm (Wellspring `MI_01`, MT2 USB `0265&MI_01` and `0272&MI_02`)
-    would fail to start. That breaks P1.
-- link.exe cannot undo the flag. `/INTEGRITYCHECK:NO` is not a link.exe option (LNK4056, "extra
-  argument ... ignored") and still sets 0x80, and a build script cannot remove an argument
-  wdk-build already emitted.
-- So in step 2, xtask clears bit 0x80 of DllCharacteristics (optional header + 70) in the
-  **packaged copy** of `AmtPtpDeviceUsbUm.dll`, before signtool and Inf2Cat hash it. It checks
-  for `MZ`, `PE\0\0`, PE32+ and a zero PE CheckSum first; the UMDF link sets no checksum, so
-  nothing else changes. The packaged DLL then has 0x160: like the C DLL, no 0x80.
-- The raw `cargo xtask build` output in `drivers/um/target` still carries the flag. Install the
-  UMDF driver only from `target/package`.
-- The KM `.sys` files keep FORCE_INTEGRITY. Signatures are enforced for kernel drivers on x64
-  and ARM64 anyway, and their PE checksum is non-zero, so patching them would also need a
-  checksum recompute. Whether the flag changes anything for a
-  production attestation-signed package was not checked; Microsoft signs those binaries.
-
-## Framework versions and OS floor
-
-- **KMDF 1.23** for all three kernel-mode drivers, in one workspace. The C projects only pinned
-  1.23 for SpiKm; UsbKm and HidFilter used the WDK default (crosscut C1).
-  - The INF has one `$KMDFVERSION$` per wdfsect, so the package needs a single KMDF version that
-    satisfies every KM binary.
-  - KMDF 1.23 is the Windows 10 1709 (build 16299) framework. SpiKm's C project already pinned it,
-    and it was verified to bind and link on x64 and ARM64 with wdk-sys 0.5.2 before the port was
-    pinned to it. A KMDF 1.23 driver loads on 1709 and every later release, so 1709 is the floor.
-  - stampinf `-k 1.23` writes `KmdfLibraryVersion = 1.23`.
-- **UMDF 2.15** for AmtPtpDeviceUsbUm, unchanged from the C INF's hard-coded
-  `UmdfLibraryVersion=2.15.0`, which is now `$UMDFVERSION$` stamped by `-u 2.15.0`.
-- **OS floor: Windows 10 1709 (10.0.16299)** for the package as a whole, for both x64 and ARM64.
-  - The UMDF driver needs **Windows 10 1803 (10.0.17134)** because of run-from-driver-store. See
-    INF change 3.
-  - Windows 11 is covered: it is 10.0.22000+ and matches the same decorations.
-- 32-bit x86 is not built. It was removed from the C build in 8e0cc7c.
+The four drivers target KMDF 1.23 on Windows 10 build 16299 and later.
+A single models section per architecture binds every supported USB hardware ID to
+`AmtPtpDeviceUsbKm`, including Wellspring 8 and the USB Magic Trackpad 2.
 
 ## One INF
 
-`packaging/AmtPtpDevice.inx` is the only INF template. It installs all four drivers, as the signed C
-release (`AmtPtpDevice.inf`, `DriverVer 06/02/2021,2021.3979.1.1000`) did, and binds AmtPtpHidFilter
+`packaging/AmtPtpDevice.inx` is the only INF template. It installs all four KMDF drivers and binds AmtPtpHidFilter
 to the Bluetooth Magic Trackpad 2 collections (`Col01` filter, `Col02` null device).
 
-Since 2026-11-27 it also installs a fifth driver that has no C counterpart: `AmtPtpBthFilter`, a lower
+The package includes `AmtPtpBthFilter`, a lower
 filter on the Bluetooth HID device node (`BTHENUM\{00001124-...}_VID&0001004c_PID&0265`). Its
 `AmtPtpBthFilter_Device` sections pull in the inbox `hidbth.inf`/`input.inf` sections (`Include`/
 `Needs`) and add `LowerFilters`; the vendor collection it creates, `Col03`, is bound to the null
@@ -240,7 +191,9 @@ The port first also kept the standalone `packaging/AmtPtpHidFilter.inx` (the C
 `cargo xtask package` therefore builds one package and has no `--inf` option any more. The INF
 changes below that name HidFilter describe that removed template.
 
-## INF changes
+## Historical INF changes before USB consolidation
+
+The following comparison and verification records describe the original port. Step 3 replaced both USB install paths with the single KMDF binding described above.
 
 - `packaging/AmtPtpDevice.inx` is `src/AmtPtpDeviceUniversalPkg/AmtPtpDevice.inf` (and the removed
   `packaging/AmtPtpHidFilter.inx` was `src/AmtPtpHidFilter/AmtPtpHidFilter.inf`), with only the
@@ -321,7 +274,7 @@ changes below that name HidFilter describe that removed template.
 - That pipeline cannot build the Rust drivers, and its badge no longer reflects this code. The
   in-repo CI is `.github/workflows/rust-ci.yml` (`.github/workflows/github-issue-sync.yml` only
   syncs issues):
-  - host tests and Clippy, and Clippy (`cargo check` with `clippy-driver`) of both driver workspaces
+  - host tests and Clippy, and Clippy (`cargo check` with `clippy-driver`) of the driver workspace
     for x64 and ARM64, scoped to the packages a change affects;
   - the **Driver package** job, for x64 and ARM64, whenever a driver, the INF template or xtask
     changes: `cargo xtask package --arch <arch> --release`, unsigned. It links both workspaces,

@@ -18,8 +18,9 @@ use crate::BufferTooSmall;
 use crate::bytes::{concat, write_prefix};
 use crate::common::{
     PTP_BUTTON_TYPE_CLICK_PAD, PTP_MAX_CONTACT_POINTS, REPORTID_DEVICE_CAPS, REPORTID_FUNCSWITCH,
-    REPORTID_PTPHQA, REPORTID_REPORTMODE, REPORTID_UMAPP_CONF,
+    REPORTID_PTPHQA, REPORTID_REPORTMODE,
 };
+use core::sync::atomic::{AtomicU8, Ordering};
 
 // ---------------------------------------------------------------------------------------------------
 // 0x07 device capabilities
@@ -240,58 +241,23 @@ impl SelectiveReportBits {
 }
 
 // ---------------------------------------------------------------------------------------------------
-// 0x09 user-mode app configuration
-// ---------------------------------------------------------------------------------------------------
+/// The surface and button switches published together by one `SET_FEATURE`.
+#[derive(Debug, Default)]
+pub struct SelectiveReportState(AtomicU8);
 
-/// `sizeof(PTP_USERMODEAPP_CONF_REPORT)`: 4 bytes. The UMAPP TLC declares 3 × 8 bits after the ID.
-pub const UMAPP_CONF_REPORT_LEN: usize = 4;
-
-/// Feature report 0x09 (`PTP_USERMODEAPP_CONF_REPORT`), exchanged with the settings app:
-/// `[0x09, PressureQualificationLevel, SingleContactSizeQualificationLevel,
-/// MultipleContactSizeQualificationLevel]`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct UmAppConfReport {
-    /// `PressureQualificationLevel` (byte 1).
-    pub pressure_qualification_level: u8,
-    /// `SingleContactSizeQualificationLevel` (byte 2).
-    pub single_contact_size_qualification_level: u8,
-    /// `MultipleContactSizeQualificationLevel` (byte 3).
-    pub multiple_contact_size_qualification_level: u8,
-}
-
-impl UmAppConfReport {
-    /// Encodes the report, ID included.
+impl SelectiveReportState {
+    /// Initial switch settings.
     #[must_use]
-    pub const fn to_bytes(self) -> [u8; UMAPP_CONF_REPORT_LEN] {
-        [
-            REPORTID_UMAPP_CONF,
-            self.pressure_qualification_level,
-            self.single_contact_size_qualification_level,
-            self.multiple_contact_size_qualification_level,
-        ]
+    pub const fn new(bits: SelectiveReportBits) -> Self {
+        Self(AtomicU8::new(bits.to_byte()))
     }
-
-    /// Decodes bytes 1..=3. Returns `None` if `buf` is shorter than 4 bytes. Byte 0 is not checked.
-    #[must_use]
-    pub const fn from_bytes(buf: &[u8]) -> Option<Self> {
-        match buf.first_chunk::<UMAPP_CONF_REPORT_LEN>() {
-            Some(&[_, pressure, single, multiple]) => Some(Self {
-                pressure_qualification_level: pressure,
-                single_contact_size_qualification_level: single,
-                multiple_contact_size_qualification_level: multiple,
-            }),
-            None => None,
-        }
+    /// Loads both switches from the same report.
+    pub fn load(&self) -> SelectiveReportBits {
+        SelectiveReportBits::from_byte(self.0.load(Ordering::Relaxed))
     }
-
-    /// Writes the 4 report bytes to the start of `buf` (`UsbUm` GET 0x09). Bytes after the fourth are left
-    /// untouched. Returns [`BufferTooSmall`] (`UsbUm`: `STATUS_INVALID_BUFFER_SIZE`) and writes nothing if
-    /// `buf` is shorter than 4 bytes.
-    ///
-    /// # Errors
-    /// Returns [`BufferTooSmall`] if the buffer cannot hold the report.
-    pub fn write_to(self, buf: &mut [u8]) -> Result<(), BufferTooSmall> {
-        write_prefix(buf, &self.to_bytes())
+    /// Publishes both switches together.
+    pub fn store(&self, bits: SelectiveReportBits) {
+        self.0.store(bits.to_byte(), Ordering::Relaxed);
     }
 }
 
@@ -301,7 +267,6 @@ const _: () = assert!(HQA_REPORT_LEN == 257);
 const _: () = assert!(INPUT_MODE_REPORT_LEN == 2);
 const _: () = assert!(SELECTIVE_REPORT_LEN == 2);
 const _: () = assert!(SELECTIVE_REPORT_DEVICE_MODE_STRUCT_LEN == 3);
-const _: () = assert!(UMAPP_CONF_REPORT_LEN == 4);
 
 #[cfg(test)]
 mod tests {
@@ -411,26 +376,5 @@ mod tests {
         };
         assert_eq!(bits.to_report(), [0x06, 0x02]);
         assert_eq!(SelectiveReportBits::default().to_report(), [0x06, 0x03]);
-    }
-
-    #[test]
-    fn umapp_round_trip() {
-        let r = UmAppConfReport {
-            pressure_qualification_level: 0x11,
-            single_contact_size_qualification_level: 0x22,
-            multiple_contact_size_qualification_level: 0x33,
-        };
-        assert_eq!(r.to_bytes(), [0x09, 0x11, 0x22, 0x33]);
-        assert_eq!(
-            UmAppConfReport::from_bytes(&[0x09, 0x11, 0x22, 0x33]),
-            Some(r)
-        );
-        assert_eq!(UmAppConfReport::from_bytes(&[0x09, 0x11, 0x22]), None);
-        let mut buf = [0xAA_u8; 6];
-        assert_eq!(r.write_to(&mut buf), Ok(()));
-        assert_eq!(buf, [0x09, 0x11, 0x22, 0x33, 0xAA, 0xAA]);
-        let mut short = [0xAA_u8; 3];
-        assert_eq!(r.write_to(&mut short), Err(BufferTooSmall));
-        assert_eq!(short, [0xAA; 3]);
     }
 }

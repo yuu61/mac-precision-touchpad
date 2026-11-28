@@ -1,7 +1,0 @@
-//! Status codes and types used by this driver.
-
-pub use ptp_hid::status::{
-    NtStatus, STATUS_BUFFER_TOO_SMALL, STATUS_INVALID_BUFFER_SIZE, STATUS_INVALID_DEVICE_STATE,
-    STATUS_NO_MORE_ENTRIES, STATUS_NOT_SUPPORTED, STATUS_SUCCESS, STATUS_UNKNOWN_REVISION,
-    STATUS_UNSUCCESSFUL, nt_success,
-};

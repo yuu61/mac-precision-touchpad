@@ -116,7 +116,7 @@ fn selective_reporting_shapes_the_input_report() {
             assert!(r[1..46].iter().all(|&b| b == 0), "no contact data");
         }
     }
-    assert_eq!(prepare_hardware(&state), STATUS_SUCCESS);
+    state.reset_selective_reporting();
     assert_eq!(state.selective_reporting(), SelectiveReportBits::POWER_ON);
 }
 
@@ -154,7 +154,7 @@ fn input_mode_0x04_gates_hidfilter_delivery() {
     assert!(!tracker.has_active_contacts());
 
     // PrepareHardware restores ptp_input_on = true.
-    assert_eq!(prepare_hardware(&state), STATUS_SUCCESS);
+    state.reset_selective_reporting();
     assert_eq!(state.effective_reporting(), SelectiveReportBits::POWER_ON);
 }
 
@@ -201,8 +201,16 @@ fn mt2_hardware_id_tracking_and_liftoff_synthesis() {
         &mut tracker,
     );
     assert_eq!(r2[48], 2);
-    assert_eq!((r2[1], r2[2]), (0x01, 7), "ID 7 implicit liftoff (Confidence=1, TipSwitch=0)");
-    assert_eq!((r2[10], r2[11]), (0x00, 12), "ID 12 explicit liftoff keeps Confidence=0 latched");
+    assert_eq!(
+        (r2[1], r2[2]),
+        (0x01, 7),
+        "ID 7 implicit liftoff (Confidence=1, TipSwitch=0)"
+    );
+    assert_eq!(
+        (r2[10], r2[11]),
+        (0x00, 12),
+        "ID 12 explicit liftoff keeps Confidence=0 latched"
+    );
 
     // Subsequent empty header emits ContactCount = 0.
     let empty = h("31 00 00 00");
@@ -318,11 +326,6 @@ fn d6_identity_and_mode_switch() {
     ] {
         let ms = transport.mode_switch();
         assert_eq!((ms.report_id, ms.payload), (id, (&*payload)));
-        let b = XferBuffer::new(ms);
-        let bytes = b.as_bytes();
-        assert_eq!(bytes[8..12], (payload.len() as u32).to_le_bytes());
-        assert_eq!(bytes[12], id);
-        assert_eq!(bytes[16..16 + payload.len()], payload[..]);
     }
 }
 

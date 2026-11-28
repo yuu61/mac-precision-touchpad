@@ -8,8 +8,10 @@
 
 mod common;
 
-use amtptp_hidfilter_core::{DeviceState, REPORT_DESCRIPTOR, dispatch_internal_ioctl};
+use amtptp_hidfilter_core::{DeviceState, REPORT_DESCRIPTOR};
+use common::dispatch::dispatch_internal_ioctl;
 use common::*;
+
 use ptp_hid::ioctl::{
     IOCTL_HID_GET_FEATURE, IOCTL_HID_GET_REPORT_DESCRIPTOR, IOCTL_HID_GET_STRING,
     IOCTL_HID_SET_FEATURE,
@@ -99,7 +101,8 @@ fn replay_ioctl_routing() {
                 .into_iter()
                 .map(|ev| {
                     if code == IOCTL_HID_GET_REPORT_DESCRIPTOR {
-                        ev.replace("len=493", "len=511").replace("info=493", "info=511")
+                        ev.replace("len=493", "len=511")
+                            .replace("info=493", "info=511")
                     } else {
                         ev
                     }

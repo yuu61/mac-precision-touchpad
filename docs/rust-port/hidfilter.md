@@ -1,5 +1,7 @@
 # AmtPtpHidFilter: Rust port record
 
+The WDF driver now owns request dispatch and power callbacks. The core returns input actions and report bytes. The implementation map below describes the original port.
+
 This file records the port of `src/AmtPtpHidFilter` (KMDF lower filter, Bluetooth Magic Trackpad 2) to Rust:
 
 * `crates/amtptp-hidfilter-core`: all hardware-independent logic, host-tested against the C oracle fixtures.

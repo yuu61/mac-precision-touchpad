@@ -5,15 +5,13 @@
 
 mod common;
 
-use amtptp_usbkm_core::config::{CONFIG_TABLE, T2Device, config_for_pid, reader_transfer_length};
+use amtptp_usbkm_core::config::{CONFIG_TABLE, UsbModel, config_for_pid, reader_transfer_length};
 use amtptp_usbkm_core::feature::HID_XFER_PACKET_LEN;
 use amtptp_usbkm_core::hid::{
     HID_DESCRIPTOR, HID_DEVICE_ATTRIBUTES_LEN, InternalIoctl, REPORT_DESCRIPTOR,
     REPORT_DESCRIPTOR_LEN, route_internal_ioctl,
 };
 use amtptp_usbkm_core::input::TRACKPAD_FINGER_LEN;
-use amtptp_usbkm_core::lifecycle::DEVICE_INTERFACE_GUID;
-use amtptp_usbkm_core::wellspring::{POOL_TAG_PTP_CONTROL, TRANSFER_BUFFER_POOL_TYPE};
 use common::{
     C_REPORT_DESCRIPTOR_LEN, REPORT_DESCRIPTOR_DELTA, Record, Tally, hex, load, num,
     replay_descriptor_ioctl, to_legacy_c_u32,
@@ -25,7 +23,7 @@ use ptp_hid::feature::{
 use ptp_hid::hidport::HID_DESCRIPTOR_LEN;
 use ptp_hid::input::{PTP_CONTACT_LEN, PTP_REPORT_LEN};
 
-fn check_row(r: &Record, row: &T2Device) {
+fn check_row(r: &Record, row: &UsbModel) {
     let id = r.id();
     let int = |k: &str| num(r.req(k)) as i32;
     let format = row.profile.tp_type;
@@ -79,6 +77,7 @@ fn expected_route(name: &str) -> InternalIoctl {
         "IOCTL_HID_READ_REPORT" => InternalIoctl::ReadReport,
         "IOCTL_HID_GET_FEATURE" => InternalIoctl::GetFeature,
         "IOCTL_HID_SET_FEATURE" => InternalIoctl::SetFeature,
+        "IOCTL_HID_GET_STRING" => InternalIoctl::GetString,
         _ => InternalIoctl::NotSupported,
     }
 }
@@ -92,14 +91,23 @@ fn descriptors_fixture() {
         match r.req("kind") {
             "report_descriptor" => {
                 assert_eq!(num(r.req("len")) as usize, C_REPORT_DESCRIPTOR_LEN);
-                assert_eq!(REPORT_DESCRIPTOR_LEN, C_REPORT_DESCRIPTOR_LEN + REPORT_DESCRIPTOR_DELTA);
-                assert_eq!(hex(r.req("bytes")), to_legacy_c_u32(&REPORT_DESCRIPTOR, false));
+                assert_eq!(
+                    REPORT_DESCRIPTOR_LEN,
+                    C_REPORT_DESCRIPTOR_LEN + REPORT_DESCRIPTOR_DELTA
+                );
+                assert_eq!(
+                    hex(r.req("bytes")),
+                    to_legacy_c_u32(&REPORT_DESCRIPTOR, false)
+                );
                 tally.add("report_descriptor");
             }
             "hid_descriptor" => {
                 assert_eq!(num(r.req("len")) as usize, HID_DESCRIPTOR_LEN);
                 let mut c_hid = hex(r.req("bytes"));
-                assert_eq!(&c_hid[7..9], &(C_REPORT_DESCRIPTOR_LEN as u16).to_le_bytes());
+                assert_eq!(
+                    &c_hid[7..9],
+                    &(C_REPORT_DESCRIPTOR_LEN as u16).to_le_bytes()
+                );
                 c_hid[7..9].copy_from_slice(&(REPORT_DESCRIPTOR_LEN as u16).to_le_bytes());
                 assert_eq!(c_hid, HID_DESCRIPTOR.to_vec());
                 tally.add("hid_descriptor");
@@ -141,17 +149,12 @@ fn descriptors_fixture() {
                 tally.add("layout");
             }
             "consts" => {
-                assert_eq!(num(r.req("pool_tag")) as u32, POOL_TAG_PTP_CONTROL);
+                assert_eq!(num(r.req("pool_tag")) as u32, u32::from_be_bytes(*b"PTPC"));
                 // C: PagedPool (1) for a URB transfer buffer. P2 (B27): NonPagedPoolNx (512).
                 assert_eq!(num(r.req("paged_pool")), 1);
-                assert_eq!(TRANSFER_BUFFER_POOL_TYPE, 512);
                 assert_eq!(
                     num(r.req("reader_transfer_len")) as usize,
                     reader_transfer_length(CONFIG_TABLE[0].profile.tp_type)
-                );
-                assert_eq!(
-                    hex(r.req("devif_guid_mem")),
-                    DEVICE_INTERFACE_GUID.to_bytes().to_vec()
                 );
                 tally.add("consts");
             }
@@ -166,11 +169,12 @@ fn descriptors_fixture() {
             }
             "config_row" => {
                 let idx = num(r.req("idx")) as usize;
-                if let Some(row) = CONFIG_TABLE.get(idx) {
+                if num(r.req("identification")) != 0 {
+                    let row = &CONFIG_TABLE[idx];
                     check_row(r, row);
                 } else {
                     // The `{0}` sentinel: not represented (the Rust lookup is bounds-checked).
-                    assert_eq!(idx, CONFIG_TABLE.len(), "{id}");
+                    assert_eq!(idx, 5, "{id}");
                     assert_eq!(num(r.req("identification")), 0);
                     for k in ["caps", "tp_type", "tp_header", "tp_fsize", "um_size"] {
                         assert_eq!(num(r.req(k)), 0, "{id} {k}");
@@ -181,6 +185,11 @@ fn descriptors_fixture() {
             "config_select" => {
                 let pid = num(r.req("pid")) as u16;
                 let row = config_for_pid(pid);
+                if row.firmware == amtptp_usbkm_core::config::Firmware::Legacy {
+                    assert!(row.matches(pid));
+                    tally.add("config_select");
+                    continue;
+                }
                 assert_eq!(u64::from(row.identification), num(r.req("cfg")), "{id}");
                 assert_eq!(
                     row.profile.x.min,

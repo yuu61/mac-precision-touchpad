@@ -36,16 +36,13 @@ fn run(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         cli::Command::Build(opts) => {
-            drivers::build_drivers(&opts.arches, opts.release, &drivers::Workspace::ALL)?;
+            drivers::build_drivers(&opts.arches, opts.release)?;
             for &arch in &opts.arches {
-                for ws in drivers::Workspace::ALL {
-                    println!(
-                        "xtask: [{}] {} -> {}",
-                        arch.name(),
-                        ws.dir_name(),
-                        ws.output_dir(arch, opts.release).display()
-                    );
-                }
+                println!(
+                    "xtask: [{}] drivers/km -> {}",
+                    arch.name(),
+                    drivers::output_dir(arch, opts.release).display()
+                );
             }
             Ok(())
         }

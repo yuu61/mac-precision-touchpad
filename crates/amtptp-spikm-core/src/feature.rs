@@ -20,18 +20,18 @@ use ptp_hid::common::{
     REPORTID_PTPHQA, REPORTID_REPORTMODE,
 };
 use ptp_hid::feature::{
-    DEVICE_CAPS_REPORT, DEVICE_CAPS_REPORT_LEN, HQA_REPORT, HQA_REPORT_LEN,
-    INPUT_MODE_OFFSET, SELECTIVE_REPORT_BITS_OFFSET, SelectiveReportBits,
+    DEVICE_CAPS_REPORT, DEVICE_CAPS_REPORT_LEN, HQA_REPORT, HQA_REPORT_LEN, INPUT_MODE_OFFSET,
+    SELECTIVE_REPORT_BITS_OFFSET, SelectiveReportBits,
 };
 
 use crate::status::{
-    NtStatus, STATUS_BUFFER_TOO_SMALL, STATUS_INVALID_BUFFER_SIZE, STATUS_INVALID_DEVICE_REQUEST,
-    STATUS_NOT_SUPPORTED, STATUS_SUCCESS,
+    NtStatus, STATUS_INVALID_BUFFER_SIZE, STATUS_INVALID_DEVICE_REQUEST, STATUS_NOT_SUPPORTED,
+    STATUS_SUCCESS,
 };
 
 /// `sizeof(HID_XFER_PACKET)` on x64/ARM64: 16 bytes (`reportBuffer` pointer @0, `reportBufferLen` u32 @8,
 /// `reportId` u8 @12, 3 padding bytes).
-pub const HID_XFER_PACKET_LEN: usize = 16;
+pub use ptp_hid::hidport::HID_XFER_PACKET_LEN;
 
 /// Information of every `GET/SET_FEATURE` completion: neither handler calls `WdfRequestSetInformation`.
 pub const FEATURE_INFORMATION: usize = 0;
@@ -50,8 +50,8 @@ pub const fn check_xfer_packet(
     ioctl_buffer_length: usize,
     user_buffer_present: bool,
 ) -> Result<(), NtStatus> {
-    if ioctl_buffer_length < HID_XFER_PACKET_LEN {
-        Err(STATUS_BUFFER_TOO_SMALL)
+    if let Err(status) = ptp_hid::hidport::check_xfer_length(ioctl_buffer_length) {
+        Err(status)
     } else if !user_buffer_present {
         Err(STATUS_INVALID_DEVICE_REQUEST)
     } else {
@@ -77,7 +77,7 @@ pub static DEVICE_CAPS_REPLY: [u8; DEVICE_CAPS_REPORT_LEN] = DEVICE_CAPS_REPORT;
 /// - 0x07: `reportBufferLen < 3` gives `STATUS_INVALID_BUFFER_SIZE`; otherwise `07 05 00` is written.
 /// - 0x08: `reportBufferLen < 257` gives `STATUS_INVALID_BUFFER_SIZE`; otherwise the report ID and
 ///   256-byte certification blob are written.
-/// - Every other ID (including 0x04, 0x06 and the declared 0x09): `STATUS_NOT_SUPPORTED`.
+/// - Every other ID: `STATUS_NOT_SUPPORTED`.
 ///
 /// `report_buffer_present` is false when `reportBuffer` is NULL. C would dereference it once the length
 /// check passed; the port answers `STATUS_INVALID_DEVICE_REQUEST` instead (P2, not reachable from
@@ -148,8 +148,7 @@ fn set_report_byte(
 #[derive(Debug)]
 pub struct PtpSettings {
     input_on: AtomicBool,
-    report_button: AtomicBool,
-    report_touch: AtomicBool,
+    reporting: ptp_hid::feature::SelectiveReportState,
 }
 
 impl Default for PtpSettings {
@@ -165,17 +164,13 @@ impl PtpSettings {
     pub const fn new() -> Self {
         Self {
             input_on: AtomicBool::new(true),
-            report_button: AtomicBool::new(SelectiveReportBits::POWER_ON.button_report),
-            report_touch: AtomicBool::new(SelectiveReportBits::POWER_ON.surface_report),
+            reporting: ptp_hid::feature::SelectiveReportState::new(SelectiveReportBits::POWER_ON),
         }
     }
 
     /// The selective-reporting switches configured by `SET_FEATURE` 0x06.
     pub fn selective_reporting(&self) -> SelectiveReportBits {
-        SelectiveReportBits {
-            surface_report: self.report_touch(),
-            button_report: self.report_button(),
-        }
+        self.reporting.load()
     }
 
     /// Effective input gates combining `PtpInputOn` (`SET_FEATURE` 0x04) with
@@ -200,10 +195,7 @@ impl PtpSettings {
     }
 
     fn store_selective_reporting(&self, bits: SelectiveReportBits) {
-        self.report_button
-            .store(bits.button_report, Ordering::Relaxed);
-        self.report_touch
-            .store(bits.surface_report, Ordering::Relaxed);
+        self.reporting.store(bits);
     }
 
     /// `PtpInputOn`.
@@ -213,12 +205,12 @@ impl PtpSettings {
 
     /// `PtpReportButton`.
     pub fn report_button(&self) -> bool {
-        self.report_button.load(Ordering::Relaxed)
+        self.reporting.load().button_report
     }
 
     /// `PtpReportTouch`.
     pub fn report_touch(&self) -> bool {
-        self.report_touch.load(Ordering::Relaxed)
+        self.reporting.load().surface_report
     }
 
     /// `AmtPtpSetFeatures` after [`check_xfer_packet`] passed. `reportBufferLen` is not validated (C does

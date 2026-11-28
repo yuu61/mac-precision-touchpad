@@ -139,7 +139,7 @@ jobs:
         run: git diff --exit-code -- "drivers/$env:DRIVER_WORKSPACE/Cargo.lock"
 
   package:
-    # Builds and links both driver workspaces (release) and runs the whole packaging pipeline on the
+    # Builds and links the KMDF workspace (release) and runs the whole packaging pipeline on the
     # one INF: stampinf, InfVerif /u and Inf2Cat. Catches link errors, Resource.rc and INF
     # regressions that Clippy cannot see. Unsigned; nothing is uploaded.
     name: Driver package (${{ matrix.arch }})
@@ -178,13 +178,12 @@ jobs:
           workspaces: |
             . -> target
             drivers/km -> target
-            drivers/um -> target
 
       - name: Build and package (release, unsigned)
         run: cargo xtask package --arch $env:PACKAGE_ARCH --release
 
       - name: Check Cargo.lock files
-        run: git diff --exit-code -- Cargo.lock drivers/km/Cargo.lock drivers/um/Cargo.lock
+        run: git diff --exit-code -- Cargo.lock drivers/km/Cargo.lock
 
   ci:
     name: Rust CI

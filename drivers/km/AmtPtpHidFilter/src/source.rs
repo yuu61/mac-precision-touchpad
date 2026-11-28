@@ -22,7 +22,8 @@
 use core::ffi::c_void;
 use core::ptr::null_mut;
 
-use amtptp_hidfilter_core::{source_closed, source_opened};
+use crate::io::{source_closed, source_opened};
+
 use ptp_hid::ioctl::{
     IOCTL_HID_GET_MANUFACTURER_STRING, IOCTL_HID_GET_PRODUCT_STRING,
     IOCTL_HID_GET_SERIALNUMBER_STRING,
@@ -37,11 +38,12 @@ use wdk_sys::ntddk::{
     IoGetDevicePropertyData, IoRegisterPlugPlayNotification, IoUnregisterPlugPlayNotificationEx,
 };
 use wdk_sys::{
-    _IO_NOTIFICATION_EVENT_CATEGORY, _WDF_IO_TARGET_OPEN_TYPE, DEVICE_INTERFACE_CHANGE_NOTIFICATION,
-    DEVPROPKEY, DEVPROPTYPE, FILE_ATTRIBUTE_NORMAL, FILE_OPEN, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    GENERIC_READ, GENERIC_WRITE, GUID, NTSTATUS, PDEVICE_OBJECT, PNPNOTIFY_DEVICE_INTERFACE_INCLUDE_EXISTING_INTERFACES,
-    PVOID, ULONG, ULONG_PTR, UNICODE_STRING, WDF_IO_TARGET_OPEN_PARAMS, WDFDEVICE, WDFIOTARGET,
-    WDFWORKITEM, call_unsafe_wdf_function_binding,
+    _IO_NOTIFICATION_EVENT_CATEGORY, _WDF_IO_TARGET_OPEN_TYPE,
+    DEVICE_INTERFACE_CHANGE_NOTIFICATION, DEVPROPKEY, DEVPROPTYPE, FILE_ATTRIBUTE_NORMAL,
+    FILE_OPEN, FILE_SHARE_READ, FILE_SHARE_WRITE, GENERIC_READ, GENERIC_WRITE, GUID, NTSTATUS,
+    PDEVICE_OBJECT, PNPNOTIFY_DEVICE_INTERFACE_INCLUDE_EXISTING_INTERFACES, PVOID, ULONG,
+    ULONG_PTR, UNICODE_STRING, WDF_IO_TARGET_OPEN_PARAMS, WDFDEVICE, WDFIOTARGET, WDFWORKITEM,
+    call_unsafe_wdf_function_binding,
 };
 
 use crate::context::{
@@ -154,7 +156,9 @@ pub(crate) unsafe fn start(device: WDFDEVICE, ctx: &DeviceContext) -> NTSTATUS {
         IoRegisterPlugPlayNotification(
             _IO_NOTIFICATION_EVENT_CATEGORY::EventCategoryDeviceInterfaceChange,
             PNPNOTIFY_DEVICE_INTERFACE_INCLUDE_EXISTING_INTERFACES,
-            (&raw const GUID_DEVINTERFACE_HID).cast_mut().cast::<c_void>(),
+            (&raw const GUID_DEVINTERFACE_HID)
+                .cast_mut()
+                .cast::<c_void>(),
             driver_object,
             Some(on_interface_change),
             device.cast::<c_void>(),
@@ -195,7 +199,12 @@ pub(crate) unsafe fn stop(ctx: &DeviceContext) {
             call_unsafe_wdf_function_binding!(WdfIoTargetClose, target);
             call_unsafe_wdf_function_binding!(WdfObjectDelete, target.cast::<c_void>());
         }
-        tlg::write_event!(PROVIDER, "SourceClosed", level(Informational), keyword(KW_DEVICE));
+        tlg::write_event!(
+            PROVIDER,
+            "SourceClosed",
+            level(Informational),
+            keyword(KW_DEVICE)
+        );
     }
 }
 
@@ -299,7 +308,8 @@ unsafe fn open(device: WDFDEVICE, ctx: &DeviceContext, link: &[u16]) {
     };
     let mut params = open_by_name(name);
     // SAFETY: PASSIVE_LEVEL; our target; `params` is initialized and `link` outlives the call.
-    let status = unsafe { call_unsafe_wdf_function_binding!(WdfIoTargetOpen, target, &raw mut params) };
+    let status =
+        unsafe { call_unsafe_wdf_function_binding!(WdfIoTargetOpen, target, &raw mut params) };
     if !NT_SUCCESS(status) {
         trace_failure("WdfIoTargetOpen", status);
         // SAFETY: our target, not open.
@@ -326,7 +336,12 @@ unsafe fn open(device: WDFDEVICE, ctx: &DeviceContext, link: &[u16]) {
     // SAFETY: the spin lock was created in AddDevice; the closure does not call back into WDF.
     unsafe { ctx.strings.with(|s| *s = strings) };
     ctx.set_hid_io_target(target);
-    tlg::write_event!(PROVIDER, "SourceOpened", level(Informational), keyword(KW_DEVICE));
+    tlg::write_event!(
+        PROVIDER,
+        "SourceOpened",
+        level(Informational),
+        keyword(KW_DEVICE)
+    );
     source_opened(&mut Filter::new(ctx), &ctx.state);
 }
 
@@ -497,10 +512,16 @@ unsafe extern "C" fn evt_remove_canceled(target: WDFIOTARGET) {
         ..Default::default()
     };
     // SAFETY: our target, closed for query-remove; initialized reopen parameters.
-    let status = unsafe { call_unsafe_wdf_function_binding!(WdfIoTargetOpen, target, &raw mut params) };
+    let status =
+        unsafe { call_unsafe_wdf_function_binding!(WdfIoTargetOpen, target, &raw mut params) };
     if NT_SUCCESS(status) {
         ctx.set_hid_io_target(target);
-        tlg::write_event!(PROVIDER, "SourceReopened", level(Informational), keyword(KW_DEVICE));
+        tlg::write_event!(
+            PROVIDER,
+            "SourceReopened",
+            level(Informational),
+            keyword(KW_DEVICE)
+        );
         source_opened(&mut Filter::new(ctx), &ctx.state);
     } else {
         trace_failure("WdfIoTargetOpen(reopen)", status);
@@ -523,5 +544,10 @@ unsafe extern "C" fn evt_remove_complete(target: WDFIOTARGET) {
         call_unsafe_wdf_function_binding!(WdfIoTargetClose, target);
         call_unsafe_wdf_function_binding!(WdfObjectDelete, target.cast::<c_void>());
     }
-    tlg::write_event!(PROVIDER, "SourceRemoved", level(Informational), keyword(KW_DEVICE));
+    tlg::write_event!(
+        PROVIDER,
+        "SourceRemoved",
+        level(Informational),
+        keyword(KW_DEVICE)
+    );
 }

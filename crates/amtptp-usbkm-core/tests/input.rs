@@ -11,7 +11,7 @@ mod common;
 
 use std::collections::VecDeque;
 
-use amtptp_usbkm_core::config::T2Device;
+use amtptp_usbkm_core::config::UsbModel;
 use amtptp_usbkm_core::input::{PacketAction, complete_read_report, process_packet};
 use amtptp_usbkm_core::lifecycle;
 use amtptp_usbkm_core::state::{DeviceState, InputGates};
@@ -87,7 +87,7 @@ fn out_hex(case: &Case<'_>) -> String {
 /// Independent Step 2 specification for frame-0 T2 Type4 report encoding, plus whether C's
 /// single-frame output was unaffected by hover filtering, Wellspring `Confidence`, and clamping.
 fn expected_frame0_report(
-    cfg: &T2Device,
+    cfg: &UsbModel,
     packet: &[u8],
     gates: InputGates,
 ) -> ([u8; PTP_REPORT_LEN], bool) {
@@ -166,6 +166,11 @@ fn replay(case: &Case<'_>, prev_out: Option<&str>, exact_c_matches: &mut usize) 
         return "b4_fixed/wsm0_discard";
     }
 
+    if state.config().profile.tp_type == amtptp_usbkm_core::config::TrackpadType::Type3 {
+        // This C fallback fixture supplies a Type4 packet to a Wellspring 8 device.
+        assert_eq!(action, PacketAction::Discard, "{id}");
+        return "driver/edge";
+    }
     let mut first: Option<PendedRead> = None;
     let res = case.get("res");
     let mut no_request = false;
@@ -200,7 +205,15 @@ fn replay(case: &Case<'_>, prev_out: Option<&str>, exact_c_matches: &mut usize) 
         "driver/edge"
     };
     match res {
-        "report" | "data_error" => {
+        "data_error" => {
+            let expected = if outlen >= PTP_REPORT_LEN {
+                Completion::success(PTP_REPORT_LEN)
+            } else {
+                Completion::status(STATUS_BUFFER_TOO_SMALL)
+            };
+            assert_eq!(completion, Some(expected), "{id}");
+        }
+        "report" => {
             assert_eq!(case.get("completed"), "1", "{id}");
             assert_eq!(case.get("owned"), "0", "{id}");
             assert_eq!(
@@ -267,7 +280,7 @@ fn replay(case: &Case<'_>, prev_out: Option<&str>, exact_c_matches: &mut usize) 
             );
             c_expected[PTP_REPORT_SCAN_TIME_OFFSET..PTP_REPORT_SCAN_TIME_OFFSET + 2]
                 .copy_from_slice(&0_u16.to_le_bytes());
-            if matches_c {
+            if matches_c && res != "data_error" {
                 assert_eq!(to_hex(&buf), to_hex(&c_expected), "{id}: exact C match");
                 *exact_c_matches += 1;
             }
@@ -317,7 +330,10 @@ fn replay_file(name: &str, total: usize, expected: &[(&str, usize)]) {
         tally.add(replay(&case, prev_out.as_deref(), &mut exact_c_matches));
         prev_out = Some(out_hex(&case));
     }
-    assert!(exact_c_matches > 0, "{name}: expected unaffected C-matching records");
+    assert!(
+        exact_c_matches > 0,
+        "{name}: expected unaffected C-matching records"
+    );
     tally.assert_exact(name, total, expected);
 }
 

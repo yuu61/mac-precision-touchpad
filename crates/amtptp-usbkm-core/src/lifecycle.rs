@@ -2,7 +2,7 @@
 //! `SelectInterruptInterface` (Device.c:418-501), `AmtPtpConfigContReaderForInterruptEndPoint`
 //! (Interrupt.c:14-87), `AmtPtpEvtDeviceD0Entry` / `AmtPtpEvtDeviceD0Exit` (Device.c:275-416), the
 //! continuous reader's `EvtUsbTargetPipeReadersFailed` and the queue's `EvtIoStop`, plus the static
-//! configuration the glue passes to WDF (queues, reader, device interface).
+//! configuration the glue passes to WDF (queues and reader).
 //!
 //! The WDF calls are behind [`UsbHardware`]; the order of the calls, which failures are returned and
 //! which are ignored, and every context update live here.
@@ -236,7 +236,10 @@ pub fn prepare_hardware<H: UsbHardware + ?Sized>(state: &DeviceState, hw: &mut H
 /// `D0Entry` only after a successful `PrepareHardware`, which guarantees one) the C would dereference NULL;
 /// this returns `STATUS_INVALID_DEVICE_STATE` instead.
 pub fn d0_entry<H: UsbHardware + ?Sized>(state: &DeviceState, hw: &mut H) -> NtStatus {
-    let _ignored = hw.serialized(|hw| set_wellspring_mode(state, hw, true));
+    let _ignored = hw.serialized(|hw| {
+        state.request_raw(true);
+        set_wellspring_mode(state, hw, true)
+    });
     state.set_qpc_frequency(hw.query_performance_frequency());
     match state.interrupt_pipe() {
         Some(pipe) => hw.start_pipe(pipe),
@@ -267,7 +270,10 @@ pub fn d0_exit<H: UsbHardware + ?Sized>(state: &DeviceState, hw: &mut H) -> D0Ex
     }
     D0ExitOutcome {
         status: STATUS_SUCCESS,
-        mode_switch_status: hw.serialized(|hw| set_wellspring_mode(state, hw, false)),
+        mode_switch_status: hw.serialized(|hw| {
+            state.request_raw(false);
+            set_wellspring_mode(state, hw, false)
+        }),
     }
 }
 
@@ -348,46 +354,10 @@ pub const INPUT_QUEUE: QueueSpec = QueueSpec {
     io_stop: false,
 };
 
-/// A GUID in its `DEFINE_GUID` form.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Guid {
-    /// `Data1`.
-    pub data1: u32,
-    /// `Data2`.
-    pub data2: u16,
-    /// `Data3`.
-    pub data3: u16,
-    /// `Data4`.
-    pub data4: [u8; 8],
-}
-
-impl Guid {
-    /// The 16 in-memory bytes (Data1..Data3 little-endian).
-    #[must_use]
-    pub const fn to_bytes(self) -> [u8; 16] {
-        let [a0, a1, a2, a3] = self.data1.to_le_bytes();
-        let [b0, b1] = self.data2.to_le_bytes();
-        let [c0, c1] = self.data3.to_le_bytes();
-        let [d0, d1, d2, d3, d4, d5, d6, d7] = self.data4;
-        [
-            a0, a1, a2, a3, b0, b1, c0, c1, d0, d1, d2, d3, d4, d5, d6, d7,
-        ]
-    }
-}
-
-/// `GUID_DEVINTERFACE_AmtPtpDeviceUsbKm` {4aa332cc-5777-4afd-aa4e-95387330612a} (Public.h:22-24),
-/// registered with `WdfDeviceCreateDeviceInterface(device, &guid, NULL)` after `WdfDeviceCreate`.
-pub const DEVICE_INTERFACE_GUID: Guid = Guid {
-    data1: 0x4aa3_32cc,
-    data2: 0x5777,
-    data3: 0x4afd,
-    data4: [0xaa, 0x4e, 0x95, 0x38, 0x73, 0x30, 0x61, 0x2a],
-};
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wellspring::{UsbSetupPacket, WELLSPRING_DATA_LEN};
+    use crate::wellspring::ModeSwitch;
 
     const fn pipe(pipe_type: UsbPipeType, endpoint_address: u8) -> UsbPipeInfo {
         UsbPipeInfo {
@@ -431,24 +401,9 @@ mod tests {
         }
     }
 
-    struct Buf([u8; WELLSPRING_DATA_LEN]);
-    impl AsMut<[u8; WELLSPRING_DATA_LEN]> for Buf {
-        fn as_mut(&mut self) -> &mut [u8; WELLSPRING_DATA_LEN] {
-            &mut self.0
-        }
-    }
-
     impl ControlTransfer for PipeHw {
-        type Buffer = Buf;
-        fn allocate_transfer_buffer(&mut self) -> Result<Buf, NtStatus> {
-            Ok(Buf([0; WELLSPRING_DATA_LEN]))
-        }
-        fn control_transfer(
-            &mut self,
-            _: &UsbSetupPacket,
-            _: &mut [u8; WELLSPRING_DATA_LEN],
-        ) -> NtStatus {
-            STATUS_SUCCESS
+        fn serialized<R, F: FnOnce(&mut ModeSwitch<'_>) -> R>(&mut self, f: F) -> R {
+            f(&mut |_, _| STATUS_SUCCESS)
         }
     }
 
@@ -591,13 +546,6 @@ mod tests {
 
     #[test]
     fn constants() {
-        assert_eq!(
-            DEVICE_INTERFACE_GUID.to_bytes(),
-            [
-                0xcc, 0x32, 0xa3, 0x4a, 0x77, 0x57, 0xfd, 0x4a, 0xaa, 0x4e, 0x95, 0x38, 0x73, 0x30,
-                0x61, 0x2a
-            ]
-        );
         assert!(readers_failed(0, 0));
         assert_eq!(io_stop(1), IoStopAction::None);
         let cfg = continuous_reader_config(&DeviceState::new());

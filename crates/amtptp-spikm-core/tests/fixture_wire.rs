@@ -21,7 +21,7 @@ use amtptp_spikm_core::status::{
 };
 use amtptp_spikm_core::wire::{
     LOWER_ATTRIBUTES_IOCTL, LOWER_ATTRIBUTES_LEN, LOWER_READ_BUFFER_LEN, LOWER_READ_IOCTL,
-    SET_STATE_IOCTL, SET_STATE_PACKET_LEN, SetStatePacket,
+    SET_STATE_IOCTL, SET_STATE_PACKET_LEN, with_set_state_packet,
 };
 use common::{Record, Tally, load, to_hex, wdf_failures};
 
@@ -187,7 +187,14 @@ fn wire_records() {
             );
             // The 255-byte SET_FEATURE input buffer; bytes 0..8 are recorded as the offset from the buffer
             // start, so build the image for a buffer at address 0.
-            let image = SetStatePacket::image(true, 0);
+            let image = with_set_state_packet(true, |bytes| {
+                let mut image = *bytes;
+                let pointer = u64::from_le_bytes(image[..8].try_into().unwrap());
+                assert_eq!(pointer, bytes.as_ptr() as u64 + 16);
+                image[..8].copy_from_slice(&16_u64.to_le_bytes());
+                image
+            })
+            .unwrap();
             assert_eq!(
                 to_hex(&image),
                 r.get("setfeature_in"),

@@ -1,20 +1,18 @@
-//! The HID identity this driver reports upward: the 9-byte HID descriptor, the eight 519-byte report
+//! The HID identity this driver reports upward: the 9-byte HID descriptor, the eight 496-byte report
 //! descriptors (4 families x {Touch Pad, Touch Screen}) and `HID_DEVICE_ATTRIBUTES`.
 
 use ptp_hid::common::DEVICE_VID;
-use ptp_hid::descriptor::{
-    Axes, REPORT_DESCRIPTOR_SPI_UMAPP_LEN, TlcUsage, report_descriptor_spi_umapp,
-};
+use ptp_hid::descriptor::{Axes, REPORT_DESCRIPTOR_SPI_LEN, TlcUsage, report_descriptor_spi};
 use ptp_hid::hidport::{
-    HID_DESCRIPTOR_LEN, HID_DESCRIPTOR_SPI_UMAPP, HID_DEVICE_ATTRIBUTES_LEN, HidDeviceAttributes,
+    HID_DESCRIPTOR_LEN, HID_DESCRIPTOR_SPI, HID_DEVICE_ATTRIBUTES_LEN, HidDeviceAttributes,
 };
 
 use crate::device::{DeviceConfig, Family, ReportType, family_for_product};
 use crate::status::{NtStatus, STATUS_NOT_FOUND};
 
-/// Length of every `SpiKm` report descriptor: 519 bytes (0x0207).
-pub const REPORT_DESCRIPTOR_LEN: usize = REPORT_DESCRIPTOR_SPI_UMAPP_LEN;
-const _: () = assert!(REPORT_DESCRIPTOR_LEN == 519);
+/// Length of every `SpiKm` report descriptor: 496 bytes (0x01f0).
+pub const REPORT_DESCRIPTOR_LEN: usize = REPORT_DESCRIPTOR_SPI_LEN;
+const _: () = assert!(REPORT_DESCRIPTOR_LEN == 496);
 
 /// Series 1 axis items (SpiTrackpadSeries1.h), with `y_logical_max` aligned to the Series 1 sensor Y span
 /// (`6089 - (-128) = 6217`).
@@ -48,33 +46,33 @@ pub const AXES_F3B: Axes = Axes {
 
 /// `AmtPtpSpiFamily1ReportDescriptor`.
 pub static REPORT_DESCRIPTOR_F1: [u8; REPORT_DESCRIPTOR_LEN] =
-    report_descriptor_spi_umapp(TlcUsage::TouchPad, AXES_F1);
+    report_descriptor_spi(TlcUsage::TouchPad, AXES_F1);
 /// `AmtPtpSpiFamily1TouchscreenReportDescriptor`.
 pub static REPORT_DESCRIPTOR_F1_TOUCHSCREEN: [u8; REPORT_DESCRIPTOR_LEN] =
-    report_descriptor_spi_umapp(TlcUsage::TouchScreen, AXES_F1);
+    report_descriptor_spi(TlcUsage::TouchScreen, AXES_F1);
 /// `AmtPtpSpiFamily2ReportDescriptor`.
 pub static REPORT_DESCRIPTOR_F2: [u8; REPORT_DESCRIPTOR_LEN] =
-    report_descriptor_spi_umapp(TlcUsage::TouchPad, AXES_F2);
+    report_descriptor_spi(TlcUsage::TouchPad, AXES_F2);
 /// `AmtPtpSpiFamily2TouchscreenReportDescriptor`.
 pub static REPORT_DESCRIPTOR_F2_TOUCHSCREEN: [u8; REPORT_DESCRIPTOR_LEN] =
-    report_descriptor_spi_umapp(TlcUsage::TouchScreen, AXES_F2);
+    report_descriptor_spi(TlcUsage::TouchScreen, AXES_F2);
 /// `AmtPtpSpiFamily3aReportDescriptor`.
 pub static REPORT_DESCRIPTOR_F3A: [u8; REPORT_DESCRIPTOR_LEN] =
-    report_descriptor_spi_umapp(TlcUsage::TouchPad, AXES_F3A);
+    report_descriptor_spi(TlcUsage::TouchPad, AXES_F3A);
 /// `AmtPtpSpiFamily3aTouchscreenReportDescriptor`.
 pub static REPORT_DESCRIPTOR_F3A_TOUCHSCREEN: [u8; REPORT_DESCRIPTOR_LEN] =
-    report_descriptor_spi_umapp(TlcUsage::TouchScreen, AXES_F3A);
+    report_descriptor_spi(TlcUsage::TouchScreen, AXES_F3A);
 /// `AmtPtpSpiFamily3bReportDescriptor`.
 pub static REPORT_DESCRIPTOR_F3B: [u8; REPORT_DESCRIPTOR_LEN] =
-    report_descriptor_spi_umapp(TlcUsage::TouchPad, AXES_F3B);
+    report_descriptor_spi(TlcUsage::TouchPad, AXES_F3B);
 /// `AmtPtpSpiFamily3bTouchscreenReportDescriptor`.
 pub static REPORT_DESCRIPTOR_F3B_TOUCHSCREEN: [u8; REPORT_DESCRIPTOR_LEN] =
-    report_descriptor_spi_umapp(TlcUsage::TouchScreen, AXES_F3B);
+    report_descriptor_spi(TlcUsage::TouchScreen, AXES_F3B);
 
 /// `AmtPtpSpiFamily{1,2,3a,3b}DefaultHidDescriptor`: identical for all families,
-/// `09 21 00 01 00 01 22 07 02`. `wReportLength` (519) is also the `CopiedSize` for the report
+/// `09 21 00 01 00 01 22 f0 01`. `wReportLength` (496) is also the `CopiedSize` for the report
 /// descriptor.
-pub static HID_DESCRIPTOR: [u8; HID_DESCRIPTOR_LEN] = HID_DESCRIPTOR_SPI_UMAPP;
+pub static HID_DESCRIPTOR: [u8; HID_DESCRIPTOR_LEN] = HID_DESCRIPTOR_SPI;
 
 impl Family {
     /// The family's `Axes`.
@@ -178,7 +176,7 @@ mod tests {
     fn hid_descriptor_bytes() {
         assert_eq!(
             HID_DESCRIPTOR,
-            [0x09, 0x21, 0x00, 0x01, 0x00, 0x01, 0x22, 0x07, 0x02]
+            [0x09, 0x21, 0x00, 0x01, 0x00, 0x01, 0x22, 0xf0, 0x01]
         );
     }
 

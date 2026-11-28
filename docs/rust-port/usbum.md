@@ -1,5 +1,7 @@
 # AmtPtpDeviceUsbUm: Rust port record
 
+This is a historical record of the retired UMDF driver. Its supported USB devices now bind to the [KMDF driver](usbkm.md).
+
 The C driver is `src/AmtPtpDeviceUsbUm` at commit 2edb0f2. The Rust port has two parts:
 
 - `crates/amtptp-usbum-core` (GPL-2.0-only, `no_std`, depends only on `ptp-hid`) holds all the logic that does not need WDF.

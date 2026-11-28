@@ -1,5 +1,7 @@
 # AmtPtpDeviceUsbKm: Rust port record
 
+The KMDF driver now also handles the Wellspring MacBooks and the USB Magic Trackpad 2. The T2 records below describe the original port.
+
 The C driver is `src/AmtPtpDeviceUsbKm` at commit 2edb0f2. The Rust port has two parts:
 
 - `crates/amtptp-usbkm-core` (GPL-2.0-only, `no_std`, depends only on `ptp-hid`) holds all the logic that does not

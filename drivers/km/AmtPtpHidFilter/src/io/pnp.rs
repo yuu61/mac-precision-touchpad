@@ -1,12 +1,10 @@
 //! PnP/power callbacks, the mode switch and the recovery timer (Device.c:104-443).
 
-use crate::config::CONFIGURE_RETRY_DUE_TIME;
-use crate::device::{
-    DeviceState, HID_PID_MAGIC_TRACKPAD_2, HID_VID_APPLE_BT, Transport, XferBuffer,
-};
-use crate::io::FilterIo;
-use crate::pipeline::issue_backlog_reads;
-use crate::status::{NtStatus, STATUS_CANCELLED, STATUS_SUCCESS, STATUS_UNSUCCESSFUL, nt_success};
+use super::Filter;
+use super::pipeline::issue_backlog_reads;
+use amtptp_hidfilter_core::config::CONFIGURE_RETRY_DUE_TIME;
+use amtptp_hidfilter_core::{DeviceState, HID_PID_MAGIC_TRACKPAD_2, HID_VID_APPLE_BT};
+use amtptp_hidfilter_core::{NtStatus, STATUS_CANCELLED, STATUS_SUCCESS, nt_success};
 
 /// `PtpFilterPrepareHardware` (Device.c:104-130): clear `DeviceConfigured` and turn both
 /// selective-reporting switches on (not in C: the state is not kept across a power reset). Returns
@@ -17,7 +15,7 @@ use crate::status::{NtStatus, STATUS_CANCELLED, STATUS_SUCCESS, STATUS_UNSUCCESS
 /// does not change, and only `SelfManagedIoInit` sets them. The C driver zeroed them here, so after a
 /// rebalance the mode switch failed with `STATUS_NOT_SUPPORTED` forever while the restart reported
 /// success. Transport parameters and the reporting clock are kept too.
-pub fn prepare_hardware(state: &DeviceState) -> NtStatus {
+pub(crate) fn prepare_hardware(state: &DeviceState) -> NtStatus {
     state.set_device_configured(false);
     state.reset_selective_reporting();
     STATUS_SUCCESS
@@ -25,7 +23,7 @@ pub fn prepare_hardware(state: &DeviceState) -> NtStatus {
 
 /// `PtpFilterDeviceD0Entry` (Device.c:132-147): the device is in D0 (not in C, which did nothing). Only
 /// then does the recovery timer work on it.
-pub fn d0_entry(state: &DeviceState) -> NtStatus {
+pub(crate) fn d0_entry(state: &DeviceState) -> NtStatus {
     state.enter_d0();
     STATUS_SUCCESS
 }
@@ -40,7 +38,7 @@ pub fn d0_entry(state: &DeviceState) -> NtStatus {
 /// 3. complete every parked upper read with `STATUS_CANCELLED` until the queue reports an error.
 ///
 /// Returns `STATUS_SUCCESS`.
-pub fn d0_exit<P: FilterIo>(io: &mut P, state: &DeviceState) -> NtStatus {
+pub(crate) fn d0_exit(io: &mut Filter<'_>, state: &DeviceState) -> NtStatus {
     state.leave_d0();
     io.stop_recovery_timer();
     let _cancelled = io.cancel_in_flight_reads();
@@ -63,7 +61,7 @@ pub fn d0_exit<P: FilterIo>(io: &mut P, state: &DeviceState) -> NtStatus {
 /// SUCCESS with `DeviceConfigured` still FALSE; on success cache the QPC frequency, restart the
 /// reporting clock, set `DeviceConfigured`, and issue a lower read for every upper read parked
 /// meanwhile ([`issue_backlog_reads`]). Always returns `STATUS_SUCCESS`.
-pub fn self_managed_io_init<P: FilterIo>(io: &mut P, state: &DeviceState) -> NtStatus {
+pub(crate) fn self_managed_io_init(io: &mut Filter<'_>, state: &DeviceState) -> NtStatus {
     state.set_ids(HID_VID_APPLE_BT, HID_PID_MAGIC_TRACKPAD_2, 0);
     if state.source_open() {
         configure_and_start(io, state);
@@ -78,7 +76,7 @@ pub fn self_managed_io_init<P: FilterIo>(io: &mut P, state: &DeviceState) -> NtS
 ///   unconfigured ([`issue_backlog_reads`], not in C);
 /// - source not open: nothing; [`source_opened`] configures the device later. (C, without the
 ///   detour, marked the device configured and returned `STATUS_INVALID_STATE_TRANSITION`, HF-B11.)
-pub fn self_managed_io_restart<P: FilterIo>(io: &mut P, state: &DeviceState) -> NtStatus {
+pub(crate) fn self_managed_io_restart(io: &mut Filter<'_>, state: &DeviceState) -> NtStatus {
     if state.source_open() {
         configure_and_start(io, state);
     }
@@ -86,7 +84,7 @@ pub fn self_managed_io_restart<P: FilterIo>(io: &mut P, state: &DeviceState) -> 
 }
 
 /// The mode switch, then the reads: the common end of init, restart and [`source_opened`].
-fn configure_and_start<P: FilterIo>(io: &mut P, state: &DeviceState) {
+fn configure_and_start(io: &mut Filter<'_>, state: &DeviceState) {
     if !nt_success(configure_multitouch(io, state)) {
         io.start_recovery_timer(CONFIGURE_RETRY_DUE_TIME);
         return;
@@ -98,7 +96,7 @@ fn configure_and_start<P: FilterIo>(io: &mut P, state: &DeviceState) {
 /// The glue opened the data source (the vendor collection): configure the device if it is in D0,
 /// as the recovery timer would ([`recovery_timer_callback`]). Out of D0, `SelfManagedIoRestart`
 /// configures it on the way back.
-pub fn source_opened<P: FilterIo>(io: &mut P, state: &DeviceState) {
+pub(crate) fn source_opened(io: &mut Filter<'_>, state: &DeviceState) {
     state.set_source_open(true);
     recovery_timer_callback(io, state);
 }
@@ -107,7 +105,7 @@ pub fn source_opened<P: FilterIo>(io: &mut P, state: &DeviceState) {
 /// no longer configured, the recovery timer stops, and the lower reads in flight are cancelled in a
 /// new epoch, so their completions are dropped. Parked upper reads stay parked until the source opens
 /// again. Call before closing the source.
-pub fn source_closed<P: FilterIo>(io: &mut P, state: &DeviceState) {
+pub(crate) fn source_closed(io: &mut Filter<'_>, state: &DeviceState) {
     state.set_source_open(false);
     state.set_device_configured(false);
     io.stop_recovery_timer();
@@ -116,7 +114,7 @@ pub fn source_closed<P: FilterIo>(io: &mut P, state: &DeviceState) {
 }
 
 /// Caches the QPC frequency, resets tracked contacts, and starts a new reporting session.
-fn mark_configured<P: FilterIo>(io: &mut P, state: &DeviceState) {
+fn mark_configured(io: &mut Filter<'_>, state: &DeviceState) {
     io.with_contacts(ptp_hid::contact_tracker::ContactTracker::reset);
     let frequency = io.query_performance_frequency();
     state.set_qpc_frequency(frequency);
@@ -133,7 +131,7 @@ fn mark_configured<P: FilterIo>(io: &mut P, state: &DeviceState) {
 /// - otherwise [`configure_multitouch`]. On failure the timer is armed again while the device is still
 ///   in D0. On success the reporting clock restarts and, unless the device left D0 meanwhile, it is
 ///   marked configured and the backlog is issued.
-pub fn recovery_timer_callback<P: FilterIo>(io: &mut P, state: &DeviceState) {
+pub(crate) fn recovery_timer_callback(io: &mut Filter<'_>, state: &DeviceState) {
     let Some(ticket) = state.begin_recovery() else {
         return;
     };
@@ -159,50 +157,11 @@ pub fn recovery_timer_callback<P: FilterIo>(io: &mut P, state: &DeviceState) {
 
 /// `PtpFilterConfigureMultiTouch` (Device.c:286-422): the "wellspring" mode switch.
 ///
-/// 1. [`Transport::from_ids`] on the stored VID/PID; `STATUS_NOT_SUPPORTED` writes nothing.
-/// 2. Write the transport parameters (before the send; they stay set if the send fails).
-/// 3. Build the 32-byte [`XferBuffer`] (USB: id 0x02, `02 01 00 00`; BT: id 0xF1, `F1 02 01`).
-/// 4. Create the request (failure: return it), memory over the report, format `IOCTL_HID_SET_FEATURE`
-///    for the data source, let the glue finish the request ([`FilterIo::set_mode_switch_user_buffer`];
-///    `false`: `STATUS_UNSUCCESSFUL`), send synchronously, and return `WdfRequestGetStatus` whatever the
-///    send returned (P3 fix of HF-B13: C treated a send returning TRUE as success and dropped the lower
-///    driver's status).
-/// 5. Delete the request on every path after it was created.
-pub fn configure_multitouch<P: FilterIo>(io: &mut P, state: &DeviceState) -> NtStatus {
-    let transport = match Transport::from_ids(state.vendor_id(), state.product_id()) {
-        Ok(t) => t,
-        Err(status) => return status,
-    };
-    state.apply_transport_params(&transport.params());
-    let mut packet = XferBuffer::new(transport.mode_switch());
-    packet.link_report_buffer();
-    let request = match io.create_mode_switch_request() {
-        Ok(r) => r,
-        Err(status) => return status,
-    };
-    let status = send_mode_switch(io, request, &mut packet);
-    io.delete_mode_switch_request(request);
-    status
-}
-
-fn send_mode_switch<P: FilterIo>(
-    io: &mut P,
-    request: P::ModeSwitchRequest,
-    packet: &mut XferBuffer,
-) -> NtStatus {
-    let memory = match io.create_mode_switch_memory(request, packet) {
-        Ok(m) => m,
-        Err(status) => return status,
-    };
-    let status = io.format_mode_switch(request, memory);
-    if !nt_success(status) {
-        return status;
+/// Selects the report for the current transport, applies its input layout and returns
+/// the status of the synchronous feature request to the HID collection.
+pub(crate) fn configure_multitouch(io: &mut Filter<'_>, state: &DeviceState) -> NtStatus {
+    match state.mode_switch_report() {
+        Ok(report) => io.send_mode_report(report),
+        Err(status) => status,
     }
-    if !io.set_mode_switch_user_buffer(request, packet) {
-        return STATUS_UNSUCCESSFUL;
-    }
-    // TRUE: the request completed and its status is the lower driver's; FALSE: the framework could not
-    // send it and the status says why.
-    let _sent = io.send_mode_switch_synchronously(request);
-    io.mode_switch_status(request)
 }

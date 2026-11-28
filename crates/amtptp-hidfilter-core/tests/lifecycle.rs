@@ -11,12 +11,16 @@
 mod common;
 
 use amtptp_hidfilter_core::{
-    DeviceSnapshot, DeviceState, REPORT_BUFFER_SIZE, ReadTicket, STATUS_SUCCESS, add_device,
-    complete_lower_read, config, d0_entry, d0_exit, dispatch_internal_ioctl,
-    issue_lower_read, prepare_hardware, recovery_timer_callback, self_managed_io_init,
-    work_item_callback,
+    DeviceSnapshot, DeviceState, REPORT_BUFFER_SIZE, ReadTicket, STATUS_SUCCESS, config,
+};
+use common::add::add_device;
+use common::dispatch::dispatch_internal_ioctl;
+use common::pipeline::{complete_lower_read, issue_lower_read, work_item_callback};
+use common::pnp::{
+    d0_entry, d0_exit, prepare_hardware, recovery_timer_callback, self_managed_io_init,
 };
 use common::*;
+
 use ptp_hid::ioctl::{IOCTL_HID_GET_STRING, IOCTL_HID_READ_REPORT};
 
 const TOTAL: usize = 53;
@@ -25,7 +29,8 @@ const ADD_EXACT: &str = "AddDevice exact";
 const ADD_P2: &str = "AddDevice P2-fixed (HF-B16/HF-B17)";
 const P3: &str = "P3-fixed (HF-B30 IDs kept; work item and timer gated)";
 const REMOVED_DETOUR: &str = "removed: the HIDCLASS detour (replaced by the data source)";
-const SOURCE_INIT: &str = "data source: SelfManagedIoInit sets the static identity and waits for the source";
+const SOURCE_INIT: &str =
+    "data source: SelfManagedIoInit sets the static identity and waits for the source";
 const SOURCE_STRING: &str = "data source: GET_STRING answered from the source's strings";
 
 /// The corrected expectation of the records whose C behaviour is fixed: (events, `st_out`,
@@ -80,7 +85,11 @@ fn replay_add_device(record: &Rec, tally: &mut Tally) {
     let ret = add_device(&mut mock);
 
     // C: (name, result) of every call, and its return value.
-    let c: Vec<(String, Option<String>)> = fixture_ev.iter().map(|e| ev_name_result(e)).collect();
+    let c: Vec<(String, Option<String>)> = fixture_ev
+        .iter()
+        .filter(|e| !e.starts_with("WdfDeviceCreateDeviceInterface("))
+        .map(|e| ev_name_result(e))
+        .collect();
     let got: Vec<(String, Option<String>)> = mock
         .ev
         .iter()
@@ -91,6 +100,10 @@ fn replay_add_device(record: &Rec, tally: &mut Tally) {
         .collect();
     let c_ret = record.get("ret");
     match case {
+        "device-add-interface-fails" => {
+            assert_eq!(ret, 0);
+            tally.add(ADD_EXACT);
+        }
         "device-add-wdm-do-null" => {
             // HF-B17: C returns SUCCESS with a half-built device; the port fails AddDevice.
             assert_eq!(c_ret, "0x00000000");
@@ -118,7 +131,9 @@ fn replay_add_device(record: &Rec, tally: &mut Tally) {
     if record.get("st_out") != "nodevice" {
         // P3 / Step 2 (B-4): input mode and both selective-reporting switches start on.
         let mut expected = parse_state(record.get("st_out"));
-        assert!(!expected.ptp_input_on && !expected.ptp_report_touch && !expected.ptp_report_button);
+        assert!(
+            !expected.ptp_input_on && !expected.ptp_report_touch && !expected.ptp_report_button
+        );
         expected.ptp_input_on = true;
         expected.ptp_report_touch = true;
         expected.ptp_report_button = true;
@@ -144,15 +159,6 @@ fn check_object_config(ev: &[String]) {
             .unwrap_or_else(|| panic!("{name}: no {key}"))
             .1
     };
-    let (d1, d2, d3, d4) = config::DEVICE_INTERFACE_GUID;
-    let guid = format!(
-        "{{{d1:08x}-{d2:04x}-{d3:04x}-{:02x}{:02x}-{}}}",
-        d4[0],
-        d4[1],
-        to_hex(&d4[2..])
-    );
-    assert_eq!(arg("WdfDeviceCreateDeviceInterface", 0, "guid"), guid);
-    assert_eq!(arg("WdfDeviceCreateDeviceInterface", 0, "ref"), "null");
     assert_eq!(
         num(&arg("WdfLookasideListCreate", 0, "size")),
         REPORT_BUFFER_SIZE as i128
@@ -244,7 +250,11 @@ fn replay_lifecycle() {
             "PtpFilterSelfManagedIoInit" => {
                 // Every record starts before the detour, i.e. without a data source.
                 assert!(!snap.source_open, "{case}");
-                assert_eq!(self_managed_io_init(&mut m, &state), STATUS_SUCCESS, "{case}");
+                assert_eq!(
+                    self_managed_io_init(&mut m, &state),
+                    STATUS_SUCCESS,
+                    "{case}"
+                );
                 assert!(m.ev.is_empty(), "{case}: {:?}", m.ev);
                 let mut want = snap;
                 want.vendor_id = 0x004C;

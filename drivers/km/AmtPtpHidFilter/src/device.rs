@@ -12,18 +12,21 @@
 //! C, see [`crate::source`]). Nothing else (no `ReleaseHardware`, no SelfManagedIoSuspend/Flush, no
 //! power-policy settings, no file-object configuration, no device cleanup callback).
 
+mod add;
+
 use core::ptr::{null, null_mut};
 
-use amtptp_hidfilter_core::config::{
-    DEVICE_INTERFACE_GUID, READ_BUFFER_LOOKASIDE_PARENT_IS_DEVICE, READ_BUFFER_POOL_TAG,
-    READ_QUEUE_POWER_MANAGED, RECOVERY_TIMER_AUTOMATIC_SERIALIZATION, RECOVERY_TIMER_PERIOD,
-    RECOVERY_WORK_ITEM_AUTOMATIC_SERIALIZATION,
-};
-use amtptp_hidfilter_core::{
-    AddDeviceIo, NtStatus, REPORT_BUFFER_SIZE, STATUS_INVALID_DEVICE_STATE, add_device, d0_entry,
-    d0_exit, prepare_hardware, recovery_timer_callback, self_managed_io_init,
+use crate::io::{
+    d0_entry, d0_exit, prepare_hardware, recovery_timer_callback, self_managed_io_init,
     self_managed_io_restart, work_item_callback,
 };
+use amtptp_hidfilter_core::config::{
+    READ_BUFFER_LOOKASIDE_PARENT_IS_DEVICE, READ_BUFFER_POOL_TAG, READ_QUEUE_POWER_MANAGED,
+    RECOVERY_TIMER_AUTOMATIC_SERIALIZATION, RECOVERY_TIMER_PERIOD,
+    RECOVERY_WORK_ITEM_AUTOMATIC_SERIALIZATION,
+};
+use amtptp_hidfilter_core::{NtStatus, REPORT_BUFFER_SIZE, STATUS_INVALID_DEVICE_STATE};
+
 use tracelogging as tlg;
 use wdf_support::handle::WdfHandle;
 use wdf_support::hid as wdf_hid;
@@ -33,9 +36,9 @@ use wdf_support::init::{
 };
 use wdf_support::ntstatus::NT_SUCCESS;
 use wdk_sys::{
-    _POOL_TYPE, _WDF_EXECUTION_LEVEL, BOOLEAN, GUID, NTSTATUS, PWDFDEVICE_INIT,
-    WDF_NO_OBJECT_ATTRIBUTES, WDF_POWER_DEVICE_STATE, WDFCMRESLIST, WDFDEVICE, WDFDRIVER,
-    WDFLOOKASIDE, WDFQUEUE, WDFTIMER, WDFWORKITEM, call_unsafe_wdf_function_binding,
+    _POOL_TYPE, _WDF_EXECUTION_LEVEL, BOOLEAN, NTSTATUS, PWDFDEVICE_INIT, WDF_NO_OBJECT_ATTRIBUTES,
+    WDF_POWER_DEVICE_STATE, WDFCMRESLIST, WDFDEVICE, WDFDRIVER, WDFLOOKASIDE, WDFQUEUE, WDFTIMER,
+    WDFWORKITEM, call_unsafe_wdf_function_binding,
 };
 
 use crate::context::{
@@ -44,14 +47,6 @@ use crate::context::{
 };
 use crate::io::Filter;
 use crate::{KW_DEVICE, KW_DRIVER, PROVIDER, queue, source};
-
-/// `GUID_DEVICEINTERFACE_AmtPtpHidFilter` `{FF969022-3111-4441-8F88-875440172C2E}` (Device.h:7-9).
-static GUID_DEVICEINTERFACE_AMTPTP_HID_FILTER: GUID = GUID {
-    Data1: DEVICE_INTERFACE_GUID.0,
-    Data2: DEVICE_INTERFACE_GUID.1,
-    Data3: DEVICE_INTERFACE_GUID.2,
-    Data4: DEVICE_INTERFACE_GUID.3,
-};
 
 /// C `TRUE`/`FALSE` for BOOLEAN fields.
 const fn boolean(value: bool) -> BOOLEAN {
@@ -75,7 +70,7 @@ pub(crate) unsafe extern "C" fn evt_device_add(
         device: null_mut(),
         context: null(),
     };
-    let status = add_device(&mut glue);
+    let status = add::add_device(&mut glue);
     tlg::write_event!(
         PROVIDER,
         "DeviceAdd",
@@ -86,9 +81,9 @@ pub(crate) unsafe extern "C" fn evt_device_add(
     status
 }
 
-/// [`AddDeviceIo`]: the object creations of `AddDevice`. Only used inside `evt_device_add`
+/// the object creations of `AddDevice`. Only used inside `evt_device_add`
 /// (`PASSIVE_LEVEL`), before the device can receive any other callback.
-struct AddDevice {
+pub(crate) struct AddDevice {
     /// The framework's `WDFDEVICE_INIT`; set to NULL by a successful `WdfDeviceCreate`.
     device_init: PWDFDEVICE_INIT,
     /// The created device (NULL before `create_device` succeeded).
@@ -116,9 +111,7 @@ impl AddDevice {
             win_ntstatus("Status", &status)
         );
     }
-}
 
-impl AddDeviceIo for AddDevice {
     fn fdo_init_set_filter(&mut self) {
         // SAFETY: the framework's live WDFDEVICE_INIT of this EvtDriverDeviceAdd call. "We do not
         // own power control. In addition we do not own every I/O request." (Driver.c:56-59)
@@ -217,22 +210,6 @@ impl AddDeviceIo for AddDevice {
             );
         }
         !object.is_null()
-    }
-
-    fn create_device_interface(&mut self) -> NtStatus {
-        // SAFETY: live device; the GUID is a 'static; no reference string (Device.c:52).
-        let status = unsafe {
-            call_unsafe_wdf_function_binding!(
-                WdfDeviceCreateDeviceInterface,
-                self.device,
-                &raw const GUID_DEVICEINTERFACE_AMTPTP_HID_FILTER,
-                null()
-            )
-        };
-        if !NT_SUCCESS(status) {
-            Self::trace_failure("WdfDeviceCreateDeviceInterface", status);
-        }
-        status
     }
 
     fn create_read_buffer_lookaside(&mut self) -> NtStatus {
@@ -395,7 +372,10 @@ unsafe extern "C" fn evt_device_prepare_hardware(
     let ctx = unsafe { device_context(device) };
     let status = prepare_hardware(&ctx.state);
     // SAFETY: live device context; spinlock created in `create_device`.
-    unsafe { ctx.contacts.with(amtptp_hidfilter_core::ContactTracker::reset) };
+    unsafe {
+        ctx.contacts
+            .with(amtptp_hidfilter_core::ContactTracker::reset);
+    };
     tlg::write_event!(
         PROVIDER,
         "PrepareHardware",

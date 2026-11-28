@@ -11,15 +11,16 @@
 //! 4. `WdfRequestRetrieveOutputMemory`; failure → C leaks the request (B6), here it is completed with
 //!    that status (P2);
 //! 5. `ScanTime` uses the current performance counter and the frequency cached at D0 entry;
-//! 6. more than 5 fingers → `WdfRequestComplete(STATUS_DATA_ERROR)` (B8);
+//! 6. track contacts and report at most five;
 //! 7. `WdfMemoryCopyFromBuffer(mem, 0, report, 50)`; failure → C leaks the request (B7), here it is
 //!    completed with the copy status (P2);
 //! 8. `WdfRequestSetInformation(50)`, `WdfRequestComplete(status)`.
 
 use core::ptr;
 use core::slice;
+use core::sync::atomic::Ordering;
 
-use amtptp_usbkm_core::input::{self, PacketAction, ReadReportResult};
+use amtptp_usbkm_core::input::{self, PacketAction};
 use amtptp_usbkm_core::lifecycle;
 use tracelogging as tlg;
 use wdf_support::ntstatus::{NT_SUCCESS, STATUS_UNSUCCESSFUL};
@@ -79,6 +80,21 @@ pub(crate) unsafe extern "C" fn evt_usb_interrupt_pipe_read_complete(
         return;
     };
 
+    if input::needs_mode_recovery(&context.state, packet.len()) {
+        // Keep at most one pending or running reset for a burst of mouse packets.
+        if context.recovery_pending.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        // SAFETY: the live device owns the initialized contact lock and work item.
+        unsafe {
+            context.contacts.with(input::ContactTracker::reset);
+            call_unsafe_wdf_function_binding!(
+                WdfWorkItemEnqueue,
+                context.mode_recovery.load(Ordering::Acquire)
+            );
+        }
+        return;
+    }
     let counter = query_performance_counter();
     // SAFETY: live device context; spinlock created in `create_device`; IRQL <= DISPATCH_LEVEL;
     // pure packet decoding and contact tracking inside the lock.
@@ -141,39 +157,26 @@ pub(crate) unsafe extern "C" fn evt_usb_interrupt_pipe_read_complete(
         }
         input::complete_read_report_to(&result, as_output(&mut output))
     };
-    match result {
-        ReadReportResult::DataError => {
-            tlg::write_event!(
-                PROVIDER,
-                "ReadReportDataError",
-                level(Error),
-                keyword(KW_INPUT),
-                usize("Length", &num_bytes_transferred),
-                win_ntstatus("Status", &completion.status)
-            );
-        }
-        ReadReportResult::Report(_) if !NT_SUCCESS(completion.status) => {
-            // B7 (P2) or B6: the C leaves the request uncompleted.
-            tlg::write_event!(
-                PROVIDER,
-                "ReadReportCompletionFailed",
-                level(Error),
-                keyword(KW_INPUT),
-                win_ntstatus("Status", &completion.status)
-            );
-        }
-        ReadReportResult::Report(report) => {
-            let contacts = report.get(48).copied().unwrap_or(0);
-            let button = report.get(49).copied().unwrap_or(0);
-            tlg::write_event!(
-                PROVIDER,
-                "InputReport",
-                level(Verbose),
-                keyword(KW_INPUT),
-                u8("ContactCount", &contacts),
-                u8("Button", &button)
-            );
-        }
+    if NT_SUCCESS(completion.status) {
+        let contacts = result.get(48).copied().unwrap_or(0);
+        let button = result.get(49).copied().unwrap_or(0);
+        tlg::write_event!(
+            PROVIDER,
+            "InputReport",
+            level(Verbose),
+            keyword(KW_INPUT),
+            u8("ContactCount", &contacts),
+            u8("Button", &button)
+        );
+    } else {
+        // B7 (P2) or B6: the C leaves the request uncompleted.
+        tlg::write_event!(
+            PROVIDER,
+            "ReadReportCompletionFailed",
+            level(Error),
+            keyword(KW_INPUT),
+            win_ntstatus("Status", &completion.status)
+        );
     }
     complete(request, completion);
 }

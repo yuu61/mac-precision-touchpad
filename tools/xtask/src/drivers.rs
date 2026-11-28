@@ -1,4 +1,4 @@
-//! The two driver Cargo workspaces (`drivers/km`, `drivers/um`): building,
+//! The KMDF driver workspace (`drivers/km`): building,
 //! linting, and reading their WDF framework version.
 
 use std::env;
@@ -30,62 +30,36 @@ const DRIVER_TARGET_ENV: [&str; 3] = [
     "CARGO_BUILD_TARGET",
 ];
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Workspace {
-    /// `drivers/km`: KMDF (`AmtPtpDeviceUsbKm`, `AmtPtpDeviceSpiKm`, `AmtPtpHidFilter`, `AmtPtpBthFilter`).
-    Km,
-    /// `drivers/um`: UMDF (`AmtPtpDeviceUsbUm`).
-    Um,
+fn driver_dir() -> PathBuf {
+    repo_root().join("drivers/km")
 }
 
-impl Workspace {
-    pub const ALL: [Self; 2] = [Self::Km, Self::Um];
-
-    pub const fn dir_name(self) -> &'static str {
-        match self {
-            Self::Km => "km",
-            Self::Um => "um",
-        }
-    }
-
-    pub fn dir(self) -> PathBuf {
-        repo_root().join("drivers").join(self.dir_name())
-    }
-
-    /// `drivers/<ws>/target/<triple>/<debug|release>`.
-    pub fn output_dir(self, arch: Arch, release: bool) -> PathBuf {
-        self.dir()
-            .join("target")
-            .join(arch.triple())
-            .join(if release { "release" } else { "debug" })
-    }
-
-    /// The framework version for stampinf, read from the workspace's
-    /// `[workspace.metadata.wdk.driver-model]` so the INF always matches what
-    /// the binaries were built against: KMDF `major.minor` for `-k`,
-    /// UMDF `major.minor.0` for `-u`.
-    pub fn framework_version(self) -> Result<String, String> {
-        let manifest = self.dir().join("Cargo.toml");
-        let text = std::fs::read_to_string(&manifest)
-            .map_err(|e| format!("cannot read {}: {e}", manifest.display()))?;
-        framework_version_from_manifest(self, &text)
-            .map_err(|e| format!("{}: {e}", manifest.display()))
-    }
+pub fn output_dir(arch: Arch, release: bool) -> PathBuf {
+    driver_dir()
+        .join("target")
+        .join(arch.triple())
+        .join(if release { "release" } else { "debug" })
 }
 
-fn framework_version_from_manifest(ws: Workspace, text: &str) -> Result<String, String> {
+/// The framework version for stampinf, read from the workspace's
+/// `[workspace.metadata.wdk.driver-model]` so the INF always matches what
+/// the binaries were built against: KMDF `major.minor` for `-k`.
+pub fn framework_version() -> Result<String, String> {
+    let manifest = driver_dir().join("Cargo.toml");
+    let text = std::fs::read_to_string(&manifest)
+        .map_err(|e| format!("cannot read {}: {e}", manifest.display()))?;
+    framework_version_from_manifest(&text).map_err(|e| format!("{}: {e}", manifest.display()))
+}
+
+fn framework_version_from_manifest(text: &str) -> Result<String, String> {
     const SECTION: &str = "workspace.metadata.wdk.driver-model";
-    let (kind, prefix) = match ws {
-        Workspace::Km => ("KMDF", "kmdf"),
-        Workspace::Um => ("UMDF", "umdf"),
-    };
     let get = |key: &str| {
         toml_value(text, SECTION, key).ok_or_else(|| format!("[{SECTION}] has no `{key}`"))
     };
     let driver_type = get("driver-type")?;
-    if driver_type.trim_matches('"') != kind {
+    if driver_type.trim_matches('"') != "KMDF" {
         return Err(format!(
-            "[{SECTION}] driver-type is {driver_type}, expected \"{kind}\""
+            "[{SECTION}] driver-type is {driver_type}, expected \"KMDF\""
         ));
     }
     let number = |key: &str| -> Result<u32, String> {
@@ -93,12 +67,9 @@ fn framework_version_from_manifest(ws: Workspace, text: &str) -> Result<String, 
         v.parse::<u32>()
             .map_err(|error| format!("[{SECTION}] {key} = {v} is not a number: {error}"))
     };
-    let major = number(&format!("{prefix}-version-major"))?;
-    let minor = number(&format!("target-{prefix}-version-minor"))?;
-    Ok(match ws {
-        Workspace::Km => format!("{major}.{minor}"),
-        Workspace::Um => format!("{major}.{minor}.0"),
-    })
+    let major = number("kmdf-version-major")?;
+    let minor = number("target-kmdf-version-minor")?;
+    Ok(format!("{major}.{minor}"))
 }
 
 /// Minimal TOML lookup of `key = value` inside `[section]` (enough for the
@@ -129,15 +100,12 @@ fn cargo_program() -> OsString {
 }
 
 /// A `cargo` command for a driver workspace with a sanitized environment.
-fn driver_cargo(ws: Workspace) -> Command {
+fn driver_cargo() -> Command {
     let mut cmd = Command::new(cargo_program());
-    cmd.current_dir(ws.dir());
+    cmd.current_dir(driver_dir());
     for var in DRIVER_TARGET_ENV.into_iter().chain(RUSTFLAGS_ENV) {
         if env::var_os(var).is_some() {
-            println!(
-                "xtask: note: not passing {var} to the {} driver build",
-                ws.dir_name()
-            );
+            println!("xtask: note: not passing {var} to the KMDF build");
         }
         cmd.env_remove(var);
     }
@@ -158,23 +126,17 @@ fn driver_cargo(ws: Workspace) -> Command {
 }
 
 /// `cargo build --target <triple> [--release]` in each workspace, per arch.
-pub fn build_drivers(
-    arches: &[Arch],
-    release: bool,
-    workspaces: &[Workspace],
-) -> Result<(), String> {
+pub fn build_drivers(arches: &[Arch], release: bool) -> Result<(), String> {
     for &arch in arches {
-        for &ws in workspaces {
-            let mut cmd = driver_cargo(ws);
-            cmd.args(["build", "--target", arch.triple()]);
-            if release {
-                cmd.arg("--release");
-            }
-            process::run(
-                &mut cmd,
-                &format!("building drivers/{} for {}", ws.dir_name(), arch.name()),
-            )?;
+        let mut cmd = driver_cargo();
+        cmd.args(["build", "--target", arch.triple()]);
+        if release {
+            cmd.arg("--release");
         }
+        process::run(
+            &mut cmd,
+            &format!("building drivers/km for {}", arch.name()),
+        )?;
     }
     Ok(())
 }
@@ -204,10 +166,10 @@ pub fn test_all() -> Result<(), String> {
     steps.push(("cargo clippy (host workspace)".into(), host_clippy));
 
     // Cargo Clippy only wraps workspace members. Use Clippy as the rustc wrapper
-    // so both WDK models also lint wdf-support and rc-embed in their build graph.
+    // so the driver build also lints wdf-support and rc-embed in their build graph.
     let clippy_driver = Path::new(&cargo_program()).with_file_name("clippy-driver.exe");
-    for ws in Workspace::ALL {
-        let mut clippy = driver_cargo(ws);
+    {
+        let mut clippy = driver_cargo();
         clippy
             .env_remove("RUSTC_WORKSPACE_WRAPPER")
             .env("RUSTC_WRAPPER", &clippy_driver)
@@ -218,7 +180,7 @@ pub fn test_all() -> Result<(), String> {
                 "--config",
                 r#"build.rustflags=["-Dwarnings"]"#,
             ]);
-        steps.push((format!("Clippy (drivers/{})", ws.dir_name()), clippy));
+        steps.push(("Clippy (drivers/km)".into(), clippy));
     }
 
     let mut failed = Vec::new();
@@ -263,27 +225,18 @@ target-umdf-version-minor = 15
 
     #[test]
     fn reads_framework_versions() {
-        assert_eq!(
-            framework_version_from_manifest(Workspace::Km, KM).unwrap(),
-            "1.23"
-        );
-        assert_eq!(
-            framework_version_from_manifest(Workspace::Um, UM).unwrap(),
-            "2.15.0"
-        );
+        assert_eq!(framework_version_from_manifest(KM).unwrap(), "1.23");
     }
 
     #[test]
     fn rejects_wrong_driver_type_or_missing_keys() {
-        framework_version_from_manifest(Workspace::Um, KM).unwrap_err();
-        framework_version_from_manifest(Workspace::Km, UM).unwrap_err();
-        framework_version_from_manifest(Workspace::Km, "[workspace]\n").unwrap_err();
+        framework_version_from_manifest(UM).unwrap_err();
+        framework_version_from_manifest("[workspace]\n").unwrap_err();
     }
 
     #[test]
     fn real_manifests_match_the_inf_contract() {
-        // The C INF hard-coded UmdfLibraryVersion=2.15.0 and the port pins KMDF 1.23.
-        assert_eq!(Workspace::Km.framework_version().unwrap(), "1.23");
-        assert_eq!(Workspace::Um.framework_version().unwrap(), "2.15.0");
+        // The INF requires KMDF 1.23.
+        assert_eq!(framework_version().unwrap(), "1.23");
     }
 }

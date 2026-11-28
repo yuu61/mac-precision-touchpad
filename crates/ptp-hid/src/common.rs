@@ -20,8 +20,6 @@ pub const REPORTID_PTPHQA: u8 = 0x08;
 pub const REPORTID_FUNCSWITCH: u8 = 0x06;
 /// `REPORTID_DEVICE_CAPS`: the device-capabilities feature report (maximum contacts, pad type).
 pub const REPORTID_DEVICE_CAPS: u8 = 0x07;
-/// `REPORTID_UMAPP_CONF`: the user-mode settings-app configuration feature report.
-pub const REPORTID_UMAPP_CONF: u8 = 0x09;
 
 /// Digitizers usage 0x57, *Surface Switch*: the first usage of report 0x06 (bit 0, see
 /// [`crate::feature::SelectiveReportBits`]). The C header `HidCommon.h` called it `BUTTON_SWITCH`.

@@ -15,7 +15,9 @@ use std::rc::Rc;
 use amtptp_usbkm_core::lifecycle::{ContinuousReaderConfig, UsbHardware, UsbPipeInfo, UsbPipeType};
 use amtptp_usbkm_core::state::UsbDeviceIds;
 use amtptp_usbkm_core::status::NtStatus;
-use amtptp_usbkm_core::wellspring::{ControlTransfer, UsbSetupPacket, WELLSPRING_DATA_LEN};
+use amtptp_usbkm_core::wellspring::{
+    ControlTransfer, ModeSwitch, UsbSetupPacket, WELLSPRING_DATA_LEN,
+};
 
 use super::{status_str, to_hex};
 
@@ -120,12 +122,8 @@ impl FakeHw {
         };
         (ops, wire)
     }
-}
 
-impl ControlTransfer for FakeHw {
-    type Buffer = FakeBuffer;
-
-    fn allocate_transfer_buffer(&mut self) -> Result<FakeBuffer, NtStatus> {
+    fn allocate_transfer_buffer(&self) -> Result<FakeBuffer, NtStatus> {
         let st = self.injected("mem_create");
         self.log_st("mem_create", "", st);
         match st {
@@ -138,20 +136,15 @@ impl ControlTransfer for FakeHw {
         }
     }
 
-    fn serialized<R, F: FnOnce(&mut Self) -> R>(&mut self, f: F) -> R {
-        assert_eq!(self.serialized_depth, 0, "mode-switch lock taken twice");
-        self.serialized_depth += 1;
-        let result = f(self);
-        self.serialized_depth -= 1;
-        result
-    }
-
     fn control_transfer(
         &mut self,
-        setup: &UsbSetupPacket,
+        setup: UsbSetupPacket,
         data: &mut [u8; WELLSPRING_DATA_LEN],
     ) -> NtStatus {
-        assert_eq!(self.serialized_depth, 1, "control transfer outside the mode-switch lock");
+        assert_eq!(
+            self.serialized_depth, 1,
+            "control transfer outside the mode-switch lock"
+        );
         let setup_hex = to_hex(&setup.to_bytes());
         let mdlen = data.len();
         let dir = if setup.is_device_to_host() {
@@ -348,4 +341,23 @@ pub fn normalize_ops(ops: &str) -> (Vec<String>, usize) {
         out.push(s);
     }
     (out, null_deletes)
+}
+
+impl ControlTransfer for FakeHw {
+    fn serialized<R, F: FnOnce(&mut ModeSwitch<'_>) -> R>(&mut self, f: F) -> R {
+        assert_eq!(self.serialized_depth, 0);
+        self.serialized_depth += 1;
+        let result = f(&mut |register, on| {
+            // The C fixture records transient allocation and deletion around the wire exchange.
+            let mut buffer = match self.allocate_transfer_buffer() {
+                Ok(buffer) => buffer,
+                Err(status) => return status,
+            };
+            register.set_mode(buffer.as_mut(), on, |setup, data| {
+                self.control_transfer(*setup, data)
+            })
+        });
+        self.serialized_depth -= 1;
+        result
+    }
 }

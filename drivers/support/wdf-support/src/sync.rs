@@ -85,28 +85,24 @@ impl<T> SpinLocked<T> {
 /// Built in two steps, like [`SpinLocked`]: [`WaitLock::new`] in the context initializer, then
 /// [`WaitLock::create`] once while the object is being set up.
 #[derive(Debug)]
-pub struct WaitLock {
+pub struct WaitLock<T> {
+    value: UnsafeCell<T>,
     lock: UnsafeCell<WDFWAITLOCK>,
 }
 
 // SAFETY: the lock handle is written once by `create` before any concurrent use and read-only
 // afterwards; acquiring and releasing a WDFWAITLOCK is thread safe.
-unsafe impl Sync for WaitLock {}
+unsafe impl<T: Send> Sync for WaitLock<T> {}
 // SAFETY: the handle is an opaque framework handle, valid on any thread.
-unsafe impl Send for WaitLock {}
+unsafe impl<T: Send> Send for WaitLock<T> {}
 
-impl Default for WaitLock {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl WaitLock {
+impl<T> WaitLock<T> {
     /// No lock yet.
     #[must_use]
-    pub const fn new() -> Self {
+    pub const fn new(value: T) -> Self {
         Self {
             lock: UnsafeCell::new(null_mut()),
+            value: UnsafeCell::new(value),
         }
     }
 
@@ -135,15 +131,15 @@ impl WaitLock {
     /// # Safety
     /// [`WaitLock::create`] succeeded; the caller runs at `PASSIVE_LEVEL`; `f` does not call `with` on
     /// the same lock (it is not recursive), and nothing that `f` waits for takes this lock.
-    pub unsafe fn with<R, F: FnOnce() -> R>(&self, f: F) -> R {
+    pub unsafe fn with<R, F: FnOnce(&mut T) -> R>(&self, f: F) -> R {
         // SAFETY: written once by `create` before any call of `with` (caller contract), read-only since.
         let lock = unsafe { *self.lock.get() };
         // SAFETY: a valid wait lock (caller contract) at PASSIVE_LEVEL; a NULL timeout waits until the
         // lock is acquired, so the status is always STATUS_SUCCESS.
-        let _acquired = unsafe {
-            call_unsafe_wdf_function_binding!(WdfWaitLockAcquire, lock, null_mut())
-        };
-        let result = f();
+        let _acquired =
+            unsafe { call_unsafe_wdf_function_binding!(WdfWaitLockAcquire, lock, null_mut()) };
+        // SAFETY: every borrow of the value is protected by the acquired wait lock.
+        let result = f(unsafe { &mut *self.value.get() });
         // SAFETY: the lock acquired above, released once by the same thread.
         unsafe { call_unsafe_wdf_function_binding!(WdfWaitLockRelease, lock) };
         result

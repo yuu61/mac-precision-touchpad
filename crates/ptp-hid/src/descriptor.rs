@@ -5,7 +5,6 @@
 //!   `UsbKm`, `HidFilter`), or a 5-byte contact with a 3-bit contact ID (`SpiKm`);
 //! - the touchpad TLC usage (Touch Pad 0x05, or Touch Screen 0x04 for `SpiKm`'s touchscreen variant);
 //! - four 16-bit axis values ([`Axes`]);
-//! - whether the user-mode-app TLC ([`UMAPP_TLC`]) is appended.
 //!
 //! Compared to the legacy C macro templates, these builders make four intentional HID conformance fixes:
 //! - the SPI contact ID's logical maximum is [`SPI_CONTACT_ID_LOGICAL_MAX`] (4) instead of 3, at
@@ -19,10 +18,8 @@
 //!
 //! | Driver | Builder | Length |
 //! |---|---|---|
-//! | `UsbUm` | [`report_descriptor_u32_id_umapp`] | 534 |
 //! | `UsbKm` (T2) | [`report_descriptor_u32_id`] | 511 |
 //! | `HidFilter` (MT2) | [`report_descriptor_u32_id`] | 511 |
-//! | `SpiKm`, 4 families × {touchpad, touchscreen} | [`report_descriptor_spi_umapp`] | 519 |
 //!
 //! Every function here is a `const fn`, so a core crate can write
 //! `pub const REPORT_DESCRIPTOR: [u8; REPORT_DESCRIPTOR_U32_ID_LEN] = report_descriptor_u32_id(AXES);`.
@@ -31,8 +28,7 @@
 use crate::bytes::put;
 use crate::common::{
     BUTTON_SWITCH, PTP_COLLECTION_WINDOWS, PTP_MAX_CONTACT_POINTS, REPORTID_DEVICE_CAPS,
-    REPORTID_FUNCSWITCH, REPORTID_MULTITOUCH, REPORTID_PTPHQA, REPORTID_REPORTMODE,
-    REPORTID_UMAPP_CONF, SURFACE_SWITCH,
+    REPORTID_FUNCSWITCH, REPORTID_MULTITOUCH, REPORTID_PTPHQA, REPORTID_REPORTMODE, SURFACE_SWITCH,
 };
 use crate::item::{
     BEGIN_COLLECTION, END_COLLECTION, FEATURE, INPUT, LOGICAL_MAXIMUM, LOGICAL_MAXIMUM_2,
@@ -117,25 +113,19 @@ pub const TOUCHPAD_TLC_SPI_LEN: usize = TOUCHPAD_TLC_HEADER_LEN
 
 /// Length of [`WINDOWS_CONFIGURATION_TLC`].
 pub const WINDOWS_CONFIGURATION_TLC_LEN: usize = 47;
-/// Length of [`UMAPP_TLC`].
-pub const UMAPP_TLC_LEN: usize = 23;
 
 /// Length of [`report_descriptor_u32_id`] (`UsbKm`, `HidFilter`).
 pub const REPORT_DESCRIPTOR_U32_ID_LEN: usize =
     TOUCHPAD_TLC_U32_ID_LEN + WINDOWS_CONFIGURATION_TLC_LEN;
-/// Length of [`report_descriptor_u32_id_umapp`] (`UsbUm`).
-pub const REPORT_DESCRIPTOR_U32_ID_UMAPP_LEN: usize = REPORT_DESCRIPTOR_U32_ID_LEN + UMAPP_TLC_LEN;
-/// Length of [`report_descriptor_spi_umapp`] (`SpiKm`).
-pub const REPORT_DESCRIPTOR_SPI_UMAPP_LEN: usize =
-    TOUCHPAD_TLC_SPI_LEN + WINDOWS_CONFIGURATION_TLC_LEN + UMAPP_TLC_LEN;
+/// Length of [`report_descriptor_spi`] (`SpiKm`).
+pub const REPORT_DESCRIPTOR_SPI_LEN: usize = TOUCHPAD_TLC_SPI_LEN + WINDOWS_CONFIGURATION_TLC_LEN;
 
 const _: () = assert!(FINGER_COLLECTION_U32_ID_LEN == 70);
 const _: () = assert!(FINGER_COLLECTION_SPI_LEN == 67);
 const _: () = assert!(TOUCHPAD_TLC_U32_ID_LEN == 464);
 const _: () = assert!(TOUCHPAD_TLC_SPI_LEN == 449);
 const _: () = assert!(REPORT_DESCRIPTOR_U32_ID_LEN == 511);
-const _: () = assert!(REPORT_DESCRIPTOR_U32_ID_UMAPP_LEN == 534);
-const _: () = assert!(REPORT_DESCRIPTOR_SPI_UMAPP_LEN == 519);
+const _: () = assert!(REPORT_DESCRIPTOR_SPI_LEN == 496);
 
 /// Head of a 9-byte-contact finger collection, from `BEGIN_COLLECTION` to the 32-bit Contact
 /// Identifier: Confidence:1, Tip Switch:1, 6 constant bits, Contact ID:32 with logical maximum
@@ -416,24 +406,6 @@ pub const WINDOWS_CONFIGURATION_TLC: [u8; WINDOWS_CONFIGURATION_TLC_LEN] = [
     END_COLLECTION, // End Collection
 ];
 
-/// `AAPL_PTP_USERMODE_CONFIGURATION_APP_TLC` (23 bytes), identical in all four drivers. It is a vendor TLC
-/// (page 0xFF00, usage 0x01) with feature report 0x09: 3 × 8-bit, logical range 0..255. `UsbUm` and `SpiKm`
-/// include it; `UsbKm` and `HidFilter` do not.
-#[rustfmt::skip]
-pub const UMAPP_TLC: [u8; UMAPP_TLC_LEN] = [
-    USAGE_PAGE_1, 0x00, 0xff, // Usage Page: Vendor defined
-    USAGE, 0x01, // Usage: Vendor Usage 0x01
-    BEGIN_COLLECTION, 0x01, // Begin Collection: Application
-    REPORT_ID, REPORTID_UMAPP_CONF, // Report ID: User-mode Application configuration
-    USAGE, 0x01, // Usage: Vendor Usage 0x01
-    LOGICAL_MINIMUM, 0x00, // Logical Minimum 0
-    LOGICAL_MAXIMUM_2, 0xff, 0x00, // Logical Maximum 255
-    REPORT_SIZE, 0x08, // Report Size: 8
-    REPORT_COUNT, 0x03, // Report Count: 3
-    FEATURE, 0x02, // Feature: (Data, Var, Abs)
-    END_COLLECTION,
-];
-
 /// Touchpad TLC (9-byte contacts, Touch Pad usage) followed by [`WINDOWS_CONFIGURATION_TLC`]: 511 bytes.
 ///
 /// `UsbKm` and `HidFilter` use it.
@@ -445,30 +417,13 @@ pub const fn report_descriptor_u32_id(axes: Axes) -> [u8; REPORT_DESCRIPTOR_U32_
     )
 }
 
-/// Touchpad TLC (9-byte contacts, Touch Pad usage), [`WINDOWS_CONFIGURATION_TLC`] and [`UMAPP_TLC`]: 534
-/// bytes.
-///
-/// `UsbUm` uses it.
-#[must_use]
-pub const fn report_descriptor_u32_id_umapp(
-    axes: Axes,
-) -> [u8; REPORT_DESCRIPTOR_U32_ID_UMAPP_LEN] {
-    concat(&report_descriptor_u32_id(axes), &UMAPP_TLC)
-}
-
-/// Touchpad TLC (SPI 5-byte contacts, with the given usage), [`WINDOWS_CONFIGURATION_TLC`] and
-/// [`UMAPP_TLC`]: 519 bytes.
+/// Touchpad TLC (SPI 5-byte contacts, with the given usage), [`WINDOWS_CONFIGURATION_TLC`] (496 bytes).
 ///
 /// `SpiKm` `AmtPtpSpiFamily{1,2,3a,3b}ReportDescriptor` (with [`TlcUsage::TouchPad`]) and
 /// `...TouchscreenReportDescriptor` (with [`TlcUsage::TouchScreen`]) use it.
 #[must_use]
-pub const fn report_descriptor_spi_umapp(
-    usage: TlcUsage,
-    axes: Axes,
-) -> [u8; REPORT_DESCRIPTOR_SPI_UMAPP_LEN] {
-    let tlc_cfg: [u8; TOUCHPAD_TLC_SPI_LEN + WINDOWS_CONFIGURATION_TLC_LEN] =
-        concat(&touchpad_tlc_spi(usage, axes), &WINDOWS_CONFIGURATION_TLC);
-    concat(&tlc_cfg, &UMAPP_TLC)
+pub const fn report_descriptor_spi(usage: TlcUsage, axes: Axes) -> [u8; REPORT_DESCRIPTOR_SPI_LEN] {
+    concat(&touchpad_tlc_spi(usage, axes), &WINDOWS_CONFIGURATION_TLC)
 }
 
 #[cfg(test)]
@@ -511,7 +466,8 @@ mod tests {
         let t = touchpad_tlc_u32_id(TlcUsage::TouchPad, AXES);
         let fc = finger_collection_u32_id(AXES);
         for idx in 0..5 {
-            let start = TOUCHPAD_TLC_HEADER_LEN + idx * (FINGER_COLLECTION_U32_ID_LEN + FINGER_SEPARATOR_LEN);
+            let start = TOUCHPAD_TLC_HEADER_LEN
+                + idx * (FINGER_COLLECTION_U32_ID_LEN + FINGER_SEPARATOR_LEN);
             assert_eq!(&t[start..start + FINGER_COLLECTION_U32_ID_LEN], &fc);
         }
         assert_eq!(&t[376..], &TOUCHPAD_TLC_TAIL);
@@ -519,7 +475,8 @@ mod tests {
         let t = touchpad_tlc_spi(TlcUsage::TouchScreen, AXES);
         let fc = finger_collection_spi(AXES);
         for idx in 0..5 {
-            let start = TOUCHPAD_TLC_HEADER_LEN + idx * (FINGER_COLLECTION_SPI_LEN + FINGER_SEPARATOR_LEN);
+            let start =
+                TOUCHPAD_TLC_HEADER_LEN + idx * (FINGER_COLLECTION_SPI_LEN + FINGER_SEPARATOR_LEN);
             assert_eq!(&t[start..start + FINGER_COLLECTION_SPI_LEN], &fc);
         }
         assert_eq!(&t[361..], &TOUCHPAD_TLC_TAIL);
@@ -535,13 +492,6 @@ mod tests {
 
     #[test]
     fn shared_tlc_bytes() {
-        assert_eq!(
-            UMAPP_TLC,
-            [
-                0x06, 0x00, 0xff, 0x09, 0x01, 0xa1, 0x01, 0x85, 0x09, 0x09, 0x01, 0x15, 0x00, 0x26,
-                0xff, 0x00, 0x75, 0x08, 0x95, 0x03, 0xb1, 0x02, 0xc0
-            ]
-        );
         assert_eq!(
             WINDOWS_CONFIGURATION_TLC,
             [
@@ -587,10 +537,6 @@ mod tests {
             tlcs
         }
         assert_eq!(walk(&report_descriptor_u32_id(AXES)), 2);
-        assert_eq!(walk(&report_descriptor_u32_id_umapp(AXES)), 3);
-        assert_eq!(
-            walk(&report_descriptor_spi_umapp(TlcUsage::TouchPad, AXES)),
-            3
-        );
+        assert_eq!(walk(&report_descriptor_spi(TlcUsage::TouchPad, AXES)), 2);
     }
 }

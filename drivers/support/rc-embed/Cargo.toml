@@ -1,7 +1,7 @@
 # Build-script helper (build-dependency only): compiles a Win32 resource script
 # with the Windows SDK rc.exe that wdk-build already locates, and links the
 # .res into the cdylib being built (KMDF .sys or UMDF .dll). Used by
-# AmtPtpDeviceUsbKm and AmtPtpDeviceUsbUm for their VERSIONINFO resources.
+# the KMDF drivers for their VERSIONINFO resources.
 # A member of neither driver workspace; pinned to the same wdk-build version.
 [package]
 name = "rc-embed"

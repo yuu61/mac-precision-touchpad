@@ -7,10 +7,7 @@
 
 use crate::BufferTooSmall;
 use crate::bytes::{put, take, write_prefix};
-use crate::descriptor::{
-    REPORT_DESCRIPTOR_SPI_UMAPP_LEN, REPORT_DESCRIPTOR_U32_ID_LEN,
-    REPORT_DESCRIPTOR_U32_ID_UMAPP_LEN,
-};
+use crate::descriptor::{REPORT_DESCRIPTOR_SPI_LEN, REPORT_DESCRIPTOR_U32_ID_LEN};
 
 /// `HID_HID_DESCRIPTOR_TYPE` (0x21): `bDescriptorType` of the HID descriptor.
 pub const HID_HID_DESCRIPTOR_TYPE: u8 = 0x21;
@@ -132,20 +129,16 @@ pub const fn hid_descriptor(report_length: u16) -> [u8; HID_DESCRIPTOR_LEN] {
     HidDescriptor::new(report_length).to_bytes()
 }
 
-const _: () = assert!(REPORT_DESCRIPTOR_U32_ID_UMAPP_LEN <= u16::MAX as usize);
 const _: () = assert!(REPORT_DESCRIPTOR_U32_ID_LEN <= u16::MAX as usize);
-const _: () = assert!(REPORT_DESCRIPTOR_SPI_UMAPP_LEN <= u16::MAX as usize);
+const _: () = assert!(REPORT_DESCRIPTOR_SPI_LEN <= u16::MAX as usize);
 
-/// `UsbUm`'s HID descriptor (534-byte report descriptor): `09 21 00 01 00 01 22 16 02`.
-pub const HID_DESCRIPTOR_U32_ID_UMAPP: [u8; HID_DESCRIPTOR_LEN] =
-    hid_descriptor(REPORT_DESCRIPTOR_U32_ID_UMAPP_LEN as u16); // 534 fits, asserted above
 /// The HID descriptor of `UsbKm` and `HidFilter` (511-byte report descriptor): `09 21 00 01 00 01 22 ff 01`.
 pub const HID_DESCRIPTOR_U32_ID: [u8; HID_DESCRIPTOR_LEN] =
     hid_descriptor(REPORT_DESCRIPTOR_U32_ID_LEN as u16); // 511 fits, asserted above
-/// `SpiKm`'s HID descriptor (all 4 families, both variants, 519-byte report descriptor):
-/// `09 21 00 01 00 01 22 07 02`.
-pub const HID_DESCRIPTOR_SPI_UMAPP: [u8; HID_DESCRIPTOR_LEN] =
-    hid_descriptor(REPORT_DESCRIPTOR_SPI_UMAPP_LEN as u16); // 519 fits, asserted above
+/// `SpiKm`'s HID descriptor (all 4 families, both variants, 496-byte report descriptor):
+/// `09 21 00 01 00 01 22 f0 01`.
+pub const HID_DESCRIPTOR_SPI: [u8; HID_DESCRIPTOR_LEN] =
+    hid_descriptor(REPORT_DESCRIPTOR_SPI_LEN as u16); // 496 fits, asserted above
 
 // ---------------------------------------------------------------------------------------------------
 // HID_DEVICE_ATTRIBUTES
@@ -240,16 +233,12 @@ mod tests {
     #[test]
     fn hid_descriptors_of_all_drivers() {
         assert_eq!(
-            HID_DESCRIPTOR_U32_ID_UMAPP,
-            [0x09, 0x21, 0x00, 0x01, 0x00, 0x01, 0x22, 0x16, 0x02]
-        );
-        assert_eq!(
             HID_DESCRIPTOR_U32_ID,
             [0x09, 0x21, 0x00, 0x01, 0x00, 0x01, 0x22, 0xff, 0x01]
         );
         assert_eq!(
-            HID_DESCRIPTOR_SPI_UMAPP,
-            [0x09, 0x21, 0x00, 0x01, 0x00, 0x01, 0x22, 0x07, 0x02]
+            HID_DESCRIPTOR_SPI,
+            [0x09, 0x21, 0x00, 0x01, 0x00, 0x01, 0x22, 0xf0, 0x01]
         );
     }
 
@@ -339,4 +328,61 @@ mod tests {
             (14, 15, 16)
         );
     }
+}
+
+/// Writable report passed with a HID feature request.
+#[derive(Debug)]
+pub struct XferPacketMut<'a> {
+    /// HID report identifier.
+    pub report_id: u8,
+    /// Output storage owned by the request.
+    pub report_buffer: &'a mut [u8],
+}
+
+/// Read-only report passed with a HID feature request.
+#[derive(Clone, Copy, Debug)]
+pub struct XferPacket<'a> {
+    /// HID report identifier.
+    pub report_id: u8,
+    /// Input report bytes owned by the request.
+    pub report_buffer: &'a [u8],
+}
+
+/// Size of a `HID_XFER_PACKET` in both supported 64-bit ABIs.
+pub const HID_XFER_PACKET_LEN: usize = 16;
+
+/// Checks the length of the transfer header before accessing request data.
+///
+/// # Errors
+/// Returns `STATUS_BUFFER_TOO_SMALL` if the header is truncated.
+pub const fn check_xfer_length(length: usize) -> Result<(), crate::status::NtStatus> {
+    if length < HID_XFER_PACKET_LEN {
+        Err(crate::status::STATUS_BUFFER_TOO_SMALL)
+    } else {
+        Ok(())
+    }
+}
+
+/// Borrows an aligned transfer packet for a synchronous minidriver request.
+/// The embedded pointer addresses the report immediately following the header.
+/// Returns None if the requested buffer cannot hold the header and payload.
+pub fn with_xfer_packet<const N: usize, R, F: FnOnce(&[u8; N]) -> R>(
+    id: u8,
+    report: &[u8],
+    send: F,
+) -> Option<R> {
+    #[repr(align(8))]
+    struct Storage<const N: usize>([u8; N]);
+    let mut storage = Storage([0; N]);
+    let (header, payload) = storage.0.split_first_chunk_mut::<HID_XFER_PACKET_LEN>()?;
+    let dest = payload.get_mut(..report.len())?;
+    dest.copy_from_slice(report);
+    let address = (dest.as_ptr() as usize as u64).to_le_bytes();
+    let length = u32::try_from(dest.len()).ok()?.to_le_bytes();
+    let (pointer, rest) = header.split_first_chunk_mut::<8>()?;
+    *pointer = address;
+    let (size, rest) = rest.split_first_chunk_mut::<4>()?;
+    *size = length;
+    *rest.first_mut()? = id;
+    Some(send(&storage.0))
 }

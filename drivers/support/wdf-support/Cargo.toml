@@ -3,7 +3,7 @@
 # neither, so it is compiled once per workspace against that workspace's
 # wdk-sys bindings. Its build script reads the workspace's
 # [workspace.metadata.wdk.driver-model] (via wdk-build) and emits
-# cfg(driver_model__driver_type = "KMDF" | "UMDF").
+# cfg(driver_model__driver_type = "KMDF").
 #
 # Not a workspace member => no `workspace = true` inheritance here; versions are
 # pinned to the same exact versions the workspaces use so they unify.

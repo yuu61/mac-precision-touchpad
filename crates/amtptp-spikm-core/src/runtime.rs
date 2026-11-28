@@ -34,7 +34,9 @@ use ptp_hid::scan_time::ScanClock;
 
 use crate::device::SpiTrackpadInfo;
 use crate::feature::PtpSettings;
-use crate::input::{SpiPacket, check_declared_fingers, lower_read_length, report_bytes, valid_prefix};
+use crate::input::{
+    SpiPacket, check_declared_fingers, lower_read_length, report_bytes, valid_prefix,
+};
 use crate::status::{NtStatus, STATUS_CANCELLED, STATUS_SUCCESS, nt_success};
 
 /// `PTP_AAPL_DEVICE_POWER_STATUS` (Device.h:46-50).
@@ -152,7 +154,7 @@ impl DeviceRuntime {
 
     /// `AmtPtpEvtDeviceSelfManagedIoInitOrRestart` (Device.c:397-427), registered for both
     /// `SelfManagedIoInit` and `SelfManagedIoRestart`, after the glue ran the mode switch
-    /// ([`crate::wire::SetStatePacket`], synchronous `IOCTL_HID_SET_FEATURE`) and got `set_state_status`.
+    /// ([`crate::wire::with_set_state_packet`], synchronous `IOCTL_HID_SET_FEATURE`) and got `set_state_status`.
     /// The framework never runs it concurrently with [`Self::suspend`].
     ///
     /// - Success: restart the reporting clock and mark the device configured. The glue then issues

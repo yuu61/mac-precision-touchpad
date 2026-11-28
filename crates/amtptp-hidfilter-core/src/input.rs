@@ -157,7 +157,7 @@ const MAX_RAW_MT2_FINGERS: usize = MAX_FINGERS as usize;
 
 /// Decodes up to 16 raw Magic Trackpad 2 finger records and the button bit from `buffer`.
 #[must_use]
-pub(crate) fn decode_raw_packet(
+pub fn decode_raw_packet(
     layout: &InputLayout,
     length: usize,
     buffer: &[u8],
@@ -187,7 +187,7 @@ pub(crate) fn decode_raw_packet(
 /// Assembles a tracked 50-byte `PTP_REPORT` from decoded Magic Trackpad 2 observations using
 /// `contacts` for persistent hardware-ID tracking and 1-frame `TipSwitch = 0` liftoff synthesis.
 #[must_use]
-pub(crate) fn finish_tracked_report(
+pub fn finish_tracked_report(
     decoded: &[PtpContact],
     button_pressed: bool,
     scan_time: u16,
@@ -243,7 +243,13 @@ mod tests {
     const CANCELLED: NtStatus = 0xC000_0120_u32 as NtStatus;
     const BT_ID: Option<u8> = Some(0x31);
 
-    fn class(vid: u16, layout: &InputLayout, status: NtStatus, info: usize, first: Option<u8>) -> LowerReadClass {
+    fn class(
+        vid: u16,
+        layout: &InputLayout,
+        status: NtStatus,
+        info: usize,
+        first: Option<u8>,
+    ) -> LowerReadClass {
         classify_lower_read(vid, layout, status, info, first)
     }
 
@@ -260,8 +266,14 @@ mod tests {
         assert_eq!(class(0x4C, &BT, OK, 0, None), LowerReadClass::Empty);
         assert_eq!(class(0x4C, &BT, OK, 1025, BT_ID), LowerReadClass::Oversize);
         // C took the low 32 bits, sign-extended: a 13-byte packet and a huge length.
-        assert_eq!(class(0x4C, &BT, OK, 0x1_0000_000D, BT_ID), LowerReadClass::Oversize);
-        assert_eq!(class(0x4C, &BT, OK, 0x8000_0008, BT_ID), LowerReadClass::Oversize);
+        assert_eq!(
+            class(0x4C, &BT, OK, 0x1_0000_000D, BT_ID),
+            LowerReadClass::Oversize
+        );
+        assert_eq!(
+            class(0x4C, &BT, OK, 0x8000_0008, BT_ID),
+            LowerReadClass::Oversize
+        );
         assert_eq!(
             class(0x4C, &BT, OK, 3, Some(0x90)),
             LowerReadClass::OtherReport { report_id: 0x90 }

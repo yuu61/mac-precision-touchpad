@@ -19,9 +19,10 @@
 
 mod common;
 
-use amtptp_hidfilter_core::{
-    DeviceState, NtStatus, configure_multitouch, d0_entry, d0_exit, prepare_hardware,
-    recovery_timer_callback, self_managed_io_init, self_managed_io_restart, source_opened,
+use amtptp_hidfilter_core::{DeviceState, NtStatus};
+use common::pnp::{
+    configure_multitouch, d0_entry, d0_exit, prepare_hardware, recovery_timer_callback,
+    self_managed_io_init, self_managed_io_restart, source_opened,
 };
 use common::*;
 
@@ -31,8 +32,10 @@ const FAULT: &str = "fault-injected sequence (fault = README 5 status)";
 const P3_SEND_STATUS: &str = "P3 HF-B13: TRUE send with a failed lower status";
 const P3_TIMER: &str = "P3: recovery timer gated to D0, no read after a failed switch";
 const P3_PNP_RESTART: &str = "P3 HF-B30: PnP restart keeps the IDs (= resume)";
-const SOURCE_START: &str = "data source: Bluetooth start = init + source opened (no detour, no attribute query)";
-const REMOVED_IDENTITY: &str = "removed: start of a non-Bluetooth identity (the identity is static now)";
+const SOURCE_START: &str =
+    "data source: Bluetooth start = init + source opened (no detour, no attribute query)";
+const REMOVED_IDENTITY: &str =
+    "removed: start of a non-Bluetooth identity (the identity is static now)";
 const SOURCE_RESTART: &str = "data source: restart before the source opened does nothing";
 
 /// The Bluetooth start records (VID 0x004C, PID 0x0265), with or without a fault.
@@ -144,10 +147,18 @@ fn expected<'a>(r: &'a Rec, recs: &'a [Rec]) -> Expected<'a> {
             .iter()
             .find(|x| x.case() == format!("resume-{cfg}"))
             .expect("matching resume record");
-        assert_eq!(resume.get("st_in"), r.get("st_in"), "{case}: same start state");
+        assert_eq!(
+            resume.get("st_in"),
+            r.get("st_in"),
+            "{case}: same start state"
+        );
         // PrepareHardware also restores input mode and both selective-reporting switches to on.
         let st_out = with_state(
-            &with_state(&with_state(resume.get("st_out"), "inp_on", "1"), "touch", "1"),
+            &with_state(
+                &with_state(resume.get("st_out"), "inp_on", "1"),
+                "touch",
+                "1",
+            ),
             "btn",
             "1",
         );
@@ -288,11 +299,7 @@ fn replay_wire() {
             None => assert_eq!(want.ret, "-"),
         }
         assert_eq!(m.ev, want.events, "{case}");
-        assert_eq!(
-            state.snapshot(),
-            parse_state(&want.st_out),
-            "{case}"
-        );
+        assert_eq!(state.snapshot(), parse_state(&want.st_out), "{case}");
         assert_eq!(m.sends.len() as i128, want.sent, "{case}");
         if let Some(s) = m.sends.last() {
             let r = want.send_record;

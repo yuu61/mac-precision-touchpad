@@ -9,13 +9,14 @@ use core::ptr::null_mut;
 use core::sync::atomic::{AtomicPtr, Ordering};
 
 use amtptp_hidfilter_core::{ContactTracker, DeviceState, ReadTicket, ReadTracker};
+
 use wdf_support::declare_context_type;
 use wdf_support::handle::{ContextPtr, WdfHandle};
 use wdf_support::sync::SpinLocked;
 use wdk_sys::{
     _DEVICE_OBJECT, PDEVICE_OBJECT, WDFDEVICE, WDFDEVICE__, WDFIOTARGET, WDFIOTARGET__,
-    WDFLOOKASIDE, WDFLOOKASIDE__, WDFMEMORY__, WDFQUEUE, WDFQUEUE__, WDFTIMER, WDFTIMER__,
-    WDFREQUEST__, WDFWORKITEM, WDFWORKITEM__,
+    WDFLOOKASIDE, WDFLOOKASIDE__, WDFMEMORY__, WDFQUEUE, WDFQUEUE__, WDFREQUEST__, WDFTIMER,
+    WDFTIMER__, WDFWORKITEM, WDFWORKITEM__,
 };
 
 /// A lower read (an `IRP_MJ_READ` of the data source) as the read tracker stores it.
@@ -97,8 +98,7 @@ pub(crate) struct DeviceContext {
     hid_transport_recovery_timer: AtomicPtr<WDFTIMER__>,
     /// `HidTransportRecoveryWorkItem`: re-issues a lower read at `PASSIVE_LEVEL`.
     hid_transport_recovery_work_item: AtomicPtr<WDFWORKITEM__>,
-    /// The lower reads in flight and their epoch (not in C, see `amtptp_hidfilter_core::FilterIo::
-    /// with_reads`). The spin lock is created in `create_device`, before any callback can run.
+    /// The lower reads in flight and their epoch. The spin lock is created in `create_device`, before any callback can run.
     pub(crate) reads: SpinLocked<ReadTracker<LowerRead>>,
     /// Active hardware-ID contacts and liftoff state, protected by a spin lock created in
     /// `create_device`.

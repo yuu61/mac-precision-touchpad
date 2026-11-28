@@ -30,31 +30,15 @@ use ptp_hid::feature::{
 
 use crate::state::DeviceState;
 use crate::status::{
-    Completion, STATUS_BUFFER_TOO_SMALL, STATUS_INVALID_BUFFER_SIZE, STATUS_INVALID_DEVICE_REQUEST,
-    STATUS_NOT_SUPPORTED, STATUS_SUCCESS, nt_success,
+    Completion, STATUS_INVALID_BUFFER_SIZE, STATUS_INVALID_DEVICE_REQUEST, STATUS_NOT_SUPPORTED,
+    STATUS_SUCCESS,
 };
 use crate::wellspring::{ControlTransfer, set_wellspring_mode};
 
-/// `sizeof(HID_XFER_PACKET)` on x64 and ARM64: 16.
-pub const HID_XFER_PACKET_LEN: usize = 16;
-
-/// A `GET_FEATURE` `HID_XFER_PACKET`: the report ID and the caller's report buffer to fill.
-#[derive(Debug)]
-pub struct GetFeaturePacket<'a> {
-    /// `reportId`.
-    pub report_id: u8,
-    /// `reportBuffer[0..reportBufferLen]`; empty when `reportBuffer` is NULL.
-    pub report_buffer: &'a mut [u8],
-}
-
-/// A `SET_FEATURE` `HID_XFER_PACKET`: the report ID and the report bytes.
-#[derive(Clone, Copy, Debug)]
-pub struct SetFeaturePacket<'a> {
-    /// `reportId`.
-    pub report_id: u8,
-    /// `reportBuffer[0..reportBufferLen]`; empty when `reportBuffer` is NULL.
-    pub report_buffer: &'a [u8],
-}
+use ptp_hid::hidport::check_xfer_length;
+pub use ptp_hid::hidport::{
+    HID_XFER_PACKET_LEN, XferPacket as SetFeaturePacket, XferPacketMut as GetFeaturePacket,
+};
 
 /// `AmtPtpReportFeatures`.
 ///
@@ -70,8 +54,8 @@ pub fn get_feature<'a, F: FnOnce() -> Option<GetFeaturePacket<'a>>>(
     output_buffer_length: usize,
     packet: F,
 ) -> Completion {
-    if output_buffer_length < HID_XFER_PACKET_LEN {
-        return Completion::status(STATUS_BUFFER_TOO_SMALL);
+    if let Err(status) = check_xfer_length(output_buffer_length) {
+        return Completion::status(status);
     }
     let Some(packet) = packet() else {
         return Completion::status(STATUS_INVALID_DEVICE_REQUEST);
@@ -129,8 +113,8 @@ pub fn set_feature<'a, T: ControlTransfer + ?Sized, F: FnOnce() -> Option<SetFea
     state: &DeviceState,
     io: &mut T,
 ) -> Completion {
-    if input_buffer_length < HID_XFER_PACKET_LEN {
-        return Completion::status(STATUS_BUFFER_TOO_SMALL);
+    if let Err(status) = check_xfer_length(input_buffer_length) {
+        return Completion::status(status);
     }
     let Some(packet) = packet() else {
         return Completion::status(STATUS_INVALID_DEVICE_REQUEST);
@@ -143,25 +127,16 @@ pub fn set_feature<'a, T: ControlTransfer + ?Sized, F: FnOnce() -> Option<SetFea
                 return Completion::status(STATUS_INVALID_BUFFER_SIZE);
             };
             io.serialized(|io| {
-                let was_on = state.wellspring_mode_on();
-                match mode {
-                    PTP_COLLECTION_MOUSE if was_on => {
-                        let status = set_wellspring_mode(state, io, false);
-                        if nt_success(status) {
-                            Completion::status(STATUS_SUCCESS)
-                        } else {
-                            Completion::status(status)
-                        }
-                    }
-                    PTP_COLLECTION_WINDOWS if !was_on => {
-                        let status = set_wellspring_mode(state, io, true);
-                        if nt_success(status) {
-                            Completion::status(STATUS_SUCCESS)
-                        } else {
-                            Completion::status(status)
-                        }
-                    }
-                    _ => Completion::status(STATUS_SUCCESS),
+                let requested = match mode {
+                    PTP_COLLECTION_WINDOWS => true,
+                    PTP_COLLECTION_MOUSE => false,
+                    _ => return Completion::status(STATUS_SUCCESS),
+                };
+                state.request_raw(requested);
+                if state.wellspring_mode_on() == requested {
+                    Completion::status(STATUS_SUCCESS)
+                } else {
+                    Completion::status(set_wellspring_mode(state, io, requested))
                 }
             })
         }
@@ -178,6 +153,7 @@ pub fn set_feature<'a, T: ControlTransfer + ?Sized, F: FnOnce() -> Option<SetFea
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::status::STATUS_BUFFER_TOO_SMALL;
 
     #[test]
     fn get_feature_checks_in_c_order() {

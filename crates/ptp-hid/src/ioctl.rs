@@ -172,6 +172,44 @@ pub const fn ioctl_name(code: u32) -> &'static str {
     }
 }
 
+/// Internal HID operations accepted by the precision touchpad minidrivers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InternalIoctl {
+    /// `IOCTL_HID_GET_DEVICE_DESCRIPTOR` (0x000B0003).
+    GetDeviceDescriptor,
+    /// `IOCTL_HID_GET_DEVICE_ATTRIBUTES` (0x000B0027).
+    GetDeviceAttributes,
+    /// `IOCTL_HID_GET_REPORT_DESCRIPTOR` (0x000B0007).
+    GetReportDescriptor,
+    /// `IOCTL_HID_GET_STRING` (0x000B0013).
+    GetString,
+    /// `IOCTL_HID_READ_REPORT` (0x000B000B).
+    ReadReport,
+    /// `IOCTL_HID_GET_FEATURE` (0x000B0192).
+    GetFeature,
+    /// `IOCTL_HID_SET_FEATURE` (0x000B0191).
+    SetFeature,
+    /// Anything else: `STATUS_NOT_SUPPORTED`.
+    NotSupported,
+}
+
+impl InternalIoctl {
+    /// Routes an `IoControlCode`.
+    #[must_use]
+    pub const fn from_code(io_control_code: u32) -> Self {
+        match io_control_code {
+            IOCTL_HID_GET_DEVICE_DESCRIPTOR => Self::GetDeviceDescriptor,
+            IOCTL_HID_GET_DEVICE_ATTRIBUTES => Self::GetDeviceAttributes,
+            IOCTL_HID_GET_REPORT_DESCRIPTOR => Self::GetReportDescriptor,
+            IOCTL_HID_GET_STRING => Self::GetString,
+            IOCTL_HID_READ_REPORT => Self::ReadReport,
+            IOCTL_HID_GET_FEATURE => Self::GetFeature,
+            IOCTL_HID_SET_FEATURE => Self::SetFeature,
+            _ => Self::NotSupported,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
