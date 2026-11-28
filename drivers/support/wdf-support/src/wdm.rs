@@ -28,8 +28,7 @@ use wdk_sys::{PIO_STACK_LOCATION, PIRP, PVOID, WDFREQUEST, call_unsafe_wdf_funct
 ///   it beyond that point.
 #[must_use]
 pub unsafe fn request_wdm_get_irp(request: WDFREQUEST) -> PIRP {
-    // SAFETY: valid request handle per the caller contract;
-    // WdfRequestWdmGetIrp is in the KMDF 1.23 function table.
+    // SAFETY: valid request handle per the caller contract.
     unsafe { call_unsafe_wdf_function_binding!(WdfRequestWdmGetIrp, request) }
 }
 

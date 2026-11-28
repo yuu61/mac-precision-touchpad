@@ -1,17 +1,15 @@
-# Shared WDF glue for the AmtPtp drivers. Used as a path dependency by BOTH
-# driver workspaces (../../km = KMDF 1.23, ../../um = UMDF 2.15) and a member of
-# neither, so it is compiled once per workspace against that workspace's
-# wdk-sys bindings. Its build script reads the workspace's
+# Shared WDF glue for the AmtPtp drivers. The driver workspace (../../km)
+# uses this path dependency with its KMDF bindings. Its build script reads the workspace's
 # [workspace.metadata.wdk.driver-model] (via wdk-build) and emits
 # cfg(driver_model__driver_type = "KMDF").
 #
 # Not a workspace member => no `workspace = true` inheritance here; versions are
-# pinned to the same exact versions the workspaces use so they unify.
+# pinned to the same exact versions the driver workspace uses so they unify.
 #
 # MIT, and must stay free of GPL-derived code: AmtPtpDeviceSpiKm (MIT) uses it.
 [package]
 name = "wdf-support"
-description = "WDF glue shared by the AmtPtp KMDF and UMDF drivers: WDF_*_INIT helpers, object-context macro, request completion guard, WDM IRP helpers"
+description = "WDF glue shared by the AmtPtp KMDF drivers: WDF_*_INIT helpers, object-context macro, request completion guard, WDM IRP helpers"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.91"
@@ -32,5 +30,5 @@ wdk-sys = { version = "=0.5.2", features = ["hid", "usb"] }
 
 [lints.clippy]
 cargo = { level = "deny", priority = -1 }
-# Dependency versions are checked against each driver's WDK workspace lockfile.
+# Dependency versions are checked against the driver workspace lockfile.
 multiple_crate_versions = "allow"

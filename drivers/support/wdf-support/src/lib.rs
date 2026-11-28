@@ -1,11 +1,11 @@
 //! WDF glue shared by the AmtPtp drivers.
 //!
-//! Built against the KMDF 1.23 bindings in the driver workspace.
+//! Built against the KMDF 1.31 bindings in the driver workspace.
 //!
 //! Contents:
 //! - [`init`]: Rust equivalents of the `FORCEINLINE` `WDF_*_INIT` helpers and
 //!   `WDF_REL_TIMEOUT_IN_*` (bindgen does not emit inline functions, so wdk-sys
-//!   has none of them). Bodies follow `Include/wdf/kmdf/1.23` field by field.
+//!   has none of them). The initializers match the WDK for a fixed KMDF version.
 //! - [`context`] + [`declare_context_type!`]: `WDF_DECLARE_CONTEXT_TYPE_WITH_NAME`, for `Sync`
 //!   context types only.
 //! - [`handle`]: [`handle::WdfHandle`] and [`handle::ContextPtr`], the `Sync` forms of the WDF handles

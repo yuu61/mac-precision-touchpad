@@ -493,12 +493,16 @@ unsafe extern "C" fn evt_device_d0_entry(
     device: WDFDEVICE,
     previous_state: WDF_POWER_DEVICE_STATE,
 ) -> NTSTATUS {
+    // SAFETY: WDF supplies the live device to this D0 entry callback.
+    let system_power_action =
+        unsafe { call_unsafe_wdf_function_binding!(WdfDeviceGetSystemPowerAction, device) };
     tlg::write_event!(
         PROVIDER,
         "D0Entry",
         level(Informational),
         keyword(keyword::DRIVER),
-        i32("PreviousState", &previous_state)
+        i32("PreviousState", &previous_state),
+        i32("SystemPowerAction", &system_power_action)
     );
     // SAFETY: framework callback for one of our devices, at PASSIVE_LEVEL.
     let Some(context) = (unsafe { device_context(device) }) else {
@@ -608,6 +612,9 @@ unsafe extern "C" fn evt_device_d0_exit(
     device: WDFDEVICE,
     target_state: WDF_POWER_DEVICE_STATE,
 ) -> NTSTATUS {
+    // SAFETY: WDF supplies the live device to this D0 exit callback.
+    let system_power_action =
+        unsafe { call_unsafe_wdf_function_binding!(WdfDeviceGetSystemPowerAction, device) };
     // SAFETY: framework callback for one of our devices, at PASSIVE_LEVEL.
     let Some(context) = (unsafe { device_context(device) }) else {
         return STATUS_INVALID_DEVICE_STATE;
@@ -650,6 +657,7 @@ unsafe extern "C" fn evt_device_d0_exit(
         level(Informational),
         keyword(keyword::DRIVER),
         i32("TargetState", &target_state),
+        i32("SystemPowerAction", &system_power_action),
         u32("CancelledReads", &drained)
     );
     status

@@ -1,13 +1,12 @@
 //! Rust equivalents of the WDF `FORCEINLINE` initialization helpers.
 //!
 //! bindgen does not emit inline functions, so wdk-sys 0.5.2 has none of these.
-//! Each function below transcribes the C body from the KMDF 1.23 headers
-//! (`Include/wdf/kmdf/1.23/*.h`); the UMDF 2.15 bodies are identical for every
-//! helper here. The C pattern is
+//! The initializers match the KMDF 1.31 headers (`Include/wdf/kmdf/1.31/*.h`).
+//! The C pattern is
 //!
 //! ```c
 //! RtlZeroMemory(Config, sizeof(T));
-//! Config->Size = sizeof(T);
+//! Config->Size = WDF_STRUCTURE_SIZE(T);
 //! Config->Field = ...;
 //! ```
 //!
@@ -20,13 +19,9 @@
 //! Instead of an out-pointer, every helper returns the initialized struct by
 //! value; the `..._SET_*` modifiers take `&mut`.
 //!
-//! `Size` is `sizeof(T)`, as in the 1.23 / 2.15 headers. That equals what the
-//! framework expects because the workspaces set no `minimum-*-version-minor`
-//! (with one, `WDF_STRUCTURE_SIZE` would read the framework's runtime size table
-//! instead; windows-drivers-rs issue #242).
-//!
-//! All helpers exist for both KMDF and UMDF: every struct they initialize is
-//! present in both the KMDF 1.23 and the UMDF 2.15 bindings.
+//! The runtime must support the target KMDF version. In that case
+//! `WDF_STRUCTURE_SIZE(T)` equals `sizeof(T)`. Supporting a runtime older than
+//! the target would require using the framework's runtime structure sizes.
 
 use core::mem::size_of;
 
@@ -324,8 +319,7 @@ pub fn timer_config_init_periodic(evt_timer_func: PFN_WDF_TIMER, period: LONG) -
 }
 
 /// `WDF_WORKITEM_CONFIG_INIT(&config, EvtWorkItemFunc)`: `Size`,
-/// `EvtWorkItemFunc`, `AutomaticSerialization = TRUE` (these are all the fields
-/// of the 1.23 / 2.15 structure).
+/// `EvtWorkItemFunc`, `AutomaticSerialization = TRUE`.
 #[doc(alias = "WDF_WORKITEM_CONFIG_INIT")]
 #[must_use]
 pub fn workitem_config_init(evt_work_item_func: PFN_WDF_WORKITEM) -> WDF_WORKITEM_CONFIG {

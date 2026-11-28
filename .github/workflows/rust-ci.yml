@@ -140,7 +140,7 @@ jobs:
 
   package:
     # Builds and links the KMDF workspace (release) and runs the whole packaging pipeline on the
-    # one INF: stampinf, InfVerif /u and Inf2Cat. Catches link errors, Resource.rc and INF
+    # one INF: stampinf, InfVerif /w and Inf2Cat. Catches link errors, Resource.rc and INF
     # regressions that Clippy cannot see. Unsigned; nothing is uploaded.
     name: Driver package (${{ matrix.arch }})
     needs: scope

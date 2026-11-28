@@ -70,11 +70,12 @@ cargo xtask help
      `target/package/<arch>/AmtPtpDevice.symbols/`.
   3. It writes `packaging/AmtPtpDevice.inx` as `AmtPtpDevice.inf` with CRLF line endings. The
      `.inx` is LF in git.
-  4. It runs `stampinf -f <inf> -d * -a amd64|arm64 -c AmtPtpDevice.cat -v <version|*> -k 1.23`.
+  4. It runs `stampinf -f <inf> -d * -a amd64|arm64 -c AmtPtpDevice.cat -v <version|*> -k 1.31`.
      The KMDF version comes from the workspace metadata in `drivers/km/Cargo.toml`.
   5. It checks the stamped file: no `$KEYWORD$` left, `DriverVer` and `CatalogFile` set, and every
      `KmdfLibraryVersion` value as requested.
-  6. It runs `InfVerif /u <inf>`. See [InfVerif mode](#infverif-mode) for why `/u`.
+  6. It runs `InfVerif /w <inf>` on the entire stamped INF. A Windows Driver validation error stops
+     packaging before signing or catalog creation.
   7. With `--sign`, it signs the binaries.
   8. It runs `Inf2Cat /driver:<dir> /os:<list> /uselocaltime` and checks that the `.cat` exists.
      Inf2Cat writes the catalog name in lower case; xtask renames it to the `CatalogFile`
@@ -82,15 +83,10 @@ cargo xtask help
      - `/uselocaltime` is needed because `stampinf -d *` writes the local date, while Inf2Cat
        checks in UTC by default. East of UTC it would otherwise reject a fresh DriverVer as
        future-dated.
-     - OS list for x64: `10_RS3_X64,10_RS4_X64,10_RS5_X64,ServerRS5_X64,10_19H1_X64,10_VB_X64,
-       ServerFE_X64,10_CO_X64,10_NI_X64,10_GE_X64,Server2025_X64`.
-     - OS list for arm64: `10_RS3_ARM64,10_RS4_ARM64,10_RS5_ARM64,10_19H1_ARM64,10_VB_ARM64,
-       10_CO_ARM64,10_NI_ARM64,10_GE_ARM64`.
-     - For x64 these are every id from 1709 (RS3) on that `Inf2Cat /?` of WDK 10.0.28000
-       accepts. `Server2016_X64` (1607) and the generic `Server10_X64` are below the floor.
-     - ARM64 is client only. Inf2Cat also accepts `ServerRS5_ARM64`, `ServerFE_ARM64` and
-       `Server2025_ARM64`; add them to `Arch::inf2cat_os` in `tools/xtask/src/cli.rs` if ARM64 Server
-       is ever targeted.
+     - OS list for x64: `10_VB_X64,ServerFE_X64,10_CO_X64,10_NI_X64,10_GE_X64,Server2025_X64`.
+     - OS list for arm64: `10_VB_ARM64,10_CO_ARM64,10_NI_ARM64,10_GE_ARM64`.
+     - `10_VB` includes build 19044. The models decoration controls the exact minimum
+       installable build. The ARM64 catalog targets client releases.
   9. With `--sign`, it signs the `.cat`.
   - Any failing step stops the run with a message naming the tool, its exit code and the full
     command line (with signtool's `/p` value redacted). The exit status is non-zero.
@@ -162,9 +158,30 @@ target/package/<x64|arm64>/
 
 ## Framework version and OS floor
 
-The four drivers target KMDF 1.23 on Windows 10 build 16299 and later.
-A single models section per architecture binds every supported USB hardware ID to
-`AmtPtpDeviceUsbKm`, including Wellspring 8 and the USB Magic Trackpad 2.
+The four drivers target KMDF 1.31 starting at Windows 10 21H2 (build 19044). KMDF 1.31 was first
+available in Windows 10 2004, which also introduced the Bluetooth filter's `ExAllocatePool2`
+dependency. [KMDF version history](https://learn.microsoft.com/en-us/windows-hardware/drivers/wdf/kmdf-version-history)
+
+Each architecture's INF has two models sections with the same
+hardware IDs. Both bind every supported USB device to `AmtPtpDeviceUsbKm`, including Wellspring 8
+and the USB Magic Trackpad 2.
+
+- From build 19044 through 21999, USB, SPI and Bluetooth `Col01` install the inbox
+  `mshidkmdf.sys` function driver using the package's legacy service declaration.
+- Starting with build 22000, those three stacks use `Include = MsHidKmdf.inf` and the matching
+  `MsHidKmdf.NT`, `.NT.HW` and `.NT.Services` sections. Windows supplies the function service, and
+  this package installs the corresponding KMDF lower filter. Microsoft introduced the inbox INF
+  in build 22000. [Microsoft KMDF HID sample](https://github.com/microsoft/Windows-driver-samples/blob/main/hid/vhidmini2/driver/kmdf/vhidmini.inx)
+
+### Changes since KMDF 1.23
+
+| Change | How it applies to this package |
+| --- | --- |
+| 1.25 introduced an optional lower runtime version for a driver built with a newer framework. Microsoft lists no further changes for 1.27 and 1.29. | 1.31 is both the target and the runtime requirement. The Rust WDF initializers can use the compile-time structure sizes. [WDF version targeting](https://learn.microsoft.com/en-us/windows-hardware/drivers/wdf/building-a-wdf-driver-for-multiple-versions-of-windows) |
+| 1.25 added `WdfDriverOpenPersistentStateRegistryKey` for driver-wide state written at runtime. | The drivers keep their runtime state in WDF object contexts. [Persistent state key](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdfdriver/nf-wdfdriver-wdfdriveropenpersistentstateregistrykey) |
+| 1.31 made `WdfDeviceGetSystemPowerAction` more accurate for the power policy owner. | USB, SPI and the Bluetooth `Col01` filter now record the framework's `POWER_ACTION` as `SystemPowerAction` in their D0 entry and exit ETW events. The filters use it for diagnostics. [Power action API](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdfdevice/nf-wdfdevice-wdfdevicegetsystempoweraction) |
+| `WdfDeviceSetDeviceInterfaceStateEx` can control a device interface before PnP start. `WdfPdoInitRemovePowerDependencyOnParent` can decouple a child PDO. Directed PoFx depends on an appropriate power policy. | HIDCLASS publishes the HID interfaces. These drivers filter existing devices, while the underlying stacks own their PDOs and power policy. [Interface state](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdfdevice/nf-wdfdevice-wdfdevicesetdeviceinterfacestateex) · [Child PDO power](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdfpdo/nf-wdfpdo-wdfpdoinitremovepowerdependencyonparent) · [Directed PoFx](https://learn.microsoft.com/en-us/windows-hardware/drivers/kernel/introduction-to-the-directed-power-management-framework) |
+| Windows 10 1903 introduced declarative filter registration in INFs. | All four services use `AddFilter` with `FilterPosition = Lower`. The function drivers come from the same Microsoft services selected above. [AddFilter directive](https://learn.microsoft.com/en-us/windows-hardware/drivers/install/inf-addfilter-directive) |
 
 ## One INF
 
@@ -174,7 +191,7 @@ to the Bluetooth Magic Trackpad 2 collections (`Col01` filter, `Col02` null devi
 The package includes `AmtPtpBthFilter`, a lower
 filter on the Bluetooth HID device node (`BTHENUM\{00001124-...}_VID&0001004c_PID&0265`). Its
 `AmtPtpBthFilter_Device` sections pull in the inbox `hidbth.inf`/`input.inf` sections (`Include`/
-`Needs`) and add `LowerFilters`; the vendor collection it creates, `Col03`, is bound to the null
+`Needs`) and register the lower filter with `AddFilter`. The vendor collection it creates, `Col03`, is bound to the null
 device. See [bthfilter.md](bthfilter.md#inf).
 
 The port first also kept the standalone `packaging/AmtPtpHidFilter.inx` (the C
@@ -185,8 +202,7 @@ The port first also kept the standalone `packaging/AmtPtpHidFilter.inx` (the C
   collections) against the universal INF's UsbUm binding (crosscut C2);
 - its USB hardware IDs hard-coded `REV_0855`, so they missed other firmware revisions such as
   `REV_0871`;
-- the universal INF already contains every HidFilter install section (`.Services` with
-  `mshidkmdf`, the `LowerFilters` AddReg, the `.Wdf` section) for the Bluetooth trackpad.
+- the universal INF already contained the HidFilter install sections for the Bluetooth trackpad.
 
 `cargo xtask package` therefore builds one package and has no `--inf` option any more. The INF
 changes below that name HidFilter describe that removed template.
@@ -239,9 +255,9 @@ The following comparison and verification records describe the original port. St
   no technical reason.
 - **Rejected alternative: moving UMDF to `12,UMDF`.** It would change the install location (P1).
 
-### InfVerif mode
+### InfVerif mode in the original port
 
-- xtask runs **`InfVerif /u` (Universal)**.
+- The original packaging pipeline ran **`InfVerif /u` (Universal)**.
 - The C projects all had `DriverTargetPlatform Universal`, which is what the MSBuild InfVerif
   step used.
 - `/w` (Windows Driver, DCH) and `/h` (WHQL) would require an install-semantics change. Under
@@ -261,7 +277,7 @@ The following comparison and verification records describe the original port. St
   installed. P1 forbids that.
 - Under `/u` the same findings are `WARNING(2084)`. They are accepted, as they were for the C
   package. With changes 1 to 3, `/u` reports no errors.
-- Moving to `/w` (DCH) would be a separate, deliberate change.
+- The current pipeline uses `/w` with the [build-specific install sections](#framework-version-and-os-floor).
 
 ## The old MSBuild / Azure DevOps pipeline no longer applies
 
@@ -277,8 +293,8 @@ The following comparison and verification records describe the original port. St
   - host tests and Clippy, and Clippy (`cargo check` with `clippy-driver`) of the driver workspace
     for x64 and ARM64, scoped to the packages a change affects;
   - the **Driver package** job, for x64 and ARM64, whenever a driver, the INF template or xtask
-    changes: `cargo xtask package --arch <arch> --release`, unsigned. It links both workspaces,
-    compiles the `Resource.rc` files and runs stampinf, `InfVerif /u` and Inf2Cat, which Clippy
+    changes: `cargo xtask package --arch <arch> --release`, unsigned. It links the KMDF drivers,
+    compiles the `Resource.rc` files and runs stampinf, `InfVerif /w` and Inf2Cat, which Clippy
     alone never exercises. The kit comes from the same NuGet packages as the Clippy jobs;
     `.github/scripts/rust-ci.ps1 -PackagingTools` also extracts the WDK's `bin` and `tools`
     directories (stampinf, Inf2Cat, InfVerif) from the x64 WDK package.

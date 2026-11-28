@@ -391,12 +391,16 @@ unsafe extern "C" fn evt_device_d0_entry(
     device: WDFDEVICE,
     previous_state: WDF_POWER_DEVICE_STATE,
 ) -> NTSTATUS {
+    // SAFETY: WDF supplies the live device to this D0 entry callback.
+    let system_power_action =
+        unsafe { call_unsafe_wdf_function_binding!(WdfDeviceGetSystemPowerAction, device) };
     tlg::write_event!(
         PROVIDER,
         "D0Entry",
         level(Informational),
         keyword(KW_DEVICE),
-        i32("PreviousState", &previous_state)
+        i32("PreviousState", &previous_state),
+        i32("SystemPowerAction", &system_power_action)
     );
     // SAFETY: power callback of a live device of this driver.
     let ctx = unsafe { device_context(device) };
@@ -411,6 +415,9 @@ unsafe extern "C" fn evt_device_d0_exit(
     device: WDFDEVICE,
     target_state: WDF_POWER_DEVICE_STATE,
 ) -> NTSTATUS {
+    // SAFETY: WDF supplies the live device to this D0 exit callback.
+    let system_power_action =
+        unsafe { call_unsafe_wdf_function_binding!(WdfDeviceGetSystemPowerAction, device) };
     // SAFETY: power callback of a live device of this driver.
     let ctx = unsafe { device_context(device) };
     let status = d0_exit(&mut Filter::new(ctx), &ctx.state);
@@ -419,7 +426,8 @@ unsafe extern "C" fn evt_device_d0_exit(
         "D0Exit",
         level(Informational),
         keyword(KW_DEVICE),
-        i32("TargetState", &target_state)
+        i32("TargetState", &target_state),
+        i32("SystemPowerAction", &system_power_action)
     );
     status
 }

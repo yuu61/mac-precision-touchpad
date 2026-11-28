@@ -52,10 +52,10 @@ The drivers are written in Rust on top of [windows-drivers-rs](https://github.co
 
 | Binary | Bus | Framework | Source |
 |---|---|---|---|
-| `AmtPtpDeviceUsbKm.sys` | USB (Wellspring MacBooks, T2, Magic Trackpad 2) | KMDF 1.23 | `drivers/km/AmtPtpDeviceUsbKm`, `crates/amtptp-usbkm-core` |
-| `AmtPtpDeviceSpiKm.sys` | SPI | KMDF 1.23 | `drivers/km/AmtPtpDeviceSpiKm`, `crates/amtptp-spikm-core` |
-| `AmtPtpHidFilter.sys` | Bluetooth (Magic Trackpad 2) | KMDF 1.23 | `drivers/km/AmtPtpHidFilter`, `crates/amtptp-hidfilter-core` |
-| `AmtPtpBthFilter.sys` | Bluetooth (Magic Trackpad 2), below HidBth | KMDF 1.23 | `drivers/km/AmtPtpBthFilter`, `crates/amtptp-hidfilter-core` (`bth`) |
+| `AmtPtpDeviceUsbKm.sys` | USB (Wellspring MacBooks, T2, Magic Trackpad 2) | KMDF 1.31 | `drivers/km/AmtPtpDeviceUsbKm`, `crates/amtptp-usbkm-core` |
+| `AmtPtpDeviceSpiKm.sys` | SPI | KMDF 1.31 | `drivers/km/AmtPtpDeviceSpiKm`, `crates/amtptp-spikm-core` |
+| `AmtPtpHidFilter.sys` | Bluetooth (Magic Trackpad 2) | KMDF 1.31 | `drivers/km/AmtPtpHidFilter`, `crates/amtptp-hidfilter-core` |
+| `AmtPtpBthFilter.sys` | Bluetooth (Magic Trackpad 2), below HidBth | KMDF 1.31 | `drivers/km/AmtPtpBthFilter`, `crates/amtptp-hidfilter-core` (`bth`) |
 
 ### Repository layout
 
@@ -69,7 +69,8 @@ The drivers are written in Rust on top of [windows-drivers-rs](https://github.co
 
 ### Driver build and tests
 
-The minimum OS is Windows 10 1709 (KMDF 1.23). The drivers target x64 and ARM64.
+The drivers target x64 and ARM64 on Windows 10 21H2 (build 19044) and later, including
+Windows 10 LTSC 2021 and Windows 11. See [KMDF version and OS requirements](docs/rust-port/packaging.md#framework-version-and-os-floor).
 
 Requirements: Rust (stable, with the `aarch64-pc-windows-msvc` target for ARM64), Visual Studio with the C++ build tools (x64 and ARM64), the Windows Driver Kit, and LLVM (`winget install LLVM.LLVM`, used by bindgen).
 

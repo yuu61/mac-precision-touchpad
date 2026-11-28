@@ -69,7 +69,7 @@ impl Arch {
         }
     }
 
-    /// Value for `stampinf -a` (replaces `$ARCH$`, e.g. `NTamd64.10.0...16299`).
+    /// Value for `stampinf -a` (replaces `$ARCH$`, e.g. `NTamd64.10.0...19044`).
     pub const fn stampinf_arch(self) -> &'static str {
         match self {
             Self::X64 => "amd64",
@@ -77,22 +77,14 @@ impl Arch {
         }
     }
 
-    /// `Inf2Cat /os:` list: every Windows 10/11 release from 1709 (RS3, the
-    /// KMDF 1.23 / INF `NT$ARCH$.10.0...16299` floor) on, as accepted by the
-    /// WDK 10.0.28000 `Inf2Cat` (`Inf2Cat /?`). x64 also lists the server ids
-    /// at or above that floor (`ServerRS5` = 2019, `ServerFE` = 2022, 2025);
-    /// `Server2016_X64` (1607) is below the floor and `Server10_X64` is the
-    /// generic pre-1709 id, so both are omitted. ARM64 is client only.
+    /// Catalog OS IDs for Windows 10 21H2 and later. `Inf2Cat` uses `10_VB`
+    /// for the Windows 10 build family that includes 19044. The models
+    /// decoration enforces the exact build floor. x64 also covers Server 2022
+    /// (`ServerFE`) and 2025. ARM64 is client only.
     pub const fn inf2cat_os(self) -> &'static str {
         match self {
-            Self::X64 => {
-                "10_RS3_X64,10_RS4_X64,10_RS5_X64,ServerRS5_X64,10_19H1_X64,10_VB_X64,\
-                 ServerFE_X64,10_CO_X64,10_NI_X64,10_GE_X64,Server2025_X64"
-            }
-            Self::Arm64 => {
-                "10_RS3_ARM64,10_RS4_ARM64,10_RS5_ARM64,10_19H1_ARM64,10_VB_ARM64,\
-                 10_CO_ARM64,10_NI_ARM64,10_GE_ARM64"
-            }
+            Self::X64 => "10_VB_X64,ServerFE_X64,10_CO_X64,10_NI_X64,10_GE_X64,Server2025_X64",
+            Self::Arm64 => "10_VB_ARM64,10_CO_ARM64,10_NI_ARM64,10_GE_ARM64",
         }
     }
 
@@ -345,7 +337,7 @@ mod tests {
                 .split(',')
                 .all(|o| o.ends_with("_ARM64"))
         );
-        assert!(Arch::X64.inf2cat_os().starts_with("10_RS3_X64,"));
-        assert!(Arch::Arm64.inf2cat_os().starts_with("10_RS3_ARM64,"));
+        assert!(Arch::X64.inf2cat_os().starts_with("10_VB_X64,"));
+        assert!(Arch::Arm64.inf2cat_os().starts_with("10_VB_ARM64,"));
     }
 }
