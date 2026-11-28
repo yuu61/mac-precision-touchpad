@@ -223,6 +223,23 @@ fn replay(e: &Expect) -> Tally {
             tally.add(SHORT_FRAME);
             continue;
         }
+        if len > LOWER_READ_BUFFER_LEN as u64 && gate_len >= 46 {
+            assert_eq!(
+                result,
+                Err(STATUS_DEVICE_DATA_ERROR),
+                "{ctx}: oversize frame (> 1024)"
+            );
+            assert_eq!(qpc_calls, 0, "{ctx}: no clock sample for an oversize frame");
+            let outlen: usize = r.dec("outlen");
+            tally.add(if outlen == 0 {
+                FW_RETRIEVE
+            } else if outlen < REPORT_LEN {
+                FW_COPY
+            } else {
+                DELIVERED
+            });
+            continue;
+        }
         assert!(
             !is_b9,
             "{ctx}: a b9 record reads past len, so it is a short frame"

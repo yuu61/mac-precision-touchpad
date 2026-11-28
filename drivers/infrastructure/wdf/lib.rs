@@ -45,6 +45,7 @@ pub mod handle;
 pub mod hid;
 pub mod init;
 pub mod ntstatus;
+pub mod queue;
 pub mod request;
 pub mod sync;
 pub mod time;

@@ -8,7 +8,9 @@ use core::ffi::c_void;
 use core::ptr::null_mut;
 use core::sync::atomic::{AtomicPtr, Ordering};
 
-use amtptp_usb_bt::bluetooth::{ContactTracker, DeviceState, ReadTicket, ReadTracker};
+use amtptp_usb_bt::bluetooth::{
+    CompletionQueue, ContactTracker, DeviceState, NtStatus, ReadTicket, ReadTracker,
+};
 
 use wdf_support::declare_context_type;
 use wdf_support::handle::{ContextPtr, WdfHandle};
@@ -21,6 +23,25 @@ use wdk_sys::{
 
 /// A lower read (an `IRP_MJ_READ` of the data source) as the read tracker stores it.
 pub(crate) type LowerRead = WdfHandle<WDFREQUEST__>;
+/// An upper `IOCTL_HID_READ_REPORT` queued for serialized completion outside the spinlock.
+pub(crate) type QueuedCompletion = (WdfHandle<WDFREQUEST__>, NtStatus);
+
+/// Serialized lower-read tracking, contact liftoff tracking, and FIFO upper-read completion state.
+pub(crate) struct InputPipeline {
+    pub(crate) reads: ReadTracker<LowerRead>,
+    pub(crate) contacts: ContactTracker,
+    pub(crate) completions: CompletionQueue<QueuedCompletion>,
+}
+
+impl InputPipeline {
+    pub(crate) const fn new() -> Self {
+        Self {
+            reads: ReadTracker::new(),
+            contacts: ContactTracker::new(),
+            completions: CompletionQueue::new(),
+        }
+    }
+}
 
 /// Longest string kept from the data source, in UTF-16 units (HID strings hold at most 126).
 pub(crate) const MAX_STRING_UNITS: usize = 127;
@@ -98,11 +119,8 @@ pub(crate) struct DeviceContext {
     hid_transport_recovery_timer: AtomicPtr<WDFTIMER__>,
     /// `HidTransportRecoveryWorkItem`: re-issues a lower read at `PASSIVE_LEVEL`.
     hid_transport_recovery_work_item: AtomicPtr<WDFWORKITEM__>,
-    /// The lower reads in flight and their epoch. The spin lock is created in `create_device`, before any callback can run.
-    pub(crate) reads: SpinLocked<ReadTracker<LowerRead>>,
-    /// Active hardware-ID contacts and liftoff state, protected by a spin lock created in
-    /// `create_device`.
-    pub(crate) contacts: SpinLocked<ContactTracker>,
+    /// Lower-read epoch, contact tracker, and upper-completion queue under one spinlock.
+    pub(crate) pipeline: SpinLocked<InputPipeline>,
     /// The data source's strings (not in C). The spin lock is created in `create_device`.
     pub(crate) strings: SpinLocked<SourceStrings>,
     /// The link the interface notification found, for the source work item (not in C). The spin
@@ -130,8 +148,7 @@ impl DeviceContext {
             hid_io_target: AtomicPtr::new(null_mut()),
             hid_transport_recovery_timer: AtomicPtr::new(null_mut()),
             hid_transport_recovery_work_item: AtomicPtr::new(null_mut()),
-            reads: SpinLocked::new(ReadTracker::new()),
-            contacts: SpinLocked::new(ContactTracker::new()),
+            pipeline: SpinLocked::new(InputPipeline::new()),
             strings: SpinLocked::new(SourceStrings::UNKNOWN),
             pending_link: SpinLocked::new(PendingLink {
                 units: [0; MAX_LINK_UNITS],

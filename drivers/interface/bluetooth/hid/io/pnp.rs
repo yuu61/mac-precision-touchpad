@@ -42,7 +42,6 @@ pub(crate) fn d0_exit(io: &mut Filter<'_>, state: &DeviceState) -> NtStatus {
     state.leave_d0();
     io.stop_recovery_timer();
     let _cancelled = io.cancel_in_flight_reads();
-    io.with_contacts(amtptp_core::domain::ContactTracker::reset);
     while let Ok(request) = io.retrieve_next_parked_read() {
         io.complete(request, STATUS_CANCELLED);
     }
@@ -110,12 +109,11 @@ pub(crate) fn source_closed(io: &mut Filter<'_>, state: &DeviceState) {
     state.set_device_configured(false);
     io.stop_recovery_timer();
     let _cancelled = io.cancel_in_flight_reads();
-    io.with_contacts(amtptp_core::domain::ContactTracker::reset);
 }
 
 /// Caches the QPC frequency, resets tracked contacts, and starts a new reporting session.
 fn mark_configured(io: &mut Filter<'_>, state: &DeviceState) {
-    io.with_contacts(amtptp_core::domain::ContactTracker::reset);
+    io.reset_contacts();
     let frequency = io.query_performance_frequency();
     state.set_qpc_frequency(frequency);
     state.set_device_configured(true);

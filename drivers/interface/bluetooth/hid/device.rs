@@ -162,19 +162,10 @@ impl AddDevice {
         };
         self.device = device;
         self.context = context;
-        // The read tracker's lock (not in C), parented to the device. Its failure fails the device
-        // creation step, like the C failures of this step.
         // SAFETY: PASSIVE_LEVEL; the context was just initialized and no callback can reach it yet;
-        // the device outlives its child lock.
-        let lock_status = unsafe { (*context).reads.create(device.cast()) };
-        if !NT_SUCCESS(lock_status) {
-            Self::trace_failure("WdfSpinLockCreate", lock_status);
-            return lock_status;
-        }
-        // The data source's locks (not in C), created the same way.
-        // SAFETY: as above.
+        // the device outlives its child locks.
         let lock_status = unsafe {
-            let status = (*context).contacts.create(device.cast());
+            let status = (*context).pipeline.create(device.cast());
             if NT_SUCCESS(status) {
                 let status = (*context).strings.create(device.cast());
                 if NT_SUCCESS(status) {
@@ -373,8 +364,7 @@ unsafe extern "C" fn evt_device_prepare_hardware(
     let status = prepare_hardware(&ctx.state);
     // SAFETY: live device context; spinlock created in `create_device`.
     unsafe {
-        ctx.contacts
-            .with(amtptp_usb_bt::bluetooth::ContactTracker::reset);
+        ctx.pipeline.with(|p| p.contacts.reset());
     };
     tlg::write_event!(
         PROVIDER,

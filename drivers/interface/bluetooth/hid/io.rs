@@ -8,12 +8,11 @@ use amtptp_core::hid::hidport::{
     HID_STRING_ID_IMANUFACTURER, HID_STRING_ID_IPRODUCT, HID_STRING_ID_ISERIALNUMBER,
 };
 use amtptp_core::hid::ioctl::IOCTL_HID_SET_FEATURE;
-use amtptp_core::hid::read_tracker::MAX_IN_FLIGHT_READS;
 use amtptp_usb_bt::bluetooth::bth::{PADDED_REPORT_LEN, PaddedReport, unpad_report};
 use amtptp_usb_bt::bluetooth::{
-    ContactTracker, FeatureChange, LowerReadClass, NtStatus, ReadTicket, ReadTracker,
-    STATUS_INVALID_DEVICE_REQUEST, STATUS_INVALID_DEVICE_STATE, XferPacket, XferPacketMut,
-    decode_set_feature,
+    CompletionQueue, ContactTracker, DeviceState, EnqueueOutcome, FeatureChange, LowerReadClass,
+    NtStatus, PostSendAction, ReadTicket, ReadTracker, STATUS_INVALID_DEVICE_REQUEST,
+    STATUS_INVALID_DEVICE_STATE, XferPacket, XferPacketMut, decode_set_feature,
 };
 use tracelogging as tlg;
 use wdf_support::handle::{ContextPtr, WdfHandle};
@@ -22,6 +21,10 @@ use wdf_support::init::{
     object_attributes_init_context_type, request_parameters_init, sync_send_options,
 };
 use wdf_support::ntstatus::{NT_SUCCESS, STATUS_INVALID_PARAMETER};
+use wdf_support::queue::{
+    cancel_and_dereference_read, cancel_referenced_reads, collect_reads_to_cancel,
+    drain_completions, reference_read,
+};
 use wdf_support::request::Request;
 use wdk_sys::{
     _WDF_DEVICE_FAILED_ACTION, HID_XFER_PACKET, PWDF_REQUEST_COMPLETION_PARAMS, ULONG, ULONG_PTR,
@@ -30,8 +33,8 @@ use wdk_sys::{
 };
 
 use crate::context::{
-    DeviceContext, LowerRead, WORKER_REQUEST_CONTEXT_TYPE_INFO, WorkerRequestContext,
-    worker_request_get_context,
+    DeviceContext, LowerRead, QueuedCompletion, WORKER_REQUEST_CONTEXT_TYPE_INFO,
+    WorkerRequestContext, worker_request_get_context,
 };
 use crate::{KW_DEVICE, KW_HID, KW_INPUT, PROVIDER};
 
@@ -518,62 +521,104 @@ impl Filter<'_> {
         unsafe { object_delete(memory) };
     }
 
-    fn with_reads<R, F: FnOnce(&mut ReadTracker<LowerRead>) -> R>(&mut self, f: F) -> R {
-        // SAFETY: the lock was created in `create_device` before any callback could run; every
-        // caller runs at <= DISPATCH_LEVEL; `f` only touches the tracker and atomics (the core's
-        // contract), so it neither re-enters the lock nor runs a callback of this driver.
-        unsafe { self.ctx.reads.with(f) }
+    fn in_flight_reads(&mut self) -> usize {
+        // SAFETY: spinlock created in `create_device`; IRQL <= DISPATCH_LEVEL; pure query.
+        unsafe { self.ctx.pipeline.with(|p| p.reads.in_flight()) }
     }
 
-    fn with_contacts<R, F: FnOnce(&mut ContactTracker) -> R>(&mut self, f: F) -> R {
-        // SAFETY: the lock was created in `create_device` before any callback could run; every
-        // caller runs at <= DISPATCH_LEVEL; `f` only touches the contact tracker.
-        unsafe { self.ctx.contacts.with(f) }
+    fn reset_contacts(&mut self) {
+        // SAFETY: spinlock created in `create_device`; IRQL <= DISPATCH_LEVEL; pure reset.
+        unsafe { self.ctx.pipeline.with(|p| p.contacts.reset()) };
+    }
+
+    fn prepare_lower_read(&mut self, state: &DeviceState, read: LowerRead) -> Option<ReadTicket> {
+        // SAFETY: spinlock created in `create_device`; IRQL <= DISPATCH_LEVEL; pure tracker update.
+        unsafe {
+            self.ctx.pipeline.with(|p| {
+                if state.device_configured() {
+                    p.reads.prepare(read)
+                } else {
+                    None
+                }
+            })
+        }
+    }
+
+    fn complete_lower_read_send(
+        &mut self,
+        read: LowerRead,
+        ticket: ReadTicket,
+        sent: bool,
+    ) -> PostSendAction {
+        // SAFETY: spinlock created in `create_device`; if `CancelSent` is returned, the completion
+        // routine has not yet unregistered or deleted `read`, so `reference_read` is valid under lock.
+        let action = unsafe {
+            self.ctx.pipeline.with(|p| {
+                let action = p.reads.complete_send(read, ticket, sent);
+                if action == PostSendAction::CancelSent {
+                    reference_read(read.get());
+                }
+                action
+            })
+        };
+        if action == PostSendAction::CancelSent {
+            // SAFETY: outside `pipeline` lock at IRQL <= DISPATCH_LEVEL; `read` was referenced above
+            // and `WdfRequestSend` succeeded.
+            unsafe { cancel_and_dereference_read(read.get()) };
+        }
+        action
+    }
+
+    const fn pack_completion(request: UpperRequest, status: NtStatus) -> QueuedCompletion {
+        (WdfHandle::new(request), status)
+    }
+
+    fn with_pipeline<R, F>(&mut self, f: F) -> R
+    where
+        F: FnOnce(
+            &mut Self,
+            &mut ReadTracker<LowerRead>,
+            &mut ContactTracker,
+            &mut CompletionQueue<QueuedCompletion>,
+        ) -> R,
+    {
+        let mut inner = Self {
+            ctx: self.ctx,
+            trace_input_drop: self.trace_input_drop,
+        };
+        // SAFETY: `pipeline` spinlock was created in `create_device`; callers run at IRQL <= DISPATCH_LEVEL
+        // and never call `WdfRequestSend`, `WdfRequestCancelSentRequest`, `WdfRequestComplete`, or re-enter `pipeline`.
+        unsafe {
+            self.ctx
+                .pipeline
+                .with(|p| f(&mut inner, &mut p.reads, &mut p.contacts, &mut p.completions))
+        }
+    }
+
+    fn drain_upper_completions(&mut self, outcome: EnqueueOutcome<QueuedCompletion>) {
+        // SAFETY: `pipeline` lock is initialized and NOT held here; IRQL <= DISPATCH_LEVEL.
+        unsafe {
+            drain_completions(
+                &self.ctx.pipeline,
+                outcome,
+                |p| &mut p.completions,
+                |(request, status)| self.complete(request.get(), status),
+            );
+        }
     }
 
     fn cancel_in_flight_reads(&mut self) -> usize {
-        let mut held: [WDFREQUEST; MAX_IN_FLIGHT_READS] = [null_mut(); MAX_IN_FLIGHT_READS];
-        let take = |reads: &mut ReadTracker<LowerRead>| {
-            let suspended = reads.suspend();
-            let mut count = 0_usize;
-            for (slot, read) in held.iter_mut().zip(suspended.iter()) {
-                // SAFETY: a registered lower read is alive: its completion routine unregisters it
-                // under this lock before deleting it. The reference keeps the handle valid after the
-                // lock is released. NULL tag, as WdfObjectReference.
-                unsafe {
-                    call_unsafe_wdf_function_binding!(
-                        WdfObjectReferenceActual,
-                        read.get().cast(),
-                        null_mut(),
-                        0,
-                        core::ptr::null()
-                    );
-                }
-                *slot = read.get();
-                count += 1;
-            }
-            count
+        // SAFETY: `pipeline` lock was created in `create_device`; `collect_reads_to_cancel` only
+        // references live `Sent` lower reads protected by this lock.
+        let (held, count) = unsafe {
+            self.ctx.pipeline.with(|p| {
+                p.contacts.reset();
+                let suspended = p.reads.suspend();
+                collect_reads_to_cancel(&suspended)
+            })
         };
-        // SAFETY: as in `with_reads`; `take` only references objects (no callback can run from it).
-        let count = unsafe { self.ctx.reads.with(take) };
-        for &read in held.iter().take(count) {
-            // SAFETY: referenced above, so the handle is valid even if the read has completed and
-            // been deleted meanwhile; IRQL <= DISPATCH_LEVEL. Cancelling can run the completion
-            // routine synchronously, which takes the read lock: the lock is not held here. A read
-            // that was registered but not sent yet only gets its IRP's cancel flag set; its
-            // completion is stale anyway.
-            unsafe {
-                let _cancelled =
-                    call_unsafe_wdf_function_binding!(WdfRequestCancelSentRequest, read);
-                call_unsafe_wdf_function_binding!(
-                    WdfObjectDereferenceActual,
-                    read.cast(),
-                    null_mut(),
-                    0,
-                    core::ptr::null()
-                );
-            }
-        }
+        // SAFETY: outside `pipeline` lock at IRQL <= DISPATCH_LEVEL; `held[..count]` were referenced above.
+        unsafe { cancel_referenced_reads(&held, count) };
         count
     }
 

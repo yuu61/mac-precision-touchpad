@@ -662,6 +662,12 @@ fn b9_bytes_past_length_are_never_read() {
         .unwrap();
     assert_eq!(r[1..6], [0x03, 0xF2, 0x12, 0x7A, 0x12]);
     assert_eq!(lower_read_length(45), Err(STATUS_DEVICE_DATA_ERROR));
+    assert_eq!(lower_read_length(1024), Ok(1024));
+    assert_eq!(lower_read_length(1025), Err(STATUS_DEVICE_DATA_ERROR));
+    assert_eq!(
+        lower_read_length(0x1_0000_004C),
+        Err(STATUS_DEVICE_DATA_ERROR)
+    );
 }
 
 #[test]

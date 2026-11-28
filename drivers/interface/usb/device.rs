@@ -12,7 +12,6 @@
 //! Not present, as in C: `ReleaseHardware`, `SelfManagedIo`*, `SurpriseRemoval`, QueryRemove/Stop, power policy
 //! callbacks, idle/wake settings.
 
-use amtptp_core::domain::ContactTracker;
 use amtptp_usb_bt::usb::{lifecycle, wellspring};
 use core::sync::atomic::Ordering;
 use tracelogging as tlg;
@@ -20,7 +19,8 @@ use wdf_support::init::{
     object_attributes_init, object_attributes_init_context_type, pnppower_event_callbacks_init,
     workitem_config_init,
 };
-use wdf_support::ntstatus::{NT_SUCCESS, STATUS_INVALID_DEVICE_STATE};
+use wdf_support::ntstatus::{NT_SUCCESS, STATUS_CANCELLED, STATUS_INVALID_DEVICE_STATE};
+use wdf_support::queue::drain_manual_queue;
 use wdk_sys::{
     NTSTATUS, PWDFDEVICE_INIT, WDF_POWER_DEVICE_STATE, WDFCMRESLIST, WDFDEVICE, WDFDRIVER,
     call_unsafe_wdf_function_binding,
@@ -139,7 +139,7 @@ unsafe fn create_device(mut device_init: PWDFDEVICE_INIT) -> NTSTATUS {
 
     // SAFETY: PASSIVE_LEVEL; created once, before any callback can use the context; the device
     // outlives its child lock.
-    let status = unsafe { context.contacts.create(device.cast()) };
+    let status = unsafe { context.pipeline.create(device.cast()) };
     if !NT_SUCCESS(status) {
         tlg::write_event!(
             PROVIDER,
@@ -205,9 +205,7 @@ unsafe extern "C" fn evt_device_prepare_hardware(
     let mut io = unsafe { UsbIo::new(device, context) };
     let status = lifecycle::prepare_hardware(&context.state, &mut io);
     // SAFETY: live device context; spinlock created in `create_device`; no WDF calls inside.
-    unsafe {
-        context.contacts.with(ContactTracker::reset);
-    };
+    unsafe { context.reset_contacts() };
     let config = context.state.config();
     let pipe = context.state.interrupt_pipe().map_or(-1, i32::from);
     tlg::write_event!(
@@ -248,9 +246,7 @@ unsafe extern "C" fn evt_device_d0_entry(
     // SAFETY: `device` owns `context`; D0Entry runs at PASSIVE_LEVEL.
     let mut io = unsafe { UsbIo::new(device, context) };
     // SAFETY: live device context; spinlock created in `create_device`; no WDF calls inside.
-    unsafe {
-        context.contacts.with(ContactTracker::reset);
-    };
+    unsafe { context.reset_contacts() };
     let status = lifecycle::d0_entry(&context.state, &mut io);
     let wellspring = context.state.wellspring_mode_on();
     if NT_SUCCESS(status) {
@@ -309,9 +305,9 @@ unsafe extern "C" fn evt_device_d0_exit(
         );
     }
     // SAFETY: live device context; spinlock created in `create_device`; no WDF calls inside.
-    unsafe {
-        context.contacts.with(ContactTracker::reset);
-    };
+    unsafe { context.reset_contacts() };
+    // SAFETY: `input_queue` is the device's manual `READ_REPORT` queue; reader is already stopped.
+    let _drained = unsafe { drain_manual_queue(context.input_queue(), STATUS_CANCELLED) };
     let mode_switch_status = outcome.mode_switch_status;
     if !NT_SUCCESS(mode_switch_status) {
         tlg::write_event!(

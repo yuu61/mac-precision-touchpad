@@ -21,7 +21,8 @@ use std::collections::{BTreeMap, VecDeque};
 use amtptp_core::spi::device::{APPLE_VENDOR_ID, SpiTrackpadInfo, lookup_trackpad};
 use amtptp_core::spi::runtime::{
     ContactTracker, D0_EXIT_DRAIN_STATUS, DeviceRuntime, DeviceStatus, LowerReadOrigin,
-    RECOVERY_TIMER_DUE_TIME, ReadTicket, ReadTracker,
+    MAX_READ_RETRIES, MAX_RECOVERY_RETRIES, READ_RETRY_INITIAL_DUE_TIME, RECOVERY_TIMER_DUE_TIME,
+    ReadTicket, ReadTracker, RecoveryAction, ReplenishAction,
 };
 use amtptp_core::spi::status::{NtStatus, STATUS_SUCCESS};
 use amtptp_core::spi::wire::LOWER_READ_BUFFER_LEN;
@@ -30,8 +31,9 @@ use common::{Record, Tally, load, prefill, to_hex, wdf_failures};
 const QPC_FREQUENCY: i64 = 10_000_000;
 
 /// The sequences whose C behaviour was a defect (see the module docs), with their record counts.
-const SUPERSEDED: [(&str, usize); 5] = [
+const SUPERSEDED: [(&str, usize); 6] = [
     ("smio-fail-timer-ok-backlog", 12),
+    ("smio-fail-timer-fail", 6),
     ("timer-fires-in-d3", 6),
     ("restart-fail-rearms-timer", 8),
     ("stale-timer-after-restart-ok", 9),
@@ -58,6 +60,7 @@ struct Framework {
     qpc_calls: usize,
     /// Mode switches sent (SelfManagedIoInit/Restart and the timer).
     set_state_calls: usize,
+    device_failed: bool,
     last_completed: Option<String>,
 }
 
@@ -77,6 +80,7 @@ impl Framework {
             completions: Vec::new(),
             qpc_calls: 0,
             set_state_calls: 0,
+            device_failed: false,
             last_completed: None,
         }
     }
@@ -219,15 +223,21 @@ impl Framework {
                     self.set_state_calls += 1;
                     let lower = hex_status(arg(args, "lower_setfeature"));
                     let mut q = 0;
-                    let configured =
-                        self.rt
-                            .finish_recovery(&mut self.tracker, ticket, lower, || {
-                                q += 1;
-                                QPC_FREQUENCY
-                            });
+                    let action = self
+                        .rt
+                        .finish_recovery(&mut self.tracker, ticket, lower, || {
+                            q += 1;
+                            QPC_FREQUENCY
+                        });
                     self.qpc_calls += q;
-                    if configured {
-                        self.issue_backlog(wdf);
+                    match action {
+                        RecoveryAction::Configured => self.issue_backlog(wdf),
+                        RecoveryAction::Retry(due) => {
+                            self.timer_armed = true;
+                            self.timer_due = due;
+                        }
+                        RecoveryAction::FailDevice => self.device_failed = true,
+                        RecoveryAction::Ignored => {}
                     }
                 }
                 "-".into()
@@ -430,13 +440,13 @@ fn power_sequences() {
         tally.get(REWRITTEN),
         SUPERSEDED.iter().map(|(_, n)| n).sum::<usize>()
     );
-    assert_eq!(tally.get(REPLAYED), 56);
+    assert_eq!(tally.get(REPLAYED), 50);
     assert_eq!(tally.total(), 100);
-    assert_eq!(events.get("D0Entry"), 8);
-    assert_eq!(events.get("D0Exit"), 6);
-    assert_eq!(events.get("SelfManagedIoInit/Restart"), 8);
-    assert_eq!(events.get("TimerCallback"), 1);
-    assert_eq!(events.get("READ_REPORT"), 19);
+    assert_eq!(events.get("D0Entry"), 7);
+    assert_eq!(events.get("D0Exit"), 5);
+    assert_eq!(events.get("SelfManagedIoInit/Restart"), 7);
+    assert_eq!(events.get("TimerCallback"), 0);
+    assert_eq!(events.get("READ_REPORT"), 17);
     assert_eq!(events.get("LowerReadComplete"), 13);
     assert_eq!(events.get("FrameworkCancelsQueued (framework action)"), 1);
 }
@@ -633,4 +643,48 @@ fn suspend_disarms_a_pending_timer() {
     ]);
     assert_eq!(fw.completions, [("u1".to_owned(), D0_EXIT_DRAIN_STATUS, 0)]);
     assert_eq!(RECOVERY_TIMER_DUE_TIME, -50_000_000);
+}
+
+/// `smio-fail-timer-fail`: failed recovery timer callbacks re-arm up to `MAX_RECOVERY_RETRIES - 1`
+/// times and then escalate to `WdfDeviceSetFailed(AttemptRestart)` instead of stranding the device.
+#[test]
+fn failed_recovery_timer_retries_then_escalates() {
+    let init = smio("SelfManagedIoInit", FAIL);
+    let cb_fail = format!("TimerCallback(lower_setfeature={FAIL})");
+    let mut fw = run(&[
+        ("D0Entry(prev=D3)", UNCONF, "-", "-", OFF),
+        (&init, UNCONF, "-", "-", ARMED),
+        ("READ_REPORT(u1,outlen=30)", UNCONF, "u1", "-", ARMED),
+    ]);
+    for _ in 1..MAX_RECOVERY_RETRIES {
+        let _ret = fw.step(&cb_fail, &[]);
+        assert!(!fw.device_failed);
+        assert_eq!(fw.timer(), ARMED);
+    }
+    let _ret = fw.step(&cb_fail, &[]);
+    assert!(fw.device_failed);
+    assert_eq!(fw.timer(), FIRED);
+}
+
+#[test]
+fn lower_read_failure_replenishes_with_backoff_and_escalates() {
+    let rt = DeviceRuntime::new();
+    let mut tracker = ReadTracker::<u32>::new();
+    rt.on_d0_entry(QPC_FREQUENCY);
+    let _out =
+        rt.on_self_managed_io_init_or_restart(&mut tracker, STATUS_SUCCESS, || QPC_FREQUENCY);
+
+    for attempt in 0..MAX_READ_RETRIES {
+        let expected_due = READ_RETRY_INITIAL_DUE_TIME * (1_i64 << attempt.min(5));
+        assert_eq!(
+            rt.note_lower_read_failure(),
+            ReplenishAction::Retry(expected_due)
+        );
+    }
+    assert_eq!(rt.note_lower_read_failure(), ReplenishAction::FailDevice);
+    rt.reset_read_failures();
+    assert_eq!(
+        rt.note_lower_read_failure(),
+        ReplenishAction::Retry(READ_RETRY_INITIAL_DUE_TIME)
+    );
 }

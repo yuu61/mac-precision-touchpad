@@ -13,7 +13,9 @@ use amtptp_usb_bt::usb::hid::{
     InternalIoctl, not_supported, read_report_forward_failed, route_internal_ioctl,
 };
 use amtptp_usb_bt::usb::input::{PacketAction, complete_read_report, process_packet};
-use amtptp_usb_bt::usb::lifecycle::{self, IoStopAction, io_stop, readers_failed};
+use amtptp_usb_bt::usb::lifecycle::{
+    self, IoStopAction, MAX_READER_RESTARTS, ReaderFailureAction, io_stop, on_readers_failed,
+};
 use amtptp_usb_bt::usb::state::DeviceState;
 use amtptp_usb_bt::usb::status::Completion;
 use common::{Record, Tally, hex, kv, load, num, replay_descriptor_ioctl, status, to_hex};
@@ -210,8 +212,30 @@ fn ioctl_fixture() {
                 tally.add("io_stop");
             }
             "readers_failed" => {
-                let ret = readers_failed(status(r.req("status")), status(r.req("usbd_status")));
-                assert_eq!(ret, r.req("ret") == "1", "{id}");
+                let st = status(r.req("status"));
+                let usbd = status(r.req("usbd_status"));
+                let state = DeviceState::new();
+                assert_eq!(r.req("ret"), "1", "{id}: C restarted unconditionally");
+                if st == 0xc000_009d_u32 as i32 {
+                    assert_eq!(
+                        on_readers_failed(&state, st, usbd),
+                        ReaderFailureAction::Stop,
+                        "{id}"
+                    );
+                } else {
+                    for _ in 0..MAX_READER_RESTARTS {
+                        assert_eq!(
+                            on_readers_failed(&state, st, usbd),
+                            ReaderFailureAction::Restart,
+                            "{id}"
+                        );
+                    }
+                    assert_eq!(
+                        on_readers_failed(&state, st, usbd),
+                        ReaderFailureAction::FailDevice,
+                        "{id}"
+                    );
+                }
                 assert_eq!(r.req("ops"), "-", "{id}");
                 tally.add("readers_failed");
             }

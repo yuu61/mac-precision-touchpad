@@ -47,6 +47,7 @@
 
 mod bytes;
 pub mod common;
+pub mod delivery;
 pub mod descriptor;
 pub mod feature;
 pub mod hidport;

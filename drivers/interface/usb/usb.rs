@@ -465,6 +465,6 @@ impl UsbHardware for UsbIo<'_> {
 
 /// `WdfUsbTargetPipeGetIoTarget(Pipe)`: a `FORCEINLINE` in `wdfusb.h` (not in the WDF function table)
 /// whose body is `return (WDFIOTARGET) Pipe;`.
-const fn pipe_io_target(pipe: WDFUSBPIPE) -> WDFIOTARGET {
+pub(crate) const fn pipe_io_target(pipe: WDFUSBPIPE) -> WDFIOTARGET {
     pipe.cast::<WDFIOTARGET__>()
 }

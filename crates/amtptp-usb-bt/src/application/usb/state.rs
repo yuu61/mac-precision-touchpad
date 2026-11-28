@@ -27,7 +27,7 @@ use amtptp_core::hid::feature::{SelectiveReportBits, SelectiveReportState};
 use amtptp_core::hid::scan_time::ScanClock;
 
 use crate::infrastructure::usb::{
-    CONFIG_TABLE, FALLBACK_CONFIG, Firmware, TrackpadType, UsbModel, config_by_index,
+    CONFIG_TABLE, FALLBACK_CONFIG, TrackpadType, UsbModel, config_by_index,
 };
 
 const RELAXED: Ordering = Ordering::Relaxed;
@@ -105,6 +105,7 @@ pub struct DeviceState {
     wellspring_mode_on: AtomicBool,
     raw_requested: AtomicBool,
     reporting: SelectiveReportState,
+    reader_failures: AtomicU32,
     pub(crate) scan_clock: ScanClock,
 }
 
@@ -125,6 +126,7 @@ impl DeviceState {
             wellspring_mode_on: AtomicBool::new(false),
             raw_requested: AtomicBool::new(false),
             reporting: SelectiveReportState::new(SelectiveReportBits::from_byte(0)),
+            reader_failures: AtomicU32::new(0),
             scan_clock: ScanClock::new(),
         }
     }
@@ -281,12 +283,30 @@ impl DeviceState {
         self.raw_requested.store(requested, RELAXED);
     }
 
-    /// Legacy devices with a mode register can return to mouse packets after wake.
+    /// Devices with a mode register (both Legacy and T2) can recover raw mode if mouse packets
+    /// arrive while raw mode is requested.
     pub fn can_recover_mode(&self) -> bool {
-        let model = self.config();
-        self.raw_requested.load(RELAXED)
-            && model.firmware == Firmware::Legacy
-            && model.profile.tp_type != TrackpadType::Type3
+        self.raw_requested.load(RELAXED) && self.config().profile.tp_type != TrackpadType::Type3
+    }
+
+    /// Resets the consecutive continuous-reader failure counter (`D0Entry` and valid packets).
+    pub fn reset_reader_failures(&self) {
+        self.reader_failures.store(0, RELAXED);
+    }
+
+    /// Increments and returns the consecutive continuous-reader failure count (saturating).
+    pub fn note_reader_failure(&self) -> u32 {
+        let mut current = self.reader_failures.load(RELAXED);
+        loop {
+            let next = current.saturating_add(1);
+            match self
+                .reader_failures
+                .compare_exchange_weak(current, next, RELAXED, RELAXED)
+            {
+                Ok(_) => return next,
+                Err(actual) => current = actual,
+            }
+        }
     }
 
     pub(crate) fn set_wellspring_mode_on(&self, on: bool) {

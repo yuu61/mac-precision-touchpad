@@ -152,7 +152,7 @@ fn set_feature(
         Ok(change) => {
             state.apply_feature_change(change);
             if !state.effective_reporting().surface_report {
-                io.with_contacts(amtptp_core::domain::ContactTracker::reset);
+                io.reset_contacts();
             }
             STATUS_SUCCESS
         }

@@ -13,6 +13,7 @@ use crate::hid::input::{SPI_PTP_REPORT_LEN, SpiPtpReport};
 
 use crate::spi::device::SpiTrackpadInfo;
 use crate::spi::status::{NtStatus, STATUS_DEVICE_DATA_ERROR};
+use crate::spi::wire::LOWER_READ_BUFFER_LEN;
 
 /// `sizeof(SPI_TRACKPAD_PACKET)` up to `Fingers`: 46 bytes. Also the minimum accepted lower
 /// Information (`SpiRequestLength < 46` fails).
@@ -155,23 +156,16 @@ pub fn check_declared_fingers(packet: &SpiPacket<'_>) -> Result<(), NtStatus> {
     }
 }
 
-/// The length gate (Input.c:199-213): `SpiRequestLength = (LONG)WdfRequestGetInformation(SpiRequest)`.
-///
-/// Returns `STATUS_DEVICE_DATA_ERROR` if it is below 46 (the C trace says "attempt to re-enable", but
-/// nothing is done; preserved), otherwise the positive length. The `(LONG)` cast keeps the low 32 bits
-/// as a signed value, so `0x1_0000_002E` passes as 46 and `0xFFFF_FFFF` fails as -1. The lower
-/// `IoStatus.Status` is not consulted (preserved, SPI-B9).
+/// Validates that `Information` covers at least the 46-byte packet header and does not exceed the
+/// 1024-byte lookaside buffer ([`LOWER_READ_BUFFER_LEN`]).
 ///
 /// # Errors
-/// Returns `STATUS_DEVICE_DATA_ERROR` if the length is shorter than the packet header.
+/// Returns `STATUS_DEVICE_DATA_ERROR` if `information` is outside `46..=1024`.
 pub const fn lower_read_length(information: u64) -> Result<usize, NtStatus> {
-    // (LONG)(ULONG_PTR): truncate to the low 32 bits, reinterpret as signed.
-    let length = information as u32 as i32;
-    if length < SPI_PACKET_HEADER_LEN as i32 {
+    if information < SPI_PACKET_HEADER_LEN as u64 || information > LOWER_READ_BUFFER_LEN as u64 {
         Err(STATUS_DEVICE_DATA_ERROR)
     } else {
-        // length >= 46 > 0, so the conversion is lossless.
-        Ok(length as usize)
+        Ok(information as usize)
     }
 }
 
@@ -257,12 +251,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn length_gate_truncates_like_long_cast() {
+    fn length_gate_enforces_header_and_buffer_bounds() {
         assert_eq!(lower_read_length(45), Err(STATUS_DEVICE_DATA_ERROR));
         assert_eq!(lower_read_length(46), Ok(46));
-        assert_eq!(lower_read_length(0x1_0000_002E), Ok(46));
+        assert_eq!(lower_read_length(1024), Ok(1024));
+        assert_eq!(lower_read_length(1025), Err(STATUS_DEVICE_DATA_ERROR));
         assert_eq!(
-            lower_read_length(0x1_0000_002D),
+            lower_read_length(0x1_0000_002E),
             Err(STATUS_DEVICE_DATA_ERROR)
         );
         assert_eq!(
@@ -270,10 +265,9 @@ mod tests {
             Err(STATUS_DEVICE_DATA_ERROR)
         );
         assert_eq!(
-            lower_read_length(0x8000_0000),
+            lower_read_length(0x7FFF_FFFF),
             Err(STATUS_DEVICE_DATA_ERROR)
         );
-        assert_eq!(lower_read_length(0x7FFF_FFFF), Ok(0x7FFF_FFFF));
         assert_eq!(lower_read_length(u64::MAX), Err(STATUS_DEVICE_DATA_ERROR));
     }
 }

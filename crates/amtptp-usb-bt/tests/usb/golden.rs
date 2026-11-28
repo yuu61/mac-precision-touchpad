@@ -7,7 +7,7 @@ use amtptp_core::hid::feature::HQA_REPORT;
 
 use super::fake::FakeHw;
 use amtptp_core::domain::ContactTracker;
-use amtptp_usb_bt::usb::config::{FALLBACK_CONFIG, config_for_pid};
+use amtptp_usb_bt::usb::config::{FALLBACK_CONFIG, TrackpadType, config_for_pid};
 use amtptp_usb_bt::usb::feature::{GetFeaturePacket, SetFeaturePacket, get_feature, set_feature};
 use amtptp_usb_bt::usb::hid::{
     HID_DESCRIPTOR, REPORT_DESCRIPTOR, REPORT_DESCRIPTOR_LEN, REPORT_DESCRIPTOR_T2_13,
@@ -593,15 +593,25 @@ fn legacy_usb_families_report_through_kmdf() {
         for pid in pids.split(',') {
             let model = config_for_pid(u16::from_str_radix(pid, 16).unwrap());
             let mut contacts = ContactTracker::new();
+            let mut pkt = hex(input);
+            let mut empty = vec![0; model.profile.tp_type.header() as usize];
+            if model.profile.tp_type == TrackpadType::Type5 {
+                assert_eq!(
+                    parse_packet(model, &pkt, InputGates::ON, 0xff, &mut contacts),
+                    PacketAction::Discard,
+                    "MT2 USB frames without 0x02 report ID must be discarded"
+                );
+                pkt[0] = 0x02;
+                empty[0] = 0x02;
+            }
             let bytes = report(parse_packet(
                 model,
-                &hex(input),
+                &pkt,
                 InputGates::ON,
                 0xff,
                 &mut contacts,
             ));
             assert_eq!(bytes.as_slice(), hex(output), "{case} PID {pid}");
-            let empty = vec![0; model.profile.tp_type.header() as usize];
             let up = report(parse_packet(
                 model,
                 &empty,
@@ -626,8 +636,11 @@ fn legacy_recovery_obeys_input_mode_and_power() {
     let mut hw = FakeHw::new(0x0265);
     assert_eq!(lifecycle::prepare_hardware(&state, &mut hw), 0);
     assert_eq!(lifecycle::d0_entry(&state, &mut hw), 0);
-    assert!(needs_mode_recovery(&state, 3));
-    assert!(!needs_mode_recovery(&state, 21));
+    assert!(needs_mode_recovery(&state, &[0; 3]));
+    assert!(needs_mode_recovery(&state, &[0; 21]));
+    let mut valid_mt2 = [0_u8; 21];
+    valid_mt2[0] = 0x02;
+    assert!(!needs_mode_recovery(&state, &valid_mt2));
     let _entry = hw.take_logs();
     recover_mode(&state, &mut hw);
     let (_, register) = hw.take_logs();
@@ -652,6 +665,23 @@ fn legacy_recovery_obeys_input_mode_and_power() {
     let _exit = hw.take_logs();
     recover_mode(&state, &mut hw);
     assert_eq!(hw.take_logs().1, "-");
+}
+
+#[test]
+fn t2_supports_runtime_mode_recovery() {
+    use amtptp_usb_bt::usb::{input::needs_mode_recovery, wellspring::recover_mode};
+    let state = DeviceState::new();
+    let mut hw = FakeHw::new(0x027a);
+    assert_eq!(lifecycle::prepare_hardware(&state, &mut hw), 0);
+    assert_eq!(lifecycle::d0_entry(&state, &mut hw), 0);
+    assert!(state.can_recover_mode());
+    assert!(needs_mode_recovery(&state, &[0; 8]));
+    assert!(!needs_mode_recovery(&state, &[0; 46]));
+    let _entry = hw.take_logs();
+    recover_mode(&state, &mut hw);
+    let (_, wire) = hw.take_logs();
+    assert!(wire.contains("out:2109020302000400:02000000"));
+    assert!(wire.ends_with("out:2109020302000400:02010000:00000000"));
 }
 
 #[test]
