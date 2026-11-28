@@ -76,6 +76,10 @@ Host tests replay the C driver fixtures from the two crates' `tests/` directorie
 Use Rust stable with the MSVC target for each architecture you build, the Visual Studio C++ build
 tools, the Windows SDK and WDK, and LLVM for bindgen. See the [build requirements](docs/rust-port/packaging.md#requirements).
 
+Rust CI limits each Rust file to 600 physical lines, including comments, blank lines and tests.
+Run `pwsh -File .github/scripts/rust-ci-file-length.ps1` to check locally.
+The driver checks also verify that the SPI dependency graph excludes `amtptp-usb-bt` on x64 and ARM64.
+
 ```
 cargo xtask test                                   # host tests and host/KMDF Clippy
 cargo xtask build --arch all --release             # build the drivers for x64 and ARM64

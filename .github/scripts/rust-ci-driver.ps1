@@ -40,6 +40,13 @@ foreach ($var in $sanitizedVars) {
 
 Push-Location 'drivers'
 try {
+    if ($pkgArgs -contains 'amtptp-device-spi-km') {
+        $spiDependencies = cargo tree --locked --target $Target -p amtptp-device-spi-km --edges normal,build --prefix none --color never
+        if ($spiDependencies -match '^amtptp-usb-bt v') {
+            throw "The MIT SPI driver must not depend on the GPLv2 amtptp-usb-bt crate ($Target)."
+        }
+    }
+
     if ($LintSupport) {
         if ([string]::IsNullOrWhiteSpace($Toolchain)) {
             $rustc = (rustup which rustc).Trim()

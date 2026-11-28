@@ -10,6 +10,7 @@ on:
       - 'crates/**'
       - 'drivers/**'
       - 'tools/xtask/**'
+      - '**/*.rs'
       - 'packaging/*.inx'
       - '.github/workflows/rust-ci.yml'
       - '.github/scripts/rust-ci*.ps1'
@@ -23,6 +24,7 @@ on:
       - 'crates/**'
       - 'drivers/**'
       - 'tools/xtask/**'
+      - '**/*.rs'
       - 'packaging/*.inx'
       - '.github/workflows/rust-ci.yml'
       - '.github/scripts/rust-ci*.ps1'
@@ -58,6 +60,10 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Check Rust file lengths
+        shell: pwsh
+        run: ./.github/scripts/rust-ci-file-length.ps1
 
       - name: Detect impacted packages
         id: detect

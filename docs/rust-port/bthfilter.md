@@ -156,7 +156,7 @@ driver and device, 0x2 SDP, 0x4 interrupt channel.
 * Error: `CallFailed` (WDF call and status).
 * Verbose, one per report: `ReportPadded` (bytes received), `PadSkipped` (bytes received and left over).
 
-[`VENDOR_TLC`]: ../../crates/amtptp-usb-bt/src/infrastructure/bth.rs
-[`augment_sdp_attribute_list`]: ../../crates/amtptp-usb-bt/src/infrastructure/bth.rs
-[`pad_interrupt_payload`]: ../../crates/amtptp-usb-bt/src/infrastructure/bth.rs
-[`unpad_report`]: ../../crates/amtptp-usb-bt/src/infrastructure/bth.rs
+[`VENDOR_TLC`]: ../../crates/amtptp-usb-bt/src/infrastructure/bth/sdp.rs
+[`augment_sdp_attribute_list`]: ../../crates/amtptp-usb-bt/src/infrastructure/bth/sdp.rs
+[`pad_interrupt_payload`]: ../../crates/amtptp-usb-bt/src/infrastructure/bth/report.rs
+[`unpad_report`]: ../../crates/amtptp-usb-bt/src/infrastructure/bth/report.rs

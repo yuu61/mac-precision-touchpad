@@ -57,7 +57,8 @@
 //!   [`input::PacketAction::Deliver`], `WdfIoQueueRetrieveNextRequest(InputQueue)`; if there is none, drop
 //!   the packet; otherwise retrieve its output memory and complete it with
 //!   [`input::complete_read_report_to`] (this completes it on every path, fixing the C leaks B6/B7).
-//! - **`EvtUsbTargetPipeReadersFailed`**: return [`lifecycle::readers_failed`] (always TRUE).
+//! - **`EvtUsbTargetPipeReadersFailed`**: apply the restart, stop, or device failure decision from
+//!   [`lifecycle::on_readers_failed`].
 //! - **`EvtIoStop`**: [`lifecycle::io_stop`] (nothing to do).
 //!
 //! Scan Time uses the counter sampled in the reader callback and the frequency cached at D0 entry.
