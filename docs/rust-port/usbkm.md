@@ -6,7 +6,7 @@ The C driver is `src/AmtPtpDeviceUsbKm` at commit 2edb0f2. The Rust port has two
 
 - `crates/amtptp-usbkm-core` (GPL-2.0-only, `no_std`, depends only on `ptp-hid`) holds all the logic that does not
   need WDF. Its crate-level rustdoc ("How the driver uses this") is the contract for the glue.
-- `drivers/km/AmtPtpDeviceUsbKm` is the KMDF 1.23 glue (stage 2). Entries below marked *glue* are decisions the
+- `drivers/km/AmtPtpDeviceUsbKm` is the KMDF 1.31 glue. Entries below marked *glue* are decisions the
   glue has to implement; the core provides the constants or functions for them.
 
 The porting spec is [`specs/usbkm.md`](specs/usbkm.md), including its verification addendum. Bug IDs `KM-Bn` are the spec's `Bn` (§10.1).
@@ -152,7 +152,7 @@ status is traced in `UsbIo::configure_continuous_reader`.
 
 ## Driver (stage 2): `drivers/km/AmtPtpDeviceUsbKm`
 
-The KMDF 1.23 glue. It makes the WDF calls the C code makes, in the C order, and leaves every decision to the core.
+The KMDF glue makes the WDF calls and leaves the hardware-independent decisions to the core.
 
 | Module | C function | Rust |
 |---|---|---|

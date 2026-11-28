@@ -231,12 +231,16 @@ unsafe extern "C" fn evt_device_d0_entry(
     device: WDFDEVICE,
     previous_state: WDF_POWER_DEVICE_STATE,
 ) -> NTSTATUS {
+    // SAFETY: WDF supplies the live device to this D0 entry callback.
+    let system_power_action =
+        unsafe { call_unsafe_wdf_function_binding!(WdfDeviceGetSystemPowerAction, device) };
     tlg::write_event!(
         PROVIDER,
         "EvtDeviceD0Entry",
         level(Informational),
         keyword(KW_DRIVER),
-        str8("PreviousState", power_state_name(previous_state))
+        str8("PreviousState", power_state_name(previous_state)),
+        i32("SystemPowerAction", &system_power_action)
     );
     // SAFETY: WDF passes this driver's live device.
     let Some(context) = (unsafe { DeviceContext::of(device) }) else {
@@ -282,12 +286,16 @@ unsafe extern "C" fn evt_device_d0_exit(
     device: WDFDEVICE,
     target_state: WDF_POWER_DEVICE_STATE,
 ) -> NTSTATUS {
+    // SAFETY: WDF supplies the live device to this D0 exit callback.
+    let system_power_action =
+        unsafe { call_unsafe_wdf_function_binding!(WdfDeviceGetSystemPowerAction, device) };
     tlg::write_event!(
         PROVIDER,
         "EvtDeviceD0Exit",
         level(Informational),
         keyword(KW_DRIVER),
-        str8("TargetState", power_state_name(target_state))
+        str8("TargetState", power_state_name(target_state)),
+        i32("SystemPowerAction", &system_power_action)
     );
     // SAFETY: WDF passes this driver's live device.
     let Some(context) = (unsafe { DeviceContext::of(device) }) else {

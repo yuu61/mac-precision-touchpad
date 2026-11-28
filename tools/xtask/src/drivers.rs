@@ -236,7 +236,6 @@ target-umdf-version-minor = 15
 
     #[test]
     fn real_manifests_match_the_inf_contract() {
-        // The INF requires KMDF 1.23.
-        assert_eq!(framework_version().unwrap(), "1.23");
+        assert_eq!(framework_version().unwrap(), "1.31");
     }
 }

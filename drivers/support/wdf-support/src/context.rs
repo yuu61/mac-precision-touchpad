@@ -1,7 +1,7 @@
 //! WDF object contexts: the Rust equivalent of
 //! `WDF_DECLARE_CONTEXT_TYPE_WITH_NAME` (see [`crate::declare_context_type!`]).
 //!
-//! In C (KMDF 1.23 / UMDF 2.15 `wdfobject.h`) the macro emits
+//! In the KMDF C header `wdfobject.h`, the macro emits
 //!
 //! ```c
 //! __declspec(allocate(".data")) __declspec(selectany)
@@ -94,8 +94,7 @@ pub unsafe fn get_typed_context(
 ) -> *mut c_void {
     // SAFETY: `handle` is a valid WDF object (caller contract) and
     // `unique_type()` points at a 'static, correctly initialized
-    // WDF_OBJECT_CONTEXT_TYPE_INFO; WdfObjectGetTypedContextWorker is in the
-    // KMDF 1.23 and UMDF 2.15 function tables.
+    // WDF_OBJECT_CONTEXT_TYPE_INFO.
     unsafe {
         call_unsafe_wdf_function_binding!(
             WdfObjectGetTypedContextWorker,

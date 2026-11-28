@@ -54,7 +54,7 @@ tlg::define_provider!(
 mod keyword;
 
 /// Driver entry point (C `DriverEntry`, Driver.c:26-98), called by `FxDriverEntry`
-/// (WdfDriverEntry.lib, the image entry point) after the KMDF 1.23 runtime is bound.
+/// (WdfDriverEntry.lib, the image entry point) after the KMDF runtime is bound.
 ///
 /// `WDF_OBJECT_ATTRIBUTES_INIT` + `EvtCleanupCallback`, `WDF_DRIVER_CONFIG_INIT(EvtDeviceAdd)` (no
 /// `EvtDriverUnload`, no init flags, no pool tag), `WdfDriverCreate` without returning the handle.

@@ -5,7 +5,7 @@ The WDF driver now owns request dispatch and power callbacks. The core returns i
 This file records the port of `src/AmtPtpHidFilter` (KMDF lower filter, Bluetooth Magic Trackpad 2) to Rust:
 
 * `crates/amtptp-hidfilter-core`: all hardware-independent logic, host-tested against the C oracle fixtures.
-* `drivers/km/AmtPtpHidFilter`: the KMDF 1.23 glue.
+* `drivers/km/AmtPtpHidFilter`: the KMDF 1.31 glue.
 
 The C driver read the trackpad through a patch of HIDCLASS's dispatch table (the detour). The port
 replaced it (2026-11-27) with a *data source*: a vendor collection that the new lower filter
@@ -136,7 +136,7 @@ Cases excluded by the fixture harness itself (README section 6) are covered as f
 * NULL-handle sends (HF-B25) are guarded and have no fixture;
 * the spec's Appendix D golden vectors are in `tests/golden.rs`.
 
-## Driver crate (`drivers/km/AmtPtpHidFilter`, KMDF 1.23)
+## Driver crate (`drivers/km/AmtPtpHidFilter`, KMDF 1.31)
 
 The glue makes every WDF and kernel call of the C driver that the oracle records, with the C arguments, and nothing else.
 Pure accessors have no effect and are not recorded (fixtures README section 1). They differ from C in two places:
@@ -220,7 +220,7 @@ Exactly-once completion:
 
 * **HF-B28.** The device interface is registered with no handler.
 * **`EvtIoStop`** is registered and empty. It neither acknowledges nor completes.
-* **KMDF version.** The C project bound the WDK default, KMDF 1.15. The KM workspace binds KMDF 1.23 for all three KM drivers (packaging decision, see `packaging.md`). The behaviour this driver relies on exists in 1.9 and later.
+* **KMDF version.** The C project bound the WDK default, KMDF 1.15. The Rust workspace targets KMDF 1.31 for all four drivers. See [the framework version and OS floor](packaging.md#framework-version-and-os-floor).
 
 ### Competing reader on Bluetooth (fixed by the data source)
 
@@ -243,7 +243,7 @@ The traces used: `logman` with the filter providers, BTHPORT `{8a1f9517-3a8c-4a9
 
 ### Not verified (no device test on this machine)
 
-* That the framework statuses KMDF 1.23 produces on the `wdf=`/stub-model paths match KMDF 1.15, for example `STATUS_BUFFER_TOO_SMALL` for a short output buffer. The glue makes the same calls, so they should match.
+* That KMDF 1.31 returns the expected framework statuses on the `wdf=`/stub-model paths, for example `STATUS_BUFFER_TOO_SMALL` for a short output buffer.
 * That a passive-level timer with `AutomaticSerialization = FALSE` creates under a Dispatch-level parent. The WDF documentation says it should, but this was not run on a device.
 * Sleep and resume with the data source.
 

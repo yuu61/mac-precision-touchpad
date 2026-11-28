@@ -217,11 +217,10 @@ fn package_one(cx: &Context<'_>, arch: Arch) -> Result<(), String> {
     check_stamped(&stamped, &cx.kmdf, &cat_file)
         .map_err(|e| format!("stampinf output check failed for {inf_file}: {e}"))?;
 
-    // 4. InfVerif in Universal mode (/u): the C package's
-    //    DriverTargetPlatform was Universal (see packaging.md for why not /w).
+    // 4. Verify the entire stamped INF against Windows Driver requirements.
     let mut cmd = Command::new(&cx.tools.infverif);
-    cmd.current_dir(&pkg).args(["/u", inf_file.as_str()]);
-    process::run(&mut cmd, "InfVerif /u")?;
+    cmd.current_dir(&pkg).args(["/w", inf_file.as_str()]);
+    process::run(&mut cmd, "InfVerif /w")?;
 
     // 5. Sign the binaries before cataloging them.
     if let (Some(signtool), Some(args)) = (&cx.signtool, &opts.sign) {
@@ -467,35 +466,59 @@ mod tests {
 
     #[test]
     fn universal_models_have_unique_supported_hardware_ids() {
-        let text = fs::read_to_string(inx()).unwrap();
-        {
-            let build = "16299";
-            let usb_section = "amtptpdeviceusbkm_device";
-            let heading = format!("[Standard.NT$ARCH$.10.0...{build}]");
-            let models = text
-                .lines()
-                .skip_while(|line| *line != heading)
-                .skip(1)
-                .take_while(|line| !line.starts_with('['));
-            let mut bindings = std::collections::BTreeMap::new();
-            for line in models {
-                let line = line.split(';').next().unwrap().trim();
-                if line.is_empty() {
-                    continue;
-                }
-                let (_, entry) = line.split_once('=').unwrap();
-                let (install, id) = entry.split_once(',').unwrap();
-                let id = id.trim().to_ascii_lowercase();
-                let duplicate = bindings.insert(id.clone(), install.trim().to_ascii_lowercase());
-                assert!(duplicate.is_none(), "{heading}: duplicate binding for {id}");
-            }
-            for pid in ["0273", "0274", "0290", "0291"] {
-                let id = format!("usb\\vid_05ac&pid_{pid}&mi_02");
-                assert_eq!(bindings.get(&id).map(String::as_str), Some(usb_section));
-            }
-            assert!(!bindings.contains_key("spi\\vid_05ac&pid_0280&mi_02"));
-            assert!(bindings.contains_key("usb\\vid_05ac&pid_0280&mi_02"));
+        let mut win10 = std::collections::BTreeMap::new();
+        let mut win11 = std::collections::BTreeMap::new();
+        for (section, install, id) in model_bindings() {
+            let bindings = match section.as_str() {
+                "Standard.NT$ARCH$.10.0...19044" => &mut win10,
+                "Standard.NT$ARCH$.10.0...22000" => &mut win11,
+                _ => panic!("unexpected models section {section}"),
+            };
+            let previous = bindings.insert(id.to_ascii_lowercase(), install);
+            assert!(previous.is_none(), "{section}: duplicate binding for {id}");
         }
+        let usb_section = "amtptpdeviceusbkm_device";
+        for pid in ["0273", "0274", "0290", "0291"] {
+            let id = format!("usb\\vid_05ac&pid_{pid}&mi_02");
+            assert_eq!(win10.get(&id).map(String::as_str), Some(usb_section));
+        }
+        assert!(!win10.contains_key("spi\\vid_05ac&pid_0280&mi_02"));
+        assert!(win10.contains_key("usb\\vid_05ac&pid_0280&mi_02"));
+
+        // Only the three stacks with mshidkmdf as function driver change install sections.
+        for install in win10.values_mut() {
+            match install.as_str() {
+                "amtptpdeviceusbkm_device"
+                | "amtptpdevicespikm_device"
+                | "amtptphidfilter_miniportdevice" => install.push_str("_win11"),
+                "amtptpbthfilter_device" | "amtptphidfilter_nulldevice" => {}
+                _ => panic!("unexpected Windows 10 install section {install}"),
+            }
+        }
+        assert_eq!(win10, win11, "hardware bindings differ between OS builds");
+    }
+
+    #[test]
+    fn model_install_sections_register_their_lower_filters() {
+        let text = fs::read_to_string(inx()).unwrap().to_ascii_lowercase();
+        let installs: std::collections::BTreeSet<_> = model_bindings()
+            .into_iter()
+            .map(|(_, install, _)| install)
+            .collect();
+        for install in installs {
+            let header = format!("[{install}.nt.filters]");
+            let section = text
+                .split_once(&header)
+                .map(|(_, rest)| rest.split("\n[").next().unwrap().trim());
+            if install == "amtptphidfilter_nulldevice" {
+                assert!(section.is_none(), "{header}: null device has a filter");
+            } else {
+                let (service, _) = install.split_once('_').unwrap();
+                let expected = format!("addfilter = {service},, ptplowerfilter");
+                assert_eq!(section, Some(expected.as_str()), "{header}");
+            }
+        }
+        assert!(text.contains("[ptplowerfilter]\nfilterposition = lower\n"));
     }
 
     /// `(VID, PID)` of a hardware ID: `USB\Vid_05ac&Pid_0273&MI_02`, `SPI\VID_05ac&PID_0272&MI_02`,
@@ -561,7 +584,7 @@ mod tests {
         let mut kmdf_fallbacks = std::collections::BTreeSet::new();
         for (section, install, id) in model_bindings() {
             let ctx = format!("{PACKAGE} [{section}] {install}, {id}");
-            match install.as_str() {
+            match install.strip_suffix("_win11").unwrap_or(&install) {
                 "amtptpdevicespikm_device" => {
                     let (vid, pid) = vid_pid(&id);
                     assert!(id.to_ascii_lowercase().starts_with("spi\\"), "{ctx}");

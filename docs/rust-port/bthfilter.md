@@ -124,8 +124,9 @@ system address (`MDL_MAPPED_TO_SYSTEM_VA` or `MDL_SOURCE_IS_NONPAGED_POOL`); the
 
 `AmtPtpDevice.inx` binds the BTHENUM hardware ID to `AmtPtpBthFilter_Device`, which installs the inbox
 function driver through `Include = hidbth.inf, input.inf` and `Needs = HIDBTH_Inst.NT, HID_Inst.NT`
-(`.NT.HW` and `.NT.Services` likewise), adds `LowerFilters = AmtPtpBthFilter`, and binds `Col03` to the
-null device. InfVerif `/u` passes with the same warnings as before (the `mshidkmdf` 2084s).
+(`.NT.HW` and `.NT.Services` likewise), registers `AmtPtpBthFilter` using `AddFilter`, and binds `Col03` to the
+null device. On Windows 11 the separate `Col01` installation gets its function driver from
+`MsHidKmdf.inf`. See [the OS-specific INF sections](packaging.md#framework-version-and-os-floor).
 
 ## Hardware verification (2026-11-27, Magic Trackpad 2 `REV_0871`, Windows 11 26300)
 

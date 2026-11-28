@@ -5,7 +5,7 @@ The SPI report descriptor now has 496 bytes. The settings collection and its ven
 The C driver is `src/AmtPtpDeviceSpiKm` at commit 2edb0f2. The Rust port has two parts:
 
 - `crates/amtptp-spikm-core` (MIT, `no_std`, depends only on `ptp-hid`) holds all the logic that does not need WDF.
-- `drivers/km/AmtPtpDeviceSpiKm` is the KMDF 1.23 glue.
+- `drivers/km/AmtPtpDeviceSpiKm` is the KMDF 1.31 glue.
 
 The porting spec is [`specs/spikm.md`](specs/spikm.md); read its verification addendum too. Bug IDs `SPI-Bn` are the spec's `Bn` (§10.3).
 The policy terms come from the [behavior policy](README.md#behavior-policy):
@@ -120,7 +120,7 @@ The README's excluded inputs are covered by unit tests instead:
 
 ## Driver glue (stage 2): `drivers/km/AmtPtpDeviceSpiKm`
 
-The KMDF 1.23 driver is a thin layer over the core crate. Its WDF call sequence was compared, path by path, with the `ops` field of the C oracle fixtures:
+The KMDF driver is a thin layer over the core crate. During the port, its WDF call sequence was compared, path by path, with the `ops` field of the C oracle fixtures:
 
 - `setup.txt` (adddevice);
 - `wire.txt` (`prep-*`, `setstate-*` and `lower-read-*`);
