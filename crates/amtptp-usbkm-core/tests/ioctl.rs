@@ -104,6 +104,10 @@ fn replay_route(r: &Record) -> &'static str {
             );
             "route/feature"
         }
+        InternalIoctl::GetString => {
+            assert_eq!(code, ptp_hid::ioctl::IOCTL_HID_GET_STRING);
+            "route/string"
+        }
         InternalIoctl::NotSupported => {
             assert_eq!(r.req("completed"), "1", "{id}");
             assert_eq!(not_supported(), completion_of(r), "{id}");
@@ -224,7 +228,8 @@ fn ioctl_fixture() {
             ("readers_failed", 3),
             ("route/descriptor", 3),
             ("route/feature", 2),
-            ("route/not_supported", 39),
+            ("route/not_supported", 38),
+            ("route/string", 1),
             ("route/read_report_forward_failed", 3),
             ("route/read_report_pended", 3),
         ],

@@ -10,24 +10,13 @@
 mod common;
 
 use amtptp_spikm_core::runtime::{DeviceRuntime, DeviceStatus, RECOVERY_TIMER_PERIOD};
-use amtptp_spikm_core::wire::{
-    DEVICE_INTERFACE_GUID, LOWER_READ_BUFFER_LEN, NO_IO_TARGET_STATUS, POOL_TAG,
-};
+use amtptp_spikm_core::wire::{LOWER_READ_BUFFER_LEN, NO_IO_TARGET_STATUS, POOL_TAG};
 use common::{Tally, load, wdf_failures};
 
 const FRAMEWORK: &str = "framework-decided status (wdf= injected failure): glue/stage 2";
 const DRIVER_STATUS: &str = "driver-decided status: no local I/O target -> c0000184";
 const OK: &str = "success path: constants asserted";
 const NO_LOGIC: &str = "no driver logic (ops=-): cleanup / empty EvtIoStop";
-
-fn guid_text() -> String {
-    let g = DEVICE_INTERFACE_GUID;
-    let d = g.data4;
-    format!(
-        "{{{:08x}-{:04x}-{:04x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}}}",
-        g.data1, g.data2, g.data3, d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]
-    )
-}
 
 #[test]
 fn setup_records() {
@@ -57,12 +46,6 @@ fn setup_records() {
             assert!(
                 ops.contains("parent=dev,exec=2,"),
                 "{ctx}: passive timer on the device"
-            );
-        }
-        if ops.contains("WdfDeviceCreateDeviceInterface(") {
-            assert!(
-                ops.contains(&format!("guid={}", guid_text())),
-                "{ctx}: interface GUID"
             );
         }
         if let Some(ds) = r.opt("ds_out") {

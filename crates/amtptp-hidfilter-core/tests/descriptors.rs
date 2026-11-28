@@ -6,7 +6,9 @@
 mod common;
 
 use amtptp_hidfilter_core as core_;
+use common::dispatch::dispatch_internal_ioctl;
 use common::*;
+
 use ptp_hid::common::{MAX_FINGERS, PTP_COLLECTION_WINDOWS};
 use ptp_hid::descriptor::{
     FINGER_COLLECTION_U32_ID_LEN, FINGER_SEPARATOR_LEN, GLOBAL_RESET, TOUCHPAD_TLC_HEADER_LEN,
@@ -218,7 +220,11 @@ fn replay_descriptors() {
     }
     // Private C layout: 22 DEVICE_CONTEXT offsets + 2 + 2 context offsets + 4 private sizes + 5
     // HIDCLASS members. The removed detour: 4 offsets and sizes + 2 major-function indexes.
-    assert_eq!(unmirrored, 35 + 6, "keys not mirrored (private C layout, removed detour)");
+    assert_eq!(
+        unmirrored,
+        35 + 6,
+        "keys not mirrored (private C layout, removed detour)"
+    );
     assert_eq!(
         checked,
         28 + 27 - 6,
@@ -245,7 +251,7 @@ fn replay_ioctl(r: &Rec) {
     };
     let mut m = Mock::new();
     let req = m.add_upper(Upper::with_output(outlen, 0xCC));
-    core_::dispatch_internal_ioctl(&mut m, &state, req, outlen, 0, code);
+    dispatch_internal_ioctl(&mut m, &state, req, outlen, 0, code);
     let (s, info) = m.uppers[req].completed.expect("completed");
     assert_eq!(st(s), r.get("status"), "{}", r.case());
     let expected_info = if s == 0 && code == ioctl::IOCTL_HID_GET_REPORT_DESCRIPTOR {
@@ -261,13 +267,23 @@ fn replay_ioctl(r: &Rec) {
             assert_eq!(m.uppers[req].buf, expected, "{}", r.case());
         }
         (0, ioctl::IOCTL_HID_GET_DEVICE_DESCRIPTOR) => {
-            assert_eq!(&m.uppers[req].buf[..9], &core_::HID_DESCRIPTOR, "{}", r.case());
+            assert_eq!(
+                &m.uppers[req].buf[..9],
+                &core_::HID_DESCRIPTOR,
+                "{}",
+                r.case()
+            );
             expected[7..9].copy_from_slice(&(core_::REPORT_DESCRIPTOR.len() as u16).to_le_bytes());
             assert_eq!(m.uppers[req].buf, expected, "{}", r.case());
         }
         (0, ioctl::IOCTL_HID_GET_REPORT_DESCRIPTOR) => {
             let n = core_::REPORT_DESCRIPTOR.len();
-            assert_eq!(&m.uppers[req].buf[..n], &core_::REPORT_DESCRIPTOR, "{}", r.case());
+            assert_eq!(
+                &m.uppers[req].buf[..n],
+                &core_::REPORT_DESCRIPTOR,
+                "{}",
+                r.case()
+            );
             assert_eq!(
                 to_legacy_c(&m.uppers[req].buf[..n]),
                 expected[..C_REPORT_DESCRIPTOR_LEN],
@@ -276,7 +292,9 @@ fn replay_ioctl(r: &Rec) {
             );
             assert!(
                 m.uppers[req].buf[n..].iter().all(|&b| b == 0xCC)
-                    && expected[C_REPORT_DESCRIPTOR_LEN..].iter().all(|&b| b == 0xCC),
+                    && expected[C_REPORT_DESCRIPTOR_LEN..]
+                        .iter()
+                        .all(|&b| b == 0xCC),
                 "{}",
                 r.case()
             );
@@ -292,7 +310,8 @@ fn replay_ioctl(r: &Rec) {
         .into_iter()
         .map(|ev| {
             if code == ioctl::IOCTL_HID_GET_REPORT_DESCRIPTOR {
-                ev.replace("len=493", "len=511").replace("info=493", "info=511")
+                ev.replace("len=493", "len=511")
+                    .replace("info=493", "info=511")
             } else {
                 ev
             }

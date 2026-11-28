@@ -7,12 +7,16 @@ mod common;
 
 use amtptp_hidfilter_core::config::MAX_IMMEDIATE_READ_RETRIES;
 use amtptp_hidfilter_core::{
-    DeviceState, LowerReadClass, LowerReadOutcome, NtStatus, ReadTicket, STATUS_CANCELLED,
-    STATUS_SUCCESS, complete_lower_read, d0_entry, d0_exit, dispatch_internal_ioctl,
-    prepare_hardware, recovery_timer_callback, self_managed_io_init, self_managed_io_restart,
-    source_closed, source_opened, work_item_callback,
+    DeviceState, LowerReadClass, NtStatus, ReadTicket, STATUS_CANCELLED, STATUS_SUCCESS,
+};
+use common::dispatch::dispatch_internal_ioctl;
+use common::pipeline::{LowerReadOutcome, complete_lower_read, work_item_callback};
+use common::pnp::{
+    d0_entry, d0_exit, prepare_hardware, recovery_timer_callback, self_managed_io_init,
+    self_managed_io_restart, source_closed, source_opened,
 };
 use common::*;
+
 use ptp_hid::input::PTP_REPORT_LEN;
 use ptp_hid::ioctl::IOCTL_HID_READ_REPORT;
 
@@ -40,7 +44,9 @@ fn complete(
 }
 
 fn work_items(m: &Mock) -> usize {
-    m.ev.iter().filter(|e| e.starts_with("WdfWorkItemEnqueue(")).count()
+    m.ev.iter()
+        .filter(|e| e.starts_with("WdfWorkItemEnqueue("))
+        .count()
 }
 
 /// A Bluetooth Magic Trackpad 2.
@@ -63,7 +69,9 @@ fn read_report(state: &DeviceState, m: &mut Mock) -> usize {
 }
 
 fn timer_starts(m: &Mock) -> usize {
-    m.ev.iter().filter(|e| e.starts_with("WdfTimerStart(")).count()
+    m.ev.iter()
+        .filter(|e| e.starts_with("WdfTimerStart("))
+        .count()
 }
 
 /// `Init -> D0Exit -> PrepareHardware -> D0Entry -> Restart` (a resource rebalance): the IDs survive
@@ -95,10 +103,7 @@ fn lower_failure_of_a_sent_mode_switch_is_not_success() {
     m.faults.cfg_send_true_status = Some(TRUE_STATUS_FAIL);
     start(&state, &mut m);
     assert!(!state.device_configured());
-    assert!(
-        m.ev
-            .contains(&"WdfRequestGetStatus(req=cfg_req)=0xc0000001".to_owned())
-    );
+    assert!(m.ev.contains(&"WdfRequestGetStatus(req=cfg_req)=0xc0000001".to_owned()));
     assert_eq!(timer_starts(&m), 1);
     // The next attempt succeeds and configures the device.
     m.faults.cfg_send_true_status = None;
@@ -227,7 +232,10 @@ fn isolated_failed_reads_are_reissued_at_once() {
             })
         );
         assert_eq!((work_items(&m), timer_starts(&m)), (1, 0));
-        assert!(m.uppers[upper].completed.is_none(), "the upper read stays parked");
+        assert!(
+            m.uppers[upper].completed.is_none(),
+            "the upper read stays parked"
+        );
         work_item_callback(&mut m, &state);
         assert_eq!(m.in_flight(), 1, "the work item issued the read again");
     }
@@ -258,7 +266,11 @@ fn a_run_of_failed_reads_backs_off_to_the_timer() {
         assert_eq!(fail_once(&mut m), (1, 0));
         work_item_callback(&mut m, &state);
     }
-    assert_eq!(fail_once(&mut m), (0, 1), "the next failure waits for the timer");
+    assert_eq!(
+        fail_once(&mut m),
+        (0, 1),
+        "the next failure waits for the timer"
+    );
     assert!(m.ev.contains(&"WdfTimerStart(timer=timer,due=-30000000)".to_owned()));
     assert_eq!(m.in_flight(), 0);
     recovery_timer_callback(&mut m, &state);
@@ -358,7 +370,10 @@ fn another_report_is_dropped_and_the_read_reissued() {
     assert_eq!((work_items(&m), timer_starts(&m)), (1, 0));
     assert!(m.uppers[upper].completed.is_none());
     work_item_callback(&mut m, &state);
-    assert_eq!(m.lower_reads_pending, 1, "the work item issued the read again");
+    assert_eq!(
+        m.lower_reads_pending, 1,
+        "the work item issued the read again"
+    );
 }
 
 /// Not in C: after its power switch, the trackpad comes back in mouse mode while the HID device stays
@@ -390,7 +405,13 @@ fn no_mode_switch_from_the_work_item_after_d0_exit() {
     start(&state, &mut m);
     let _upper = read_report(&state, &mut m);
     let sent = m.tickets[0];
-    let _outcome = complete(&mut m, &state, sent, STATUS_SUCCESS, &[0x02, 0, 0, 0, 0, 0, 0, 0]);
+    let _outcome = complete(
+        &mut m,
+        &state,
+        sent,
+        STATUS_SUCCESS,
+        &[0x02, 0, 0, 0, 0, 0, 0, 0],
+    );
     assert_eq!(d0_exit(&mut m, &state), 0);
     m.ev.clear();
     work_item_callback(&mut m, &state);
@@ -409,7 +430,15 @@ fn information_above_the_buffer_is_not_a_length() {
     m.lower_buf[..BT_PACKET.len()].copy_from_slice(&BT_PACKET);
     m.ev.clear();
     assert_eq!(
-        complete_lower_read(&mut m, &state, ticket.0, (), ticket.1, STATUS_SUCCESS, 0x1_0000_000D),
+        complete_lower_read(
+            &mut m,
+            &state,
+            ticket.0,
+            (),
+            ticket.1,
+            STATUS_SUCCESS,
+            0x1_0000_000D
+        ),
         LowerReadOutcome::Handled(LowerReadClass::Oversize)
     );
     assert_eq!(timer_starts(&m), 1);

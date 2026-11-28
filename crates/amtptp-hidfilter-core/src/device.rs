@@ -16,7 +16,7 @@ use ptp_hid::feature::SelectiveReportBits;
 use ptp_hid::scan_time::ScanClock;
 
 use crate::feature::FeatureChange;
-use crate::input::InputLayout;
+use crate::input::{InputLayout, LowerReadClass};
 use crate::status::{NtStatus, STATUS_NOT_SUPPORTED};
 
 /// `HID_VID_APPLE_BT` (Device.h:15): Apple's Bluetooth vendor ID.
@@ -52,7 +52,7 @@ pub struct TransportParams {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Transport {
     /// VID 0x05AC. No INF binds the filter to the USB trackpad (the USB Magic Trackpad 2 has its own
-    /// driver, `AmtPtpDeviceUsbUm`); the transport is kept for the C behaviour.
+    /// driver, `AmtPtpDeviceUsbKm`); the transport is kept for the C behaviour.
     Usb,
     /// VID 0x004C (the shipping configuration).
     Bluetooth,
@@ -124,7 +124,7 @@ pub struct ModeSwitch {
 
 /// `sizeof(HID_XFER_PACKET)` on LP64: 16 bytes (`reportBuffer`@0, `reportBufferLen`@8, `reportId`@12,
 /// 3 padding bytes). `GET/SET_FEATURE` reject a transfer buffer shorter than this.
-pub const HID_XFER_PACKET_LEN: usize = 16;
+pub use ptp_hid::hidport::HID_XFER_PACKET_LEN;
 /// `offsetof(HID_XFER_PACKET, reportBuffer)`.
 pub const XFER_REPORT_BUFFER_OFFSET: usize = 0;
 /// `offsetof(HID_XFER_PACKET, reportBufferLen)`.
@@ -134,86 +134,6 @@ pub const XFER_REPORT_ID_OFFSET: usize = 12;
 /// `HID_XFER_PACKET_SIZE` (Device.h:12): the 32-byte buffer that holds the mode-switch packet followed
 /// by its report bytes. It is both the preallocated WDFMEMORY (input length 32) and `Irp->UserBuffer`.
 pub const HID_XFER_PACKET_SIZE: usize = 32;
-
-/// The 32-byte mode-switch buffer: a `HID_XFER_PACKET` at offset 0 whose `reportBuffer` points at the
-/// report bytes at offset 16 of the same buffer (self-referential, Device.c:319-361).
-///
-/// It is 8-byte aligned (the C `UCHAR[32]` is not guaranteed to be). All other bytes are zero, as after
-/// the C `RtlZeroMemory`. The buffer must not move between [`XferBuffer::link_report_buffer`] and the
-/// end of the synchronous send; [`crate::configure_multitouch`] keeps it in one local for that time.
-#[repr(C, align(8))]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct XferBuffer {
-    bytes: [u8; HID_XFER_PACKET_SIZE],
-}
-
-impl XferBuffer {
-    /// Builds the zeroed packet with `reportBufferLen`, `reportId` and the report bytes. The
-    /// `reportBuffer` pointer (bytes 0..8) is left 0 until [`Self::link_report_buffer`].
-    #[must_use]
-    pub fn new(mode_switch: ModeSwitch) -> Self {
-        let mut bytes = [0_u8; HID_XFER_PACKET_SIZE];
-        // A payload is at most 4 bytes, so the length always fits in the ULONG.
-        let len = u32::try_from(mode_switch.payload.len()).unwrap_or(0);
-        copy_into(
-            &mut bytes,
-            XFER_REPORT_BUFFER_LEN_OFFSET,
-            &len.to_le_bytes(),
-        );
-        copy_into(&mut bytes, XFER_REPORT_ID_OFFSET, &[mode_switch.report_id]);
-        copy_into(&mut bytes, HID_XFER_PACKET_LEN, mode_switch.payload);
-        Self { bytes }
-    }
-
-    /// Writes `reportBuffer` = the address of byte 16 of this buffer (`(PUCHAR)pHidPacket +
-    /// sizeof(HID_XFER_PACKET)`), little-endian, into bytes 0..8.
-    pub fn link_report_buffer(&mut self) {
-        // Pointer-to-integer conversion: the address the minidriver will dereference.
-        let address = (self.bytes.as_ptr() as usize).wrapping_add(HID_XFER_PACKET_LEN) as u64;
-        copy_into(
-            &mut self.bytes,
-            XFER_REPORT_BUFFER_OFFSET,
-            &address.to_le_bytes(),
-        );
-    }
-
-    /// The 32 bytes as they are sent.
-    #[must_use]
-    pub const fn as_bytes(&self) -> &[u8; HID_XFER_PACKET_SIZE] {
-        &self.bytes
-    }
-
-    /// Pointer to the start of the buffer, for `WdfMemoryCreatePreallocated` and `Irp->UserBuffer`.
-    pub const fn as_mut_ptr(&mut self) -> *mut u8 {
-        self.bytes.as_mut_ptr()
-    }
-
-    /// The report the packet carries: the `reportBufferLen` bytes after the 16-byte header, i.e. the
-    /// report ID and then the report (`F1 02 01` on Bluetooth). The class `IOCTL_HID_SET_FEATURE`
-    /// takes exactly these bytes as its input buffer.
-    #[must_use]
-    pub fn report_mut(&mut self) -> &mut [u8] {
-        let len = self
-            .bytes
-            .get(XFER_REPORT_BUFFER_LEN_OFFSET..XFER_REPORT_BUFFER_LEN_OFFSET + 4)
-            .and_then(|field| <[u8; 4]>::try_from(field).ok())
-            .map_or(0, u32::from_le_bytes);
-        let len = usize::try_from(len).unwrap_or(0);
-        self.bytes
-            .get_mut(HID_XFER_PACKET_LEN..HID_XFER_PACKET_LEN.saturating_add(len))
-            .unwrap_or_default()
-    }
-}
-
-/// Copies `src` to `dst[offset..]`, never panicking (bytes that do not fit are dropped; every caller
-/// writes within the 32-byte buffer).
-fn copy_into(dst: &mut [u8], offset: usize, src: &[u8]) {
-    if let Some(tail) = dst.get_mut(offset..) {
-        for (d, s) in tail.iter_mut().zip(src) {
-            *d = *s;
-        }
-    }
-}
 
 /// A plain copy of every [`DeviceState`] field, for tracing and tests.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -288,7 +208,7 @@ const POWER_IN_D0: u32 = 2;
 /// One step of the epoch in the upper bits of `DeviceState::power`: every `D0Exit` advances it.
 const POWER_EPOCH_STEP: u32 = 4;
 
-/// Taken by the recovery timer before its mode switch ([`crate::recovery_timer_callback`]): the power word
+/// Taken by the recovery timer before its mode switch (`recovery_timer_callback`): the power word
 /// it saw, which must still hold when it marks the device configured.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RecoveryTicket {
@@ -308,7 +228,7 @@ pub struct RecoveryTicket {
 /// mode switch ran.
 ///
 /// The glue keeps the WDF handles (queues, timer, work item, lookaside list, I/O target) itself, and the
-/// tracker of the lower reads in flight behind its own lock ([`crate::FilterIo::with_reads`]).
+/// tracker of the lower reads in flight behind its own lock.
 #[derive(Debug)]
 pub struct DeviceState {
     vendor_id: AtomicU16,
@@ -326,14 +246,13 @@ pub struct DeviceState {
     /// `Acquire` before using it.
     source_open: AtomicBool,
     ptp_input_on: AtomicBool,
-    ptp_report_touch: AtomicBool,
-    ptp_report_button: AtomicBool,
+    reporting: ptp_hid::feature::SelectiveReportState,
     /// Lower reads of the current epoch that failed in a row (not in C): any other completion resets it.
     read_failures: AtomicU32,
     /// A report other than the multitouch report arrived: the work item sends the mode switch again (not
     /// in C).
     mode_switch_wanted: AtomicBool,
-    pub(crate) scan_clock: ScanClock,
+    scan_clock: ScanClock,
 }
 
 impl Default for DeviceState {
@@ -342,7 +261,62 @@ impl Default for DeviceState {
     }
 }
 
+/// Work requested by the input state machine after a current-epoch read.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReadAction {
+    /// Drop the completion while stopped.
+    Drop,
+    /// Reject an incompatible lower device.
+    FailDevice,
+    /// Reissue from the passive work item.
+    Retry,
+    /// Back off after repeated failures or malformed input.
+    ArmTimer,
+    /// Deliver a validated report of the given length.
+    Deliver(usize),
+}
+
 impl DeviceState {
+    /// Applies a classified read event and returns the work for the driver.
+    pub fn on_read(&self, class: LowerReadClass) -> ReadAction {
+        if !matches!(class, LowerReadClass::Failed { .. }) {
+            self.note_read_completion();
+        }
+        match class {
+            LowerReadClass::UnsupportedVendor => ReadAction::FailDevice,
+            LowerReadClass::Failed { .. }
+                if self.note_read_failure() <= crate::config::MAX_IMMEDIATE_READ_RETRIES =>
+            {
+                ReadAction::Retry
+            }
+            LowerReadClass::Failed { .. } if !self.in_d0() => ReadAction::Drop,
+            LowerReadClass::Failed { .. }
+            | LowerReadClass::Oversize
+            | LowerReadClass::Malformed => ReadAction::ArmTimer,
+            LowerReadClass::Empty => ReadAction::Retry,
+            LowerReadClass::OtherReport { .. } => {
+                self.request_mode_switch();
+                ReadAction::Retry
+            }
+            LowerReadClass::Report { length } => ReadAction::Deliver(length),
+        }
+    }
+
+    /// Selects the transport layout and the report sent to enter multitouch mode.
+    ///
+    /// # Errors
+    /// Returns the transport-selection status for an unsupported device.
+    pub fn mode_switch_report(&self) -> Result<ModeSwitch, NtStatus> {
+        let transport = Transport::from_ids(self.vendor_id(), self.product_id())?;
+        self.apply_transport_params(&transport.params());
+        Ok(transport.mode_switch())
+    }
+
+    /// Samples the current reporting session clock.
+    pub fn sample_scan_time(&self, counter: i64) -> u16 {
+        self.scan_clock.sample(counter)
+    }
+
     /// All fields zero / FALSE except `ptp_input_on` and the two selective-reporting switches, which
     /// start on (`true` / [`SelectiveReportBits::POWER_ON`]) so PTP reports flow as soon as the
     /// multitouch mode switch completes unless the host explicitly switches to mouse mode (`0x04 = 0`)
@@ -369,7 +343,7 @@ impl DeviceState {
     }
 
     /// Initializes device state from a snapshot and starts a fresh reporting clock. The device is not in
-    /// D0 (call [`crate::d0_entry`]).
+    /// D0 (call `d0_entry`).
     #[must_use]
     pub const fn with(s: &DeviceSnapshot) -> Self {
         Self {
@@ -389,8 +363,10 @@ impl DeviceState {
             }),
             source_open: AtomicBool::new(s.source_open),
             ptp_input_on: AtomicBool::new(s.ptp_input_on),
-            ptp_report_touch: AtomicBool::new(s.ptp_report_touch),
-            ptp_report_button: AtomicBool::new(s.ptp_report_button),
+            reporting: ptp_hid::feature::SelectiveReportState::new(SelectiveReportBits {
+                surface_report: s.ptp_report_touch,
+                button_report: s.ptp_report_button,
+            }),
             read_failures: AtomicU32::new(0),
             mode_switch_wanted: AtomicBool::new(false),
             scan_clock: ScanClock::with_frequency(s.qpc_frequency),
@@ -398,7 +374,7 @@ impl DeviceState {
     }
 
     /// A lower read failed: returns how many reads have now failed in a row (saturating).
-    pub(crate) fn note_read_failure(&self) -> u32 {
+    pub fn note_read_failure(&self) -> u32 {
         let mut current = self.read_failures.load(Ordering::Relaxed);
         loop {
             let next = current.saturating_add(1);
@@ -415,22 +391,23 @@ impl DeviceState {
     }
 
     /// A lower read completed without failing: the run of failures ends.
-    pub(crate) fn note_read_completion(&self) {
+    pub fn note_read_completion(&self) {
         self.read_failures.store(0, Ordering::Relaxed);
     }
 
     /// Asks the work item to send the mode switch again.
-    pub(crate) fn request_mode_switch(&self) {
+    pub fn request_mode_switch(&self) {
         self.mode_switch_wanted.store(true, Ordering::Relaxed);
     }
 
     /// Takes a pending mode-switch request (the work item).
-    pub(crate) fn take_mode_switch_request(&self) -> bool {
+    pub fn take_mode_switch_request(&self) -> bool {
         self.mode_switch_wanted.swap(false, Ordering::Relaxed)
     }
 
     /// Reads every field (each with its own relaxed load).
     pub fn snapshot(&self) -> DeviceSnapshot {
+        let reporting = self.reporting.load();
         DeviceSnapshot {
             vendor_id: self.vendor_id(),
             product_id: self.product_id(),
@@ -444,8 +421,8 @@ impl DeviceState {
             device_configured: self.device_configured(),
             source_open: self.source_open(),
             ptp_input_on: self.ptp_input_on.load(Ordering::Relaxed),
-            ptp_report_touch: self.ptp_report_touch.load(Ordering::Relaxed),
-            ptp_report_button: self.ptp_report_button.load(Ordering::Relaxed),
+            ptp_report_touch: reporting.surface_report,
+            ptp_report_button: reporting.button_report,
             qpc_frequency: self.qpc_frequency(),
         }
     }
@@ -508,18 +485,18 @@ impl DeviceState {
         }
     }
 
-    /// Whether the device is in D0 (between [`crate::d0_entry`] and [`crate::d0_exit`]).
+    /// Whether the device is in D0 (between `d0_entry` and `d0_exit`).
     pub fn in_d0(&self) -> bool {
         self.power.load(Ordering::SeqCst) & POWER_IN_D0 != 0
     }
 
     /// `D0Entry`: the device is in D0.
-    pub(crate) fn enter_d0(&self) {
+    pub fn enter_d0(&self) {
         self.power.fetch_or(POWER_IN_D0, Ordering::SeqCst);
     }
 
     /// `D0Exit`: not in D0, not configured, next epoch.
-    pub(crate) fn leave_d0(&self) {
+    pub fn leave_d0(&self) {
         let mut power = self.power.load(Ordering::SeqCst);
         loop {
             let next = (power & !(POWER_CONFIGURED | POWER_IN_D0)).wrapping_add(POWER_EPOCH_STEP);
@@ -534,14 +511,14 @@ impl DeviceState {
     }
 
     /// The recovery timer may work on the device only while it is in D0.
-    pub(crate) fn begin_recovery(&self) -> Option<RecoveryTicket> {
+    pub fn begin_recovery(&self) -> Option<RecoveryTicket> {
         let power = self.power.load(Ordering::SeqCst);
         (power & POWER_IN_D0 != 0).then_some(RecoveryTicket { power })
     }
 
     /// Marks the device configured if nothing changed since `ticket` was taken (in particular, no
     /// `D0Exit`). Returns whether it did.
-    pub(crate) fn finish_recovery(&self, ticket: RecoveryTicket) -> bool {
+    pub fn finish_recovery(&self, ticket: RecoveryTicket) -> bool {
         self.power
             .compare_exchange(
                 ticket.power,
@@ -558,7 +535,7 @@ impl DeviceState {
     }
 
     /// Records that the data source opened or closed.
-    pub(crate) fn set_source_open(&self, open: bool) {
+    pub fn set_source_open(&self, open: bool) {
         self.source_open.store(open, Ordering::Release);
     }
 
@@ -568,16 +545,13 @@ impl DeviceState {
     }
 
     /// Caches the QPC frequency and starts a new input-reporting session.
-    pub(crate) fn set_qpc_frequency(&self, value: i64) {
+    pub fn set_qpc_frequency(&self, value: i64) {
         self.scan_clock.restart(value);
     }
 
     /// The selective-reporting switches configured by `SET_FEATURE` 0x06.
     pub fn selective_reporting(&self) -> SelectiveReportBits {
-        SelectiveReportBits {
-            surface_report: self.ptp_report_touch.load(Ordering::Relaxed),
-            button_report: self.ptp_report_button.load(Ordering::Relaxed),
-        }
+        self.reporting.load()
     }
 
     /// Effective input gates combining `ptp_input_on` (`SET_FEATURE` 0x04) with
@@ -595,7 +569,7 @@ impl DeviceState {
 
     /// Back to power-on enabled state (`ptp_input_on = true` and [`SelectiveReportBits::POWER_ON`];
     /// `PrepareHardware`).
-    pub(crate) fn reset_selective_reporting(&self) {
+    pub fn reset_selective_reporting(&self) {
         self.ptp_input_on.store(true, Ordering::Relaxed);
         self.apply_feature_change(FeatureChange::SelectiveReporting {
             button_report: SelectiveReportBits::POWER_ON.button_report,
@@ -614,10 +588,10 @@ impl DeviceState {
                 button_report,
                 surface_report,
             } => {
-                self.ptp_report_button
-                    .store(button_report, Ordering::Relaxed);
-                self.ptp_report_touch
-                    .store(surface_report, Ordering::Relaxed);
+                self.reporting.store(SelectiveReportBits {
+                    surface_report,
+                    button_report,
+                });
             }
         }
     }
@@ -626,6 +600,27 @@ impl DeviceState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_events_back_off_and_reset_after_success() {
+        let state = DeviceState::new();
+        state.enter_d0();
+        let failed = LowerReadClass::Failed { status: -1 };
+        for _ in 0..crate::config::MAX_IMMEDIATE_READ_RETRIES {
+            assert_eq!(state.on_read(failed), ReadAction::Retry);
+        }
+        assert_eq!(state.on_read(failed), ReadAction::ArmTimer);
+        assert_eq!(
+            state.on_read(LowerReadClass::OtherReport { report_id: 1 }),
+            ReadAction::Retry
+        );
+        assert!(state.take_mode_switch_request());
+        assert_eq!(state.on_read(failed), ReadAction::Retry);
+        assert_eq!(
+            state.on_read(LowerReadClass::Report { length: 13 }),
+            ReadAction::Deliver(13)
+        );
+    }
 
     #[test]
     fn transport_checks_in_c_order() {
@@ -644,32 +639,6 @@ mod tests {
         );
         assert_eq!(Transport::Usb.params().header_size, 12);
         assert_eq!(Transport::Bluetooth.params().header_size, 4);
-    }
-
-    #[test]
-    fn xfer_buffer_report_is_the_report_id_and_payload() {
-        let mut bt = XferBuffer::new(Transport::Bluetooth.mode_switch());
-        bt.link_report_buffer();
-        assert_eq!(bt.report_mut(), &[0xF1, 0x02, 0x01]);
-        let mut usb = XferBuffer::new(Transport::Usb.mode_switch());
-        assert_eq!(usb.report_mut(), &[0x02, 0x01, 0x00, 0x00]);
-    }
-
-    #[test]
-    fn xfer_buffer_layout() {
-        let mut b = XferBuffer::new(Transport::Bluetooth.mode_switch());
-        assert_eq!(
-            b.as_bytes()[8..],
-            [
-                3, 0, 0, 0, 0xF1, 0, 0, 0, 0xF1, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
-            ]
-        );
-        assert_eq!(b.as_bytes()[..8], [0; 8]);
-        b.link_report_buffer();
-        let base = b.as_bytes().as_ptr() as u64;
-        let ptr = u64::from_le_bytes(b.as_bytes()[..8].try_into().unwrap());
-        assert_eq!(ptr - base, 16);
-        assert_eq!(core::mem::align_of::<XferBuffer>(), 8);
     }
 
     #[test]

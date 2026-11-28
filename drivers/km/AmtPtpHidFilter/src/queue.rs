@@ -4,7 +4,9 @@
 //! IRQL <= `DISPATCH_LEVEL` and are non-paged. Only `IRP_MJ_INTERNAL_DEVICE_CONTROL` is handled here;
 //! KMDF forwards every other major function of a filter device to the lower driver.
 
-use amtptp_hidfilter_core::{InternalIoctl, dispatch_internal_ioctl};
+use crate::io::dispatch_internal_ioctl;
+use amtptp_hidfilter_core::InternalIoctl;
+
 use ptp_hid::ioctl::ioctl_name;
 use tracelogging as tlg;
 use wdk_sys::{ULONG, WDFQUEUE, WDFREQUEST};

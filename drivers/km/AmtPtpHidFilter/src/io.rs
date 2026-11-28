@@ -1,24 +1,4 @@
-//! [`FilterIo`] for the device: one WDF (or kernel) call per trait method, exactly the calls the C
-//! code makes in `Input.c`, `Hid.c` and `Device.c` that the oracle records, plus the lower-read
-//! completion routine. Pure accessors may differ from C without effect: `WdfMemoryGetBuffer` is
-//! called only on the report path of the completion (C: at entry, with a NULL size), and
-//! `GET/SET_FEATURE` take their lengths from the `EvtIoInternalDeviceControl` arguments instead of
-//! `WdfRequestGetParameters` (the same IRP stack-location fields).
-//!
-//! The core decides *which* call happens *when* (it is replayed against the C oracle); this module
-//! only has to make each call with the C arguments. No method adds its own buffer checks in front
-//! of a framework call, so framework-originated statuses (e.g. `STATUS_BUFFER_TOO_SMALL` from
-//! `WdfRequestRetrieveOutputMemory` / `WdfMemoryCopyFromBuffer`) are KMDF's, as in C.
-//!
-//! IRQL: everything here except the mode switch may run at `DISPATCH_LEVEL` (parallel default queue,
-//! completion routine) and is non-paged. The synchronous mode switch is only reached from
-//! `EvtDeviceSelfManagedIoRestart`, the passive-level recovery timer and work item, and the source
-//! work item, i.e. at `PASSIVE_LEVEL`, as in C.
-//!
-//! Every lower request goes to the data source (the vendor collection `Col03`, see [`crate::source`]):
-//! the reads are `IRP_MJ_READ`s of one padded report, which the completion routine un-pads before the
-//! core sees it, and the mode switch is the class `IOCTL_HID_SET_FEATURE`. C sent minidriver IOCTLs to
-//! the PDO through the HIDCLASS detour instead.
+//! Framework I/O for the Bluetooth HID collection.
 
 use core::ffi::c_void;
 use core::mem::size_of;
@@ -26,9 +6,8 @@ use core::ptr::null_mut;
 
 use amtptp_hidfilter_core::bth::{PADDED_REPORT_LEN, PaddedReport, unpad_report};
 use amtptp_hidfilter_core::{
-    ContactTracker, FailedAction, FeatureChange, FilterIo, HID_XFER_PACKET_SIZE, LowerReadClass,
-    LowerReadOutcome, NtStatus, ReadTicket, ReadTracker, STATUS_INVALID_DEVICE_REQUEST,
-    STATUS_INVALID_DEVICE_STATE, XferBuffer, XferPacket, XferPacketMut, complete_lower_read,
+    ContactTracker, FeatureChange, LowerReadClass, NtStatus, ReadTicket, ReadTracker,
+    STATUS_INVALID_DEVICE_REQUEST, STATUS_INVALID_DEVICE_STATE, XferPacket, XferPacketMut,
     decode_set_feature,
 };
 use ptp_hid::hidport::{
@@ -40,15 +19,14 @@ use tracelogging as tlg;
 use wdf_support::handle::{ContextPtr, WdfHandle};
 use wdf_support::hid as wdf_hid;
 use wdf_support::init::{
-    object_attributes_init, object_attributes_init_context_type, request_parameters_init,
-    sync_send_options,
+    object_attributes_init_context_type, request_parameters_init, sync_send_options,
 };
 use wdf_support::ntstatus::{NT_SUCCESS, STATUS_INVALID_PARAMETER};
 use wdf_support::request::Request;
 use wdk_sys::{
-    _WDF_DEVICE_FAILED_ACTION, _WDF_REQUEST_SEND_OPTIONS_FLAGS, HID_XFER_PACKET,
-    PWDF_REQUEST_COMPLETION_PARAMS, ULONG, ULONG_PTR, WDF_NO_OBJECT_ATTRIBUTES, WDFCONTEXT,
-    WDFIOTARGET, WDFMEMORY, WDFMEMORY_OFFSET, WDFREQUEST, call_unsafe_wdf_function_binding,
+    _WDF_DEVICE_FAILED_ACTION, HID_XFER_PACKET, PWDF_REQUEST_COMPLETION_PARAMS, ULONG, ULONG_PTR,
+    WDFCONTEXT, WDFIOTARGET, WDFMEMORY, WDFMEMORY_OFFSET, WDFREQUEST,
+    call_unsafe_wdf_function_binding,
 };
 
 use crate::context::{
@@ -57,8 +35,28 @@ use crate::context::{
 };
 use crate::{KW_DEVICE, KW_HID, KW_INPUT, PROVIDER};
 
+mod dispatch;
+mod pipeline;
+mod pnp;
+pub(crate) use dispatch::dispatch_internal_ioctl;
+pub(crate) use pipeline::{LowerReadOutcome, complete_lower_read, work_item_callback};
+pub(crate) use pnp::{
+    d0_entry, d0_exit, prepare_hardware, recovery_timer_callback, self_managed_io_init,
+    self_managed_io_restart, source_closed, source_opened,
+};
+
+type UpperRequest = WDFREQUEST;
+type ReadMemory = WDFMEMORY;
+/// `WDF_DEVICE_FAILED_ACTION` for `WdfDeviceSetFailed`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FailedAction {
+    /// `WdfDeviceFailedAttemptRestart`.
+    AttemptRestart,
+    /// `WdfDeviceFailedNoRestart`.
+    NoRestart,
+}
+
 const _: () = assert!(size_of::<HID_XFER_PACKET>() == amtptp_hidfilter_core::HID_XFER_PACKET_LEN);
-const _: () = assert!(size_of::<XferBuffer>() == HID_XFER_PACKET_SIZE);
 const _: () = assert!(size_of::<ULONG_PTR>() == size_of::<usize>());
 
 /// The device's framework operations, for one callback invocation. Holds only a shared reference
@@ -112,14 +110,15 @@ unsafe fn object_delete<T>(object: *mut T) {
     unsafe { call_unsafe_wdf_function_binding!(WdfObjectDelete, object.cast::<c_void>()) };
 }
 
-impl FilterIo for Filter<'_> {
-    type Request = WDFREQUEST;
-    type Memory = WDFMEMORY;
-    type LowerRead = LowerRead;
-    type LowerMemory = WDFMEMORY;
-    type ModeSwitchRequest = WDFREQUEST;
-    type ModeSwitchMemory = WDFMEMORY;
-
+#[expect(
+    clippy::unused_self,
+    reason = "Callbacks use the same operation receiver for live requests and for the recording backend."
+)]
+#[expect(
+    clippy::needless_pass_by_ref_mut,
+    reason = "The exclusive receiver limits the lifetime of borrowed framework request and report buffers."
+)]
+impl Filter<'_> {
     // ---- upper requests ------------------------------------------------------------------------
 
     fn complete(&mut self, request: WDFREQUEST, status: NtStatus) {
@@ -648,120 +647,32 @@ impl FilterIo for Filter<'_> {
 
     // ---- mode switch (Device.c:371-418) --------------------------------------------------------
 
-    fn create_mode_switch_request(&mut self) -> Result<WDFREQUEST, NtStatus> {
-        let Some(target) = self.io_target() else {
-            return Err(STATUS_INVALID_DEVICE_STATE);
-        };
-        let mut request: WDFREQUEST = null_mut();
-        // SAFETY: no attributes (WDF_NO_OBJECT_ATTRIBUTES, as in C); `target` is the default local
-        // target; `request` is a valid out pointer.
-        let status = unsafe {
-            call_unsafe_wdf_function_binding!(
-                WdfRequestCreate,
-                WDF_NO_OBJECT_ATTRIBUTES,
-                target,
-                &raw mut request
-            )
-        };
-        if NT_SUCCESS(status) {
-            Ok(request)
-        } else {
-            Err(status)
-        }
-    }
-
-    fn create_mode_switch_memory(
-        &mut self,
-        request: WDFREQUEST,
-        packet: &mut XferBuffer,
-    ) -> Result<WDFMEMORY, NtStatus> {
-        // The report (ID first) the packet carries; the class IOCTL sends exactly these bytes.
-        let report = packet.report_mut();
-        if report.is_empty() {
-            return Err(STATUS_INVALID_PARAMETER);
-        }
-        let mut attributes = object_attributes_init();
-        attributes.ParentObject = request.cast();
-        let mut memory: WDFMEMORY = null_mut();
-        // SAFETY: `report` lies in the 32-byte mode-switch buffer, kept in place by the core until
-        // the synchronous send has returned and the request (the memory's parent) has been deleted.
-        let status = unsafe {
-            call_unsafe_wdf_function_binding!(
-                WdfMemoryCreatePreallocated,
-                &raw mut attributes,
-                report.as_mut_ptr().cast::<c_void>(),
-                report.len(),
-                &raw mut memory
-            )
-        };
-        if NT_SUCCESS(status) {
-            Ok(memory)
-        } else {
-            Err(status)
-        }
-    }
-
-    fn format_mode_switch(&mut self, request: WDFREQUEST, memory: WDFMEMORY) -> NtStatus {
+    fn send_mode_report(&mut self, report: amtptp_hidfilter_core::ModeSwitch) -> NtStatus {
         let Some(target) = self.io_target() else {
             return STATUS_INVALID_DEVICE_STATE;
         };
-        // SAFETY: driver-created request for `target`; `memory` (the report, ID first) is the class
-        // IOCTL's input buffer; no output, no offsets.
-        unsafe {
+        let mut input = wdf_support::init::memory_descriptor_init_buffer(
+            report.payload.as_ptr().cast_mut().cast(),
+            report.payload.len() as ULONG,
+        );
+        let mut options = sync_send_options(0);
+        let started = wdf_support::time::query_performance_counter();
+        // SAFETY: the class IOCTL reads the static report. The target is live,
+        // and this synchronous call runs in a passive callback.
+        let status = unsafe {
             call_unsafe_wdf_function_binding!(
-                WdfIoTargetFormatRequestForIoctl,
+                WdfIoTargetSendIoctlSynchronously,
                 target,
-                request,
+                null_mut(),
                 IOCTL_HID_SET_FEATURE,
-                memory,
+                &raw mut input,
                 null_mut(),
-                null_mut(),
+                &raw mut options,
                 null_mut()
             )
-        }
-    }
-
-    fn set_mode_switch_user_buffer(
-        &mut self,
-        _request: WDFREQUEST,
-        _packet: &mut XferBuffer,
-    ) -> bool {
-        // The class IOCTL carries the report in its input buffer; no Irp->UserBuffer (C set it for
-        // the minidriver IOCTL).
-        true
-    }
-
-    fn send_mode_switch_synchronously(&mut self, request: WDFREQUEST) -> bool {
-        let Some(target) = self.io_target() else {
-            return false;
-        };
-        // C sends without a timeout (HF-B27); the port bounds the wait.
-        let mut options = sync_send_options(
-            // Small non-negative enum constant (0x2).
-            _WDF_REQUEST_SEND_OPTIONS_FLAGS::WDF_REQUEST_SEND_OPTION_SYNCHRONOUS as ULONG,
-        );
-        let started = wdf_support::time::query_performance_counter();
-        // SAFETY: PASSIVE_LEVEL (SelfManagedIoRestart, the passive-level timer or a work item);
-        // formatted request for `target`; synchronous, so the mode-switch buffer outlives the
-        // request (on a timeout the framework cancels the request and waits for it to complete).
-        let sent = unsafe {
-            call_unsafe_wdf_function_binding!(WdfRequestSend, request, target, &raw mut options)
         };
         let elapsed_ms = elapsed_ms_since(started);
-        // SAFETY: live driver-created request (the send returned).
-        let status = unsafe { call_unsafe_wdf_function_binding!(WdfRequestGetStatus, request) };
-        // The status and the time taken (not in C): after a resume the first switch can be busy or
-        // wait for the whole timeout.
-        if sent != 0 {
-            tlg::write_event!(
-                PROVIDER,
-                "MultitouchModeSet",
-                level(Informational),
-                keyword(KW_DEVICE),
-                win_ntstatus("Status", &status),
-                u64("ElapsedMs", &elapsed_ms)
-            );
-        } else {
+        if !NT_SUCCESS(status) {
             tlg::write_event!(
                 PROVIDER,
                 "MultitouchModeSendFailed",
@@ -770,19 +681,17 @@ impl FilterIo for Filter<'_> {
                 win_ntstatus("Status", &status),
                 u64("ElapsedMs", &elapsed_ms)
             );
+            return status;
         }
-        sent != 0
-    }
-
-    fn mode_switch_status(&mut self, request: WDFREQUEST) -> NtStatus {
-        // SAFETY: live driver-created request (the send returned).
-        unsafe { call_unsafe_wdf_function_binding!(WdfRequestGetStatus, request) }
-    }
-
-    fn delete_mode_switch_request(&mut self, request: WDFREQUEST) {
-        // SAFETY: driver-created request, not pending (the synchronous send returned or it was
-        // never sent); deleting it also deletes its child memory.
-        unsafe { object_delete(request) };
+        tlg::write_event!(
+            PROVIDER,
+            "MultitouchModeSet",
+            level(Informational),
+            keyword(KW_DEVICE),
+            win_ntstatus("Status", &status),
+            u64("ElapsedMs", &elapsed_ms)
+        );
+        status
     }
 }
 
@@ -911,8 +820,7 @@ unsafe fn unpad(memory: WDFMEMORY, status: NtStatus, information: usize) -> usiz
     }
     // SAFETY: `size` bytes at `buffer` belong to the memory object, which nothing else touches
     // while its read is being completed.
-    let report =
-        unsafe { core::slice::from_raw_parts_mut(buffer.cast::<u8>(), PADDED_REPORT_LEN) };
+    let report = unsafe { core::slice::from_raw_parts_mut(buffer.cast::<u8>(), PADDED_REPORT_LEN) };
     match unpad_report(report) {
         Some(PaddedReport::Multitouch(raw)) => raw.len(),
         Some(PaddedReport::ModeLost(report_id)) => {

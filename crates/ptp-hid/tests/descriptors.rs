@@ -13,18 +13,15 @@ use std::collections::BTreeMap;
 use ptp_hid::common::{MAX_FINGERS, PTP_COLLECTION_WINDOWS};
 use ptp_hid::descriptor::{
     Axes, FINGER_COLLECTION_SPI_LEN, FINGER_COLLECTION_U32_ID_LEN, FINGER_SEPARATOR_LEN,
-    GLOBAL_RESET, REPORT_DESCRIPTOR_SPI_UMAPP_LEN, REPORT_DESCRIPTOR_U32_ID_LEN,
-    REPORT_DESCRIPTOR_U32_ID_UMAPP_LEN, SPI_CONTACT_ID_LOGICAL_MAX, SPI_CONTACT_ID_MAX_OFFSETS,
-    TOUCHPAD_TLC_HEADER_LEN, TlcUsage, report_descriptor_spi_umapp, report_descriptor_u32_id,
-    report_descriptor_u32_id_umapp,
+    GLOBAL_RESET, REPORT_DESCRIPTOR_SPI_LEN, REPORT_DESCRIPTOR_U32_ID_LEN,
+    SPI_CONTACT_ID_LOGICAL_MAX, SPI_CONTACT_ID_MAX_OFFSETS, TOUCHPAD_TLC_HEADER_LEN, TlcUsage,
+    report_descriptor_spi, report_descriptor_u32_id,
 };
 use ptp_hid::feature::{
     DEVICE_CAPS_REPORT_LEN, HQA_BLOB, HQA_REPORT_LEN, INPUT_MODE_REPORT_LEN,
-    SELECTIVE_REPORT_DEVICE_MODE_STRUCT_LEN, SELECTIVE_REPORT_LEN, UMAPP_CONF_REPORT_LEN,
+    SELECTIVE_REPORT_DEVICE_MODE_STRUCT_LEN, SELECTIVE_REPORT_LEN,
 };
-use ptp_hid::hidport::{
-    HID_DESCRIPTOR_SPI_UMAPP, HID_DESCRIPTOR_U32_ID, HID_DESCRIPTOR_U32_ID_UMAPP, hid_descriptor,
-};
+use ptp_hid::hidport::{HID_DESCRIPTOR_SPI, HID_DESCRIPTOR_U32_ID, hid_descriptor};
 use ptp_hid::input::{PTP_CONTACT_LEN, PTP_REPORT_LEN, SPI_PTP_CONTACT_LEN, SPI_PTP_REPORT_LEN};
 use ptp_hid::item::{
     BEGIN_COLLECTION, END_COLLECTION, FEATURE, INPUT, LOGICAL_MAXIMUM, LOGICAL_MAXIMUM_2,
@@ -62,12 +59,11 @@ const SPI_SERIES3_13: Axes = axes(12992, 1352, 836, 7855);
 const SPI_SERIES3_15: Axes = axes(15432, 1584, 992, 9446);
 
 // Built in const/static context, exactly as a core crate would.
-const UM_MT2: [u8; REPORT_DESCRIPTOR_U32_ID_UMAPP_LEN] =
-    report_descriptor_u32_id_umapp(MAGIC_TRACKPAD2);
+const UM_MT2: [u8; REPORT_DESCRIPTOR_U32_ID_LEN] = report_descriptor_u32_id(MAGIC_TRACKPAD2);
 static KM_T2: [u8; REPORT_DESCRIPTOR_U32_ID_LEN] = report_descriptor_u32_id(WELLSPRING_T2);
 static FLT_MT2: [u8; REPORT_DESCRIPTOR_U32_ID_LEN] = report_descriptor_u32_id(MAGIC_TRACKPAD2);
-const SPI_S1: [u8; REPORT_DESCRIPTOR_SPI_UMAPP_LEN] =
-    report_descriptor_spi_umapp(TlcUsage::TouchPad, SPI_SERIES1);
+const SPI_S1: [u8; REPORT_DESCRIPTOR_SPI_LEN] =
+    report_descriptor_spi(TlcUsage::TouchPad, SPI_SERIES1);
 
 /// One parsed fixture file: named byte entries plus the `sizeof` key/value pairs.
 struct Fixture {
@@ -145,9 +141,9 @@ fn hqa() -> Fixture {
 /// The 16 descriptors: (fixture file, entry name, Rust builder output downgraded only at the four
 /// intentional HID conformance fixes so every other byte is verified against the C fixture).
 fn all_sixteen_as_legacy_c() -> Vec<(&'static str, &'static str, Vec<u8>)> {
-    let u32_umapp = |a| to_legacy_c_u32(&report_descriptor_u32_id_umapp(a));
-    let spi_pad = |a| to_legacy_c_spi(&report_descriptor_spi_umapp(TlcUsage::TouchPad, a));
-    let spi_ts = |a| to_legacy_c_spi(&report_descriptor_spi_umapp(TlcUsage::TouchScreen, a));
+    let u32_umapp = |a| to_legacy_um(&report_descriptor_u32_id(a));
+    let spi_pad = |a| to_legacy_c_spi(&report_descriptor_spi(TlcUsage::TouchPad, a));
+    let spi_ts = |a| to_legacy_c_spi(&report_descriptor_spi(TlcUsage::TouchScreen, a));
     vec![
         ("um", "AmtPtp3ReportDescriptor", u32_umapp(WELLSPRING3)),
         ("um", "AmtPtp5ReportDescriptor", u32_umapp(WELLSPRING5)),
@@ -189,17 +185,33 @@ fn to_legacy_c_u32(bytes: &[u8]) -> Vec<u8> {
 
 /// Converts a clean SPI Rust report descriptor into its legacy C counterpart by undoing the SPI
 /// `ContactID` logical maximum fix (`4 -> 3`) and the three shared descriptor fixes.
+const LEGACY_SETTINGS_TLC: &[u8] = &[
+    0x06, 0, 0xff, 9, 1, 0xa1, 1, 0x85, 9, 9, 1, 0x15, 0, 0x26, 0xff, 0, 0x75, 8, 0x95, 3, 0xb1, 2,
+    0xc0,
+];
+fn to_legacy_um(bytes: &[u8]) -> Vec<u8> {
+    let mut legacy = to_legacy_c_u32(bytes);
+    legacy.extend_from_slice(LEGACY_SETTINGS_TLC);
+    legacy
+}
+
 fn to_legacy_c_spi(bytes: &[u8]) -> Vec<u8> {
     let mut patched = bytes.to_vec();
     for offset in SPI_CONTACT_ID_MAX_OFFSETS {
-        assert_eq!(patched[offset - 1], 0x25, "Logical Maximum item at {offset}");
+        assert_eq!(
+            patched[offset - 1],
+            0x25,
+            "Logical Maximum item at {offset}"
+        );
         assert_eq!(
             patched[offset], SPI_CONTACT_ID_LOGICAL_MAX,
             "contact-ID maximum at {offset}"
         );
         patched[offset] = 3;
     }
-    to_legacy_c_common(&patched, FINGER_COLLECTION_SPI_LEN)
+    let mut legacy = to_legacy_c_common(&patched, FINGER_COLLECTION_SPI_LEN);
+    legacy.extend_from_slice(LEGACY_SETTINGS_TLC);
+    legacy
 }
 
 fn to_legacy_c_common(bytes: &[u8], fc_len: usize) -> Vec<u8> {
@@ -272,16 +284,16 @@ fn all_sixteen_descriptors_differ_from_c_only_at_documented_fixes() {
 
 #[test]
 fn clean_descriptor_lengths_per_driver() {
-    assert_eq!(UM_MT2.len(), 534);
+    assert_eq!(UM_MT2.len(), 511);
     assert_eq!(KM_T2.len(), 511);
     assert_eq!(FLT_MT2.len(), 511);
-    assert_eq!(SPI_S1.len(), 519);
+    assert_eq!(SPI_S1.len(), 496);
 }
 
 #[test]
 fn const_and_static_builders_match_fixtures_after_fix_projection() {
     assert_eq!(
-        to_legacy_c_u32(&UM_MT2),
+        to_legacy_um(&UM_MT2),
         um().entries["AmtPtpMt2ReportDescriptor"]
     );
     assert_eq!(
@@ -303,8 +315,8 @@ fn hidfilter_is_the_usbum_mt2_prefix() {
 #[test]
 fn touchscreen_variants_differ_only_at_byte_3() {
     for axes in [SPI_SERIES1, SPI_SERIES2, SPI_SERIES3_13, SPI_SERIES3_15] {
-        let pad = report_descriptor_spi_umapp(TlcUsage::TouchPad, axes);
-        let ts = report_descriptor_spi_umapp(TlcUsage::TouchScreen, axes);
+        let pad = report_descriptor_spi(TlcUsage::TouchPad, axes);
+        let ts = report_descriptor_spi(TlcUsage::TouchScreen, axes);
         let diffs: Vec<usize> = (0..pad.len()).filter(|&i| pad[i] != ts[i]).collect();
         assert_eq!(diffs, [3]);
         assert_eq!((pad[3], ts[3]), (0x05, 0x04));
@@ -314,28 +326,20 @@ fn touchscreen_variants_differ_only_at_byte_3() {
 #[test]
 fn hid_descriptors_match_clean_lengths() {
     assert_eq!(
-        HID_DESCRIPTOR_U32_ID_UMAPP,
-        hid_descriptor(u16::try_from(REPORT_DESCRIPTOR_U32_ID_UMAPP_LEN).expect("u16"))
-    );
-    assert_eq!(
         HID_DESCRIPTOR_U32_ID,
         hid_descriptor(u16::try_from(REPORT_DESCRIPTOR_U32_ID_LEN).expect("u16"))
     );
     assert_eq!(
-        HID_DESCRIPTOR_SPI_UMAPP,
-        hid_descriptor(u16::try_from(REPORT_DESCRIPTOR_SPI_UMAPP_LEN).expect("u16"))
-    );
-    assert_eq!(
-        HID_DESCRIPTOR_U32_ID_UMAPP,
-        [0x09, 0x21, 0x00, 0x01, 0x00, 0x01, 0x22, 0x16, 0x02]
+        HID_DESCRIPTOR_SPI,
+        hid_descriptor(u16::try_from(REPORT_DESCRIPTOR_SPI_LEN).expect("u16"))
     );
     assert_eq!(
         HID_DESCRIPTOR_U32_ID,
         [0x09, 0x21, 0x00, 0x01, 0x00, 0x01, 0x22, 0xff, 0x01]
     );
     assert_eq!(
-        HID_DESCRIPTOR_SPI_UMAPP,
-        [0x09, 0x21, 0x00, 0x01, 0x00, 0x01, 0x22, 0x07, 0x02]
+        HID_DESCRIPTOR_SPI,
+        [0x09, 0x21, 0x00, 0x01, 0x00, 0x01, 0x22, 0xf0, 0x01]
     );
 }
 
@@ -459,7 +463,7 @@ fn item_stream_has_no_global_state_leaks() {
     verify_globals(&KM_T2);
     verify_globals(&FLT_MT2);
     verify_globals(&SPI_S1);
-    verify_globals(&report_descriptor_spi_umapp(
+    verify_globals(&report_descriptor_spi(
         TlcUsage::TouchScreen,
         SPI_SERIES3_15,
     ));
@@ -479,19 +483,19 @@ fn c_struct_sizes_match_the_c_harness() {
     assert_eq!(um["PTP_CONTACT"], PTP_CONTACT_LEN);
     assert_eq!(um["PTP_REPORT"], PTP_REPORT_LEN);
     assert_eq!(um["SEL"], SELECTIVE_REPORT_LEN); // UsbUm: {ReportID, bits}
-    assert_eq!(um["UMAPP"], UMAPP_CONF_REPORT_LEN);
+    assert_eq!(um["UMAPP"], 4);
     assert_eq!(um["CAPS"], DEVICE_CAPS_REPORT_LEN);
     assert_eq!(um["HQA"], HQA_REPORT_LEN);
     let km = km().sizes;
     assert_eq!(km["PTP_CONTACT"], PTP_CONTACT_LEN);
     assert_eq!(km["PTP_REPORT"], PTP_REPORT_LEN);
     assert_eq!(km["SEL"], SELECTIVE_REPORT_DEVICE_MODE_STRUCT_LEN); // UsbKm: {ReportID, DeviceMode, bits}
-    assert_eq!(km["UMAPP"], UMAPP_CONF_REPORT_LEN);
+    assert_eq!(km["UMAPP"], 4);
     let spi = spi().sizes;
     assert_eq!(spi["PTP_CONTACT"], SPI_PTP_CONTACT_LEN);
     assert_eq!(spi["PTP_REPORT"], SPI_PTP_REPORT_LEN);
     assert_eq!(spi["SEL"], SELECTIVE_REPORT_DEVICE_MODE_STRUCT_LEN); // SpiKm: {ReportID, DeviceMode, bits}
-    assert_eq!(spi["UMAPP"], UMAPP_CONF_REPORT_LEN);
+    assert_eq!(spi["UMAPP"], 4);
     assert_eq!(INPUT_MODE_REPORT_LEN, 2);
 }
 
@@ -656,27 +660,27 @@ fn legacy_projected_builders_match_spec_sha256() {
     let cases: [(&str, Vec<u8>); 15] = [
         (
             "a94733137748c90e10982b8e472b2f82f4e1fac862b32b83ee67e7629aed214c",
-            to_legacy_c_u32(&report_descriptor_u32_id_umapp(WELLSPRING3)),
+            to_legacy_um(&report_descriptor_u32_id(WELLSPRING3)),
         ),
         (
             "3b57036a6f16393ef1be451395fc4eec774f0630d798288a762b5e38133285ca",
-            to_legacy_c_u32(&report_descriptor_u32_id_umapp(WELLSPRING5)),
+            to_legacy_um(&report_descriptor_u32_id(WELLSPRING5)),
         ),
         (
             "83e1b906e55b42957a3a504d36219004ffcb83065ed2fd2d6d035bb14485d007",
-            to_legacy_c_u32(&report_descriptor_u32_id_umapp(WELLSPRING6)),
+            to_legacy_um(&report_descriptor_u32_id(WELLSPRING6)),
         ),
         (
             "9a509e4407b52d68371a8e49b999cc7c55e268c5e4e5d75437c8ba4c34e21703",
-            to_legacy_c_u32(&report_descriptor_u32_id_umapp(WELLSPRING7A)),
+            to_legacy_um(&report_descriptor_u32_id(WELLSPRING7A)),
         ),
         (
             "13d94c5f486b201ef4d7919d2f955415560799cc78b12524b874bce6dee7724a",
-            to_legacy_c_u32(&report_descriptor_u32_id_umapp(WELLSPRING8)),
+            to_legacy_um(&report_descriptor_u32_id(WELLSPRING8)),
         ),
         (
             "c803f5c305a07a33d24e518be786ade6338bad844105657e64c582ba7fa13f25",
-            to_legacy_c_u32(&UM_MT2),
+            to_legacy_um(&UM_MT2),
         ),
         (
             "21a4d11df641c918bbe5b9718c7b054f6d399b21d4296b81bd3e9f85cc617cd3",
@@ -684,49 +688,34 @@ fn legacy_projected_builders_match_spec_sha256() {
         ),
         (
             "868c9d50ac9ca620a578e717daf8dfb215086e83e8bf175851b712a6f809b1aa",
-            to_legacy_c_spi(&report_descriptor_spi_umapp(
-                TlcUsage::TouchScreen,
-                SPI_SERIES1,
-            )),
+            to_legacy_c_spi(&report_descriptor_spi(TlcUsage::TouchScreen, SPI_SERIES1)),
         ),
         (
             "5dab7a973382bbada6cedb4c47e0f1d7bc2d72d263ed5fd86545f96f2f8c9a3f",
-            to_legacy_c_spi(&report_descriptor_spi_umapp(
-                TlcUsage::TouchPad,
-                SPI_SERIES2,
-            )),
+            to_legacy_c_spi(&report_descriptor_spi(TlcUsage::TouchPad, SPI_SERIES2)),
         ),
         (
             "d4d5f0b8146fa01c0421653fff153cee5ff73679576546a1e8378f44cf479bbe",
-            to_legacy_c_spi(&report_descriptor_spi_umapp(
-                TlcUsage::TouchScreen,
-                SPI_SERIES2,
-            )),
+            to_legacy_c_spi(&report_descriptor_spi(TlcUsage::TouchScreen, SPI_SERIES2)),
         ),
         (
             "fb0db27b1cdf967200ffd68b01005a15ffcebfd0e2786f8dba7bd163b324fcf9",
-            to_legacy_c_spi(&report_descriptor_spi_umapp(
-                TlcUsage::TouchPad,
-                SPI_SERIES3_13,
-            )),
+            to_legacy_c_spi(&report_descriptor_spi(TlcUsage::TouchPad, SPI_SERIES3_13)),
         ),
         (
             "28d6043da39c1cc339b20f49f20059f5bf91c32573ca74c25b9fa865e01582bf",
-            to_legacy_c_spi(&report_descriptor_spi_umapp(
+            to_legacy_c_spi(&report_descriptor_spi(
                 TlcUsage::TouchScreen,
                 SPI_SERIES3_13,
             )),
         ),
         (
             "31cd97cce4b5bfafc67bb490a1b3d2f2cf0d573c03e811181e2e7b424490361b",
-            to_legacy_c_spi(&report_descriptor_spi_umapp(
-                TlcUsage::TouchPad,
-                SPI_SERIES3_15,
-            )),
+            to_legacy_c_spi(&report_descriptor_spi(TlcUsage::TouchPad, SPI_SERIES3_15)),
         ),
         (
             "976e5046059319cf83acb73000237753a9d2e74e52f5f73da65b5f74b16359d7",
-            to_legacy_c_spi(&report_descriptor_spi_umapp(
+            to_legacy_c_spi(&report_descriptor_spi(
                 TlcUsage::TouchScreen,
                 SPI_SERIES3_15,
             )),

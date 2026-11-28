@@ -23,9 +23,10 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU32, Ordering};
 
+use ptp_hid::feature::{SelectiveReportBits, SelectiveReportState};
 use ptp_hid::scan_time::ScanClock;
 
-use crate::config::{CONFIG_TABLE, FALLBACK_CONFIG, T2Device, config_by_index};
+use crate::config::{CONFIG_TABLE, FALLBACK_CONFIG, UsbModel, config_by_index};
 
 const RELAXED: Ordering = Ordering::Relaxed;
 
@@ -100,8 +101,8 @@ pub struct DeviceState {
     /// 0 = `InterruptPipe == NULL`, otherwise pipe index + 1.
     interrupt_pipe_slot: AtomicU16,
     wellspring_mode_on: AtomicBool,
-    report_touch: AtomicBool,
-    report_button: AtomicBool,
+    raw_requested: AtomicBool,
+    reporting: SelectiveReportState,
     pub(crate) scan_clock: ScanClock,
 }
 
@@ -120,8 +121,8 @@ impl DeviceState {
             usb_device_traits: AtomicU32::new(0),
             interrupt_pipe_slot: AtomicU16::new(0),
             wellspring_mode_on: AtomicBool::new(false),
-            report_touch: AtomicBool::new(false),
-            report_button: AtomicBool::new(false),
+            raw_requested: AtomicBool::new(false),
+            reporting: SelectiveReportState::new(SelectiveReportBits::from_byte(0)),
             scan_clock: ScanClock::new(),
         }
     }
@@ -149,13 +150,17 @@ impl DeviceState {
         self.usb_device_traits.store(s.usb_device_traits, RELAXED);
         self.set_interrupt_pipe(s.interrupt_pipe);
         self.wellspring_mode_on.store(s.wellspring_mode_on, RELAXED);
-        self.report_touch.store(s.report_touch, RELAXED);
-        self.report_button.store(s.report_button, RELAXED);
+        self.request_raw(s.wellspring_mode_on);
+        self.reporting.store(SelectiveReportBits {
+            surface_report: s.report_touch,
+            button_report: s.report_button,
+        });
         self.scan_clock.restart(s.qpc_frequency);
     }
 
     /// A plain copy of every field.
     pub fn snapshot(&self) -> DeviceStateSnapshot {
+        let reporting = self.reporting.load();
         DeviceStateSnapshot {
             usb_device_created: self.usb_device_created(),
             ids: self.usb_device_ids(),
@@ -163,8 +168,8 @@ impl DeviceState {
             usb_device_traits: self.usb_device_traits(),
             interrupt_pipe: self.interrupt_pipe(),
             wellspring_mode_on: self.wellspring_mode_on(),
-            report_touch: self.report_touch.load(RELAXED),
-            report_button: self.report_button.load(RELAXED),
+            report_touch: reporting.surface_report,
+            report_button: reporting.button_report,
             qpc_frequency: self.qpc_frequency(),
         }
     }
@@ -183,8 +188,7 @@ impl DeviceState {
 
     /// `SET_FEATURE` 0x06: `PtpReportTouch` = Surface Switch, `PtpReportButton` = Button Switch.
     pub(crate) fn set_selective_reporting(&self, bits: ptp_hid::feature::SelectiveReportBits) {
-        self.report_button.store(bits.button_report, RELAXED);
-        self.report_touch.store(bits.surface_report, RELAXED);
+        self.reporting.store(bits);
     }
 
     /// Whether `WdfUsbTargetDeviceCreate` has succeeded (`UsbDevice != NULL`).
@@ -245,7 +249,7 @@ impl DeviceState {
     /// Before the first `PrepareHardware` the C pointer is NULL and every reader of it would crash; that
     /// cannot happen (the reader and the mode switch only run after `PrepareHardware`). This returns the
     /// fallback row in that case instead of failing.
-    pub fn config(&self) -> &'static T2Device {
+    pub fn config(&self) -> &'static UsbModel {
         self.config_index()
             .and_then(config_by_index)
             .unwrap_or(&FALLBACK_CONFIG)
@@ -271,15 +275,28 @@ impl DeviceState {
         self.wellspring_mode_on.load(RELAXED)
     }
 
+    pub(crate) fn request_raw(&self, requested: bool) {
+        self.raw_requested.store(requested, RELAXED);
+    }
+
+    /// Legacy devices with a mode register can return to mouse packets after wake.
+    pub fn can_recover_mode(&self) -> bool {
+        let model = self.config();
+        self.raw_requested.load(RELAXED)
+            && model.firmware == crate::config::Firmware::Legacy
+            && model.profile.tp_type != crate::config::TrackpadType::Type3
+    }
+
     pub(crate) fn set_wellspring_mode_on(&self, on: bool) {
         self.wellspring_mode_on.store(on, RELAXED);
     }
 
     /// `PtpReportTouch` / `PtpReportButton`.
     pub fn input_gates(&self) -> InputGates {
+        let reporting = self.reporting.load();
         InputGates {
-            report_touch: self.report_touch.load(RELAXED),
-            report_button: self.report_button.load(RELAXED),
+            report_touch: reporting.surface_report,
+            report_button: reporting.button_report,
         }
     }
 

@@ -17,7 +17,7 @@ use amtptp_spikm_core::feature::{DEVICE_CAPS_REPLY, check_xfer_packet, get_featu
 use amtptp_spikm_core::input::{SpiPacket, build_report, lower_read_length};
 use amtptp_spikm_core::runtime::{ContactTracker, DeviceRuntime, ReadTracker};
 use amtptp_spikm_core::status::*;
-use amtptp_spikm_core::wire::{POOL_TAG, SetStatePacket};
+use amtptp_spikm_core::wire::{POOL_TAG, with_set_state_packet};
 use core::fmt::Write as _;
 use ptp_hid::common::{MAX_FINGERS, PTP_COLLECTION_WINDOWS};
 use ptp_hid::descriptor::{
@@ -242,6 +242,9 @@ fn report_descriptor_hashes_spec_5_1() {
         c_bytes.extend_from_slice(&patched[scan_time_reset + 6..input_mode_max_offset]);
         c_bytes.push(MAX_FINGERS);
         c_bytes.extend_from_slice(&patched[input_mode_max_offset + 1..]);
+        c_bytes.extend_from_slice(&[
+            6, 0, 255, 9, 1, 161, 1, 133, 9, 9, 1, 21, 0, 38, 255, 0, 117, 8, 149, 3, 177, 2, 192,
+        ]);
         assert_eq!(sha256(&c_bytes), hash);
     }
 }
@@ -266,7 +269,7 @@ fn appendix_a_head_and_family_patches() {
     );
     assert_eq!(
         REPORT_DESCRIPTOR_F1[REPORT_DESCRIPTOR_LEN - 5..],
-        [0x95, 0x03, 0xB1, 0x02, 0xC0]
+        [0x06, 0xB1, 0x03, 0xC0, 0xC0]
     );
     // F1 -> F2 patch at the first finger collection; F1 Y logical maximum is 6217 (0x1849).
     let f1 = &REPORT_DESCRIPTOR_F1;
@@ -285,7 +288,7 @@ fn appendix_a_head_and_family_patches() {
 fn hid_descriptor_spec_5_3() {
     assert_eq!(
         HID_DESCRIPTOR,
-        [0x09, 0x21, 0x00, 0x01, 0x00, 0x01, 0x22, 0x07, 0x02]
+        [0x09, 0x21, 0x00, 0x01, 0x00, 0x01, 0x22, 0xf0, 0x01]
     );
 }
 
@@ -394,7 +397,10 @@ fn declared_contacts_must_match_the_frame() {
 
     // The header alone, declaring six contacts: rejected before the clock is sampled.
     let header = packet_with_fingers(6, 0, &[]);
-    assert_eq!(run(&header[..46], 46), (Err(STATUS_DEVICE_DATA_ERROR), false));
+    assert_eq!(
+        run(&header[..46], 46),
+        (Err(STATUS_DEVICE_DATA_ERROR), false)
+    );
     // Two contacts declared, one record present.
     let pkt = packet_with_fingers(2, 0, &five[..1]);
     assert_eq!(run(&pkt, 46 + 30), (Err(STATUS_DEVICE_DATA_ERROR), false));
@@ -426,8 +432,14 @@ fn selective_reporting_shapes_the_input_report() {
         rt.on_d0_entry(10_000_000);
         let mut tracker = ContactTracker::new();
         assert_eq!(rt.set_feature(6, 2, Some(&[6, bits])), STATUS_SUCCESS);
-        let r = rt.complete_lower_read(info, &mut tracker, 76, &pkt, || 0).unwrap();
-        assert_eq!((r[28], r[29]), (contacts, button), "switch byte {bits:#04x}");
+        let r = rt
+            .complete_lower_read(info, &mut tracker, 76, &pkt, || 0)
+            .unwrap();
+        assert_eq!(
+            (r[28], r[29]),
+            (contacts, button),
+            "switch byte {bits:#04x}"
+        );
         if contacts == 0 {
             assert!(r[1..26].iter().all(|&b| b == 0), "no contact data");
         } else {
@@ -435,7 +447,9 @@ fn selective_reporting_shapes_the_input_report() {
         }
         // A restart (PrepareHardware) restores both switches.
         rt.ptp_settings().reset_selective_reporting();
-        let r = rt.complete_lower_read(info, &mut tracker, 76, &pkt, || 0).unwrap();
+        let r = rt
+            .complete_lower_read(info, &mut tracker, 76, &pkt, || 0)
+            .unwrap();
         assert_eq!((r[28], r[29]), (1, 1));
     }
 }
@@ -463,7 +477,11 @@ fn contact_flags_and_coordinate_clamping() {
     .to_bytes();
     let flag = |i: usize| r[1 + 5 * i];
     assert_eq!(flag(0), 0x03, "ID 0: major/minor 2499 -> confident + tip");
-    assert_eq!(flag(1), 0x02 | (1 << 2), "ID 1: minor 2500 -> palm (!conf) + tip");
+    assert_eq!(
+        flag(1),
+        0x02 | (1 << 2),
+        "ID 1: minor 2500 -> palm (!conf) + tip"
+    );
     assert_eq!(flag(2), 0x03 | (2 << 2), "ID 2: confident + tip");
     assert_eq!((r[28], r[29]), (3, 0xFF));
     assert_eq!(u16::from_le_bytes([r[2], r[3]]), 7456);
@@ -473,7 +491,10 @@ fn contact_flags_and_coordinate_clamping() {
     let pkt = packet_with_fingers(
         2,
         0,
-        &[(-0x8000, 0x7FFF, 100, 100, 10), (0x7FFF, -0x8000, 100, 100, 10)],
+        &[
+            (-0x8000, 0x7FFF, 100, 100, 10),
+            (0x7FFF, -0x8000, 100, 100, 10),
+        ],
     );
     let r = build_report(
         &SpiPacket::new(&pkt),
@@ -505,7 +526,11 @@ fn multi_finger_tracking_and_liftoff_frame() {
     let info = lookup_trackpad(APPLE_VENDOR_ID, 0x0272).unwrap();
     let mut contacts = ContactTracker::new();
     // Frame 0: two fingers touch down -> IDs 0 and 1.
-    let f0 = packet_with_fingers(2, 0, &[(-1000, 2000, 600, 500, 25), (1500, 2000, 600, 500, 25)]);
+    let f0 = packet_with_fingers(
+        2,
+        0,
+        &[(-1000, 2000, 600, 500, 25), (1500, 2000, 600, 500, 25)],
+    );
     let r0 = build_report(
         &SpiPacket::new(&f0),
         info,
@@ -514,8 +539,14 @@ fn multi_finger_tracking_and_liftoff_frame() {
         &mut contacts,
     );
     assert_eq!(r0.contact_count, 2);
-    assert_eq!((r0.contacts[0].contact_id, r0.contacts[0].tip_switch), (0, true));
-    assert_eq!((r0.contacts[1].contact_id, r0.contacts[1].tip_switch), (1, true));
+    assert_eq!(
+        (r0.contacts[0].contact_id, r0.contacts[0].tip_switch),
+        (0, true)
+    );
+    assert_eq!(
+        (r0.contacts[1].contact_id, r0.contacts[1].tip_switch),
+        (1, true)
+    );
 
     // Frame 1: finger 0 lifts (only finger 1 remains in packet) -> finger 1 keeps ID 1, finger 0 emits liftoff.
     let f1 = packet_with_fingers(1, 0, &[(1520, 1990, 600, 500, 25)]);
@@ -527,8 +558,14 @@ fn multi_finger_tracking_and_liftoff_frame() {
         &mut contacts,
     );
     assert_eq!(r1.contact_count, 2);
-    assert_eq!((r1.contacts[0].contact_id, r1.contacts[0].tip_switch), (0, false));
-    assert_eq!((r1.contacts[1].contact_id, r1.contacts[1].tip_switch), (1, true));
+    assert_eq!(
+        (r1.contacts[0].contact_id, r1.contacts[0].tip_switch),
+        (0, false)
+    );
+    assert_eq!(
+        (r1.contacts[1].contact_id, r1.contacts[1].tip_switch),
+        (1, true)
+    );
 
     // Frame 2: liftoff is complete; only ID 1 remains.
     let r2 = build_report(
@@ -539,7 +576,10 @@ fn multi_finger_tracking_and_liftoff_frame() {
         &mut contacts,
     );
     assert_eq!(r2.contact_count, 1);
-    assert_eq!((r2.contacts[0].contact_id, r2.contacts[0].tip_switch), (1, true));
+    assert_eq!(
+        (r2.contacts[0].contact_id, r2.contacts[0].tip_switch),
+        (1, true)
+    );
 }
 
 #[test]
@@ -551,18 +591,24 @@ fn input_mode_feature_gates_spi_reporting() {
     let mut contacts = ContactTracker::new();
 
     // Fresh runtime starts in PTP mode (input_on = true).
-    let r = rt.complete_lower_read(info, &mut contacts, 76, &pkt, || 0).unwrap();
+    let r = rt
+        .complete_lower_read(info, &mut contacts, 76, &pkt, || 0)
+        .unwrap();
     assert_eq!((r[28], r[29]), (1, 1));
 
     // Mode 0 (mouse collection) gates both surface and button reporting.
     assert_eq!(rt.set_feature(4, 2, Some(&[4, 0])), STATUS_SUCCESS);
     contacts.reset();
-    let r_off = rt.complete_lower_read(info, &mut contacts, 76, &pkt, || 0).unwrap();
+    let r_off = rt
+        .complete_lower_read(info, &mut contacts, 76, &pkt, || 0)
+        .unwrap();
     assert_eq!((r_off[28], r_off[29]), (0, 0));
 
     // PrepareHardware reset restores input_on = true alongside selective reporting.
     rt.ptp_settings().reset_selective_reporting();
-    let r_on = rt.complete_lower_read(info, &mut contacts, 76, &pkt, || 0).unwrap();
+    let r_on = rt
+        .complete_lower_read(info, &mut contacts, 76, &pkt, || 0)
+        .unwrap();
     assert_eq!((r_on[28], r_on[29]), (1, 1));
 }
 
@@ -620,7 +666,14 @@ fn b9_bytes_past_length_are_never_read() {
 
 #[test]
 fn set_state_buffer_spec_6_2() {
-    let img = SetStatePacket::image(true, 0x1000);
+    let img = with_set_state_packet(true, |bytes| {
+        let mut image = *bytes;
+        let pointer = u64::from_le_bytes(image[..8].try_into().unwrap());
+        assert_eq!(pointer, bytes.as_ptr() as u64 + 16);
+        image[..8].copy_from_slice(&(0x1000_u64 + 16).to_le_bytes());
+        image
+    })
+    .unwrap();
     assert_eq!(img.len(), 255);
     assert_eq!(img[..8], 0x1010_u64.to_le_bytes());
     assert_eq!(img[8..18], [2, 0, 0, 0, 2, 0, 0, 0, 2, 1]);

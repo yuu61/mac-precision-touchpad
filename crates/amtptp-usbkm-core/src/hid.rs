@@ -12,49 +12,28 @@
 //! `WdfRequestRetrieveOutputBuffer(Request, 32, ..)` (attributes) and passes `Ok(buffer)` or
 //! `Err(status)`; an `Err` is completed as is (the C returns the retrieval status).
 
-use ptp_hid::descriptor::{Axes, REPORT_DESCRIPTOR_U32_ID_LEN, report_descriptor_u32_id};
+use ptp_hid::descriptor::REPORT_DESCRIPTOR_U32_ID_LEN;
 use ptp_hid::hidport::{HID_DESCRIPTOR_LEN, HID_DESCRIPTOR_U32_ID, HidDeviceAttributes};
-use ptp_hid::ioctl::{
-    IOCTL_HID_GET_DEVICE_ATTRIBUTES, IOCTL_HID_GET_DEVICE_DESCRIPTOR, IOCTL_HID_GET_FEATURE,
-    IOCTL_HID_GET_REPORT_DESCRIPTOR, IOCTL_HID_READ_REPORT, IOCTL_HID_SET_FEATURE,
-};
 
 pub use ptp_hid::hidport::HID_DEVICE_ATTRIBUTES_LEN;
 
-use crate::config::T2Device;
+use crate::config::UsbModel;
 use crate::output::OutputMemory;
 use crate::state::UsbDeviceIds;
 use crate::status::{
     Completion, NtStatus, STATUS_BUFFER_TOO_SMALL, STATUS_NOT_SUPPORTED, nt_success,
 };
 
-/// The axis values of 15-inch / 16-inch and fallback T2 models (`AAPL_WELLSPRING_T2_PTP_TLC`):
-/// X logical max 20000, X physical max 1300, Y physical max 850, Y logical max 12000.
-pub const T2_AXES: Axes = Axes {
-    x_logical_max: 20000,
-    x_physical_max: 1300,
-    y_physical_max: 850,
-    y_logical_max: 12000,
-};
-
-/// The axis values of 13-inch T2 models (`0x027A`, `0x027B`), matching their `12992 x 7855`
-/// sensor coordinate span and 13-inch Series 3 physical dimensions (`13.52 cm x 8.36 cm`).
-pub const T2_13_AXES: Axes = Axes {
-    x_logical_max: 12992,
-    x_physical_max: 1352,
-    y_physical_max: 836,
-    y_logical_max: 7855,
-};
-
 /// Length of every `UsbKm` report descriptor: 511 bytes.
 pub const REPORT_DESCRIPTOR_LEN: usize = REPORT_DESCRIPTOR_U32_ID_LEN;
 
 /// Report descriptor for 15-inch / 16-inch and fallback T2 models (`20000 x 12000`), 511 bytes.
-pub static REPORT_DESCRIPTOR: [u8; REPORT_DESCRIPTOR_LEN] = report_descriptor_u32_id(T2_AXES);
+pub static REPORT_DESCRIPTOR: [u8; REPORT_DESCRIPTOR_LEN] =
+    crate::config::FALLBACK_CONFIG.descriptor;
 
 /// Report descriptor for 13-inch T2 models (`0x027A`, `0x027B`, `12992 x 7855`), 511 bytes.
 pub static REPORT_DESCRIPTOR_T2_13: [u8; REPORT_DESCRIPTOR_LEN] =
-    report_descriptor_u32_id(T2_13_AXES);
+    crate::config::T2_13_CONFIG.descriptor;
 
 /// `AmtPtpT2DefaultHidDescriptor`: `09 21 00 01 00 01 22 ff 01`.
 pub const HID_DESCRIPTOR: [u8; HID_DESCRIPTOR_LEN] = HID_DESCRIPTOR_U32_ID;
@@ -62,41 +41,19 @@ pub const HID_DESCRIPTOR: [u8; HID_DESCRIPTOR_LEN] = HID_DESCRIPTOR_U32_ID;
 /// `DEVICE_VERSION` (include/Hid.h:14): the HID `VersionNumber`, a constant (not `bcdDevice`).
 pub const DEVICE_VERSION: u16 = 0x0001;
 
-/// The C dispatcher's `switch (IoControlCode)`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum InternalIoctl {
-    /// `IOCTL_HID_GET_DEVICE_DESCRIPTOR` → [`get_hid_descriptor`].
-    GetDeviceDescriptor,
-    /// `IOCTL_HID_GET_DEVICE_ATTRIBUTES` → [`get_device_attributes`].
-    GetDeviceAttributes,
-    /// `IOCTL_HID_GET_REPORT_DESCRIPTOR` → [`get_report_descriptor`].
-    GetReportDescriptor,
-    /// `IOCTL_HID_READ_REPORT`: `WdfRequestForwardToIoQueue(Request, InputQueue)`. On success the request
-    /// is pending (not completed here); on failure it is completed with the forward status and
-    /// `Information = 0`. No buffer validation at enqueue time (spec B25, preserved).
-    ReadReport,
-    /// `IOCTL_HID_GET_FEATURE` → [`crate::feature::get_feature`].
-    GetFeature,
-    /// `IOCTL_HID_SET_FEATURE` → [`crate::feature::set_feature`].
-    SetFeature,
-    /// Everything else (`GET_STRING`, `WRITE_REPORT`, ACTIVATE/DEACTIVATE, idle notification, the UMDF
-    /// codes, `GET_INPUT_REPORT`, any `IOCTL_INTERNAL_USB_*`, unknown codes): complete with
-    /// [`not_supported`]. Never forwarded.
-    NotSupported,
+pub use ptp_hid::ioctl::InternalIoctl;
+/// Includes the first NUL terminator in a USB string returned to HIDCLASS.
+#[must_use]
+pub fn terminated_usb_string(units: &[u16], length: u16) -> Option<&[u16]> {
+    let text = units.get(..=usize::from(length))?;
+    let end = text.iter().position(|&unit| unit == 0)?;
+    text.get(..=end)
 }
 
-/// Routes an internal IOCTL code like the C dispatcher.
+/// Classifies an internal HID request.
 #[must_use]
-pub const fn route_internal_ioctl(io_control_code: u32) -> InternalIoctl {
-    match io_control_code {
-        IOCTL_HID_GET_DEVICE_DESCRIPTOR => InternalIoctl::GetDeviceDescriptor,
-        IOCTL_HID_GET_DEVICE_ATTRIBUTES => InternalIoctl::GetDeviceAttributes,
-        IOCTL_HID_GET_REPORT_DESCRIPTOR => InternalIoctl::GetReportDescriptor,
-        IOCTL_HID_READ_REPORT => InternalIoctl::ReadReport,
-        IOCTL_HID_GET_FEATURE => InternalIoctl::GetFeature,
-        IOCTL_HID_SET_FEATURE => InternalIoctl::SetFeature,
-        _ => InternalIoctl::NotSupported,
-    }
+pub const fn route_internal_ioctl(code: u32) -> InternalIoctl {
+    InternalIoctl::from_code(code)
 }
 
 /// The completion of every unsupported internal IOCTL: `STATUS_NOT_SUPPORTED`, `Information = 0`.
@@ -153,25 +110,17 @@ pub fn get_hid_descriptor(output: Result<&mut [u8], NtStatus>) -> Completion {
     get_hid_descriptor_to(output)
 }
 
-/// Selects the report descriptor matching `cfg`'s coordinate span: [`REPORT_DESCRIPTOR_T2_13`] for
-/// 13-inch T2 devices (`12992 x 7855`) and [`REPORT_DESCRIPTOR`] (`20000 x 12000`) for 15-inch /
-/// 16-inch and fallback rows.
+/// Selects the report descriptor for the enumerated USB model.
 #[must_use]
-pub const fn report_descriptor_for(cfg: &T2Device) -> &'static [u8; REPORT_DESCRIPTOR_LEN] {
-    let x_span = cfg.profile.x.max.saturating_sub(cfg.profile.x.min);
-    let y_span = cfg.profile.y.max.saturating_sub(cfg.profile.y.min);
-    if x_span == T2_13_AXES.x_logical_max as i32 && y_span == T2_13_AXES.y_logical_max as i32 {
-        &REPORT_DESCRIPTOR_T2_13
-    } else {
-        &REPORT_DESCRIPTOR
-    }
+pub const fn report_descriptor_for(cfg: &UsbModel) -> &[u8; REPORT_DESCRIPTOR_LEN] {
+    &cfg.descriptor
 }
 
 /// Copies the 511-byte report descriptor for `cfg` into `output` and completes with
 /// `Information = 511`.
 #[must_use]
 pub fn get_report_descriptor_for_to<M: OutputMemory + ?Sized>(
-    cfg: &T2Device,
+    cfg: &UsbModel,
     output: Result<&mut M, NtStatus>,
 ) -> Completion {
     copy_completion(output, report_descriptor_for(cfg))
@@ -180,7 +129,7 @@ pub fn get_report_descriptor_for_to<M: OutputMemory + ?Sized>(
 /// [`get_report_descriptor_for_to`] on a byte slice.
 #[must_use]
 pub fn get_report_descriptor_for(
-    cfg: &T2Device,
+    cfg: &UsbModel,
     output: Result<&mut [u8], NtStatus>,
 ) -> Completion {
     get_report_descriptor_for_to(cfg, output)
@@ -250,6 +199,20 @@ mod tests {
     }
 
     #[test]
+    fn usb_string_length_includes_one_terminator() {
+        assert_eq!(
+            terminated_usb_string(&[65, 66, 0], 2),
+            Some(&[65, 66, 0][..])
+        );
+        assert_eq!(
+            terminated_usb_string(&[65, 0, 66, 0], 3),
+            Some(&[65, 0][..])
+        );
+        assert_eq!(terminated_usb_string(&[0], 0), Some(&[0][..]));
+        assert_eq!(terminated_usb_string(&[65], 1), None);
+    }
+
+    #[test]
     fn copy_status_is_the_frameworks() {
         let mut memory = FailingMemory(STATUS_INVALID_BUFFER_SIZE);
         assert_eq!(
@@ -315,8 +278,8 @@ mod tests {
         assert_eq!(route_internal_ioctl(0x000b_000b), InternalIoctl::ReadReport);
         assert_eq!(route_internal_ioctl(0x000b_0192), InternalIoctl::GetFeature);
         assert_eq!(route_internal_ioctl(0x000b_0191), InternalIoctl::SetFeature);
+        assert_eq!(route_internal_ioctl(0x000b_0013), InternalIoctl::GetString);
         for code in [
-            0x000b_0013,
             0x000b_000f,
             0x000b_005b,
             0x000b_005f,

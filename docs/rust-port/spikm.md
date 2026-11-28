@@ -1,5 +1,7 @@
 # AmtPtpDeviceSpiKm: Rust port record
 
+The SPI report descriptor now has 496 bytes. The settings collection and its vendor report have been removed. The figures below describe the original port.
+
 The C driver is `src/AmtPtpDeviceSpiKm` at commit 2edb0f2. The Rust port has two parts:
 
 - `crates/amtptp-spikm-core` (MIT, `no_std`, depends only on `ptp-hid`) holds all the logic that does not need WDF.

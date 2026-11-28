@@ -20,7 +20,6 @@ $ZeroSha = '0000000000000000000000000000000000000000'
 $AllHostPackages = @(
     'ptp-hid',
     'bcm5974',
-    'amtptp-usbum-core',
     'amtptp-usbkm-core',
     'amtptp-spikm-core',
     'amtptp-hidfilter-core',
@@ -29,7 +28,6 @@ $AllHostPackages = @(
 $CoreHostPackages = @(
     'ptp-hid',
     'bcm5974',
-    'amtptp-usbum-core',
     'amtptp-usbkm-core',
     'amtptp-spikm-core',
     'amtptp-hidfilter-core'
@@ -37,10 +35,8 @@ $CoreHostPackages = @(
 $AllKmPackages = @(
     'amtptp-device-usb-km',
     'amtptp-device-spi-km',
-    'amtptp-hid-filter'
-)
-$AllUmPackages = @(
-    'amtptp-device-usb-um'
+    'amtptp-hid-filter',
+    'amtptp-bth-filter'
 )
 
 function Test-GitCommit {
@@ -109,9 +105,7 @@ function Add-All {
 
 $hostSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
 $kmSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
-$umSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
 $kmLintSupport = $false
-$umLintSupport = $false
 # `cargo xtask package` (build, link, stamp, verify and catalog the driver package) runs whenever a
 # driver is affected, and when the INF template or xtask changes.
 $packageInputsChanged = $false
@@ -140,9 +134,7 @@ $fullReason = [string]$resolution.Reason
 if ($fullRun) {
     Add-All $hostSet $AllHostPackages
     Add-All $kmSet $AllKmPackages
-    Add-All $umSet $AllUmPackages
     $kmLintSupport = $true
-    $umLintSupport = $true
 }
 else {
     foreach ($path in $normalizedFiles) {
@@ -155,9 +147,7 @@ else {
             $fullReason = "global config changed ($path)"
             Add-All $hostSet $AllHostPackages
             Add-All $kmSet $AllKmPackages
-            Add-All $umSet $AllUmPackages
             $kmLintSupport = $true
-            $umLintSupport = $true
             continue
         }
 
@@ -176,23 +166,11 @@ else {
             # xtask's INF test reads the core crates' model tables (dev-dependencies).
             [void]$hostSet.Add('xtask')
             Add-All $kmSet $AllKmPackages
-            Add-All $umSet $AllUmPackages
             continue
         }
         if ($path -like 'crates/bcm5974/*') {
-            Add-All $hostSet @('bcm5974', 'amtptp-usbum-core', 'amtptp-usbkm-core', 'amtptp-hidfilter-core', 'xtask')
-            Add-All $kmSet @('amtptp-device-usb-km', 'amtptp-hid-filter')
-            Add-All $umSet $AllUmPackages
-            continue
-        }
-        if ($path -like 'crates/amtptp-usbum-core/tests/*') {
-            [void]$hostSet.Add('amtptp-usbum-core')
-            continue
-        }
-        if ($path -like 'crates/amtptp-usbum-core/*') {
-            [void]$hostSet.Add('amtptp-usbum-core')
-            [void]$hostSet.Add('xtask')
-            [void]$umSet.Add('amtptp-device-usb-um')
+            Add-All $hostSet @('bcm5974', 'amtptp-usbkm-core', 'amtptp-hidfilter-core', 'xtask')
+            Add-All $kmSet @('amtptp-device-usb-km', 'amtptp-hid-filter', 'amtptp-bth-filter')
             continue
         }
         if ($path -like 'crates/amtptp-usbkm-core/tests/*') {
@@ -220,6 +198,7 @@ else {
             continue
         }
         if ($path -like 'crates/amtptp-hidfilter-core/*') {
+            [void]$kmSet.Add('amtptp-bth-filter')
             [void]$hostSet.Add('amtptp-hidfilter-core')
             [void]$hostSet.Add('xtask')
             [void]$kmSet.Add('amtptp-hid-filter')
@@ -228,7 +207,6 @@ else {
         if ($path -like 'crates/*') {
             Add-All $hostSet $AllHostPackages
             Add-All $kmSet $AllKmPackages
-            Add-All $umSet $AllUmPackages
             continue
         }
 
@@ -239,26 +217,20 @@ else {
             continue
         }
 
-        # Shared driver support crates compiled under each WDK driver model.
+        # Shared driver support crates used by the KMDF workspace.
         if ($path -like 'drivers/support/wdf-support/*') {
             Add-All $kmSet $AllKmPackages
-            Add-All $umSet $AllUmPackages
             $kmLintSupport = $true
-            $umLintSupport = $true
             continue
         }
         if ($path -like 'drivers/support/rc-embed/*') {
             Add-All $kmSet $AllKmPackages
-            Add-All $umSet $AllUmPackages
             $kmLintSupport = $true
-            $umLintSupport = $true
             continue
         }
         if ($path -like 'drivers/support/*') {
             Add-All $kmSet $AllKmPackages
-            Add-All $umSet $AllUmPackages
             $kmLintSupport = $true
-            $umLintSupport = $true
             continue
         }
 
@@ -271,7 +243,12 @@ else {
             [void]$kmSet.Add('amtptp-device-spi-km')
             continue
         }
+        if ($path -like 'drivers/km/AmtPtpBthFilter/*') {
+            [void]$kmSet.Add('amtptp-bth-filter')
+            continue
+        }
         if ($path -like 'drivers/km/AmtPtpHidFilter/*') {
+            [void]$hostSet.Add('amtptp-hidfilter-core')
             [void]$kmSet.Add('amtptp-hid-filter')
             continue
         }
@@ -288,29 +265,9 @@ else {
             continue
         }
 
-        # UMDF driver workspace.
-        if ($path -like 'drivers/um/AmtPtpDeviceUsbUm/*') {
-            [void]$umSet.Add('amtptp-device-usb-um')
-            continue
-        }
-        if ($path -eq 'drivers/um/Cargo.toml') {
-            Add-All $umSet $AllUmPackages
-            $umLintSupport = $true
-            # xtask verifies UMDF version in drivers/um/Cargo.toml.
-            [void]$hostSet.Add('xtask')
-            continue
-        }
-        if ($path -like 'drivers/um/*') {
-            Add-All $umSet $AllUmPackages
-            $umLintSupport = $true
-            continue
-        }
-
         if ($path -like 'drivers/*') {
             Add-All $kmSet $AllKmPackages
-            Add-All $umSet $AllUmPackages
             $kmLintSupport = $true
-            $umLintSupport = $true
             continue
         }
     }
@@ -318,7 +275,6 @@ else {
 
 $hostPackages = @($AllHostPackages | Where-Object { $hostSet.Contains($_) })
 $kmPackages = @($AllKmPackages | Where-Object { $kmSet.Contains($_) })
-$umPackages = @($AllUmPackages | Where-Object { $umSet.Contains($_) })
 
 $driverInclude = [System.Collections.Generic.List[object]]::new()
 $arches = @(
@@ -340,20 +296,6 @@ if ($kmPackages.Count -gt 0) {
     }
 }
 
-if ($umPackages.Count -gt 0) {
-    $umPkgStr = $umPackages -join ' '
-    foreach ($a in $arches) {
-        $driverInclude.Add([ordered]@{
-                workspace    = 'um'
-                label        = 'UMDF'
-                arch         = $a.Name
-                target       = $a.Target
-                packages     = $umPkgStr
-                lint_support = $umLintSupport
-            })
-    }
-}
-
 $runHost = $hostPackages.Count -gt 0
 $runDrivers = $driverInclude.Count -gt 0
 $runPackage = $runDrivers -or $packageInputsChanged
@@ -368,13 +310,6 @@ $kmSummary = if ($kmPackages.Count -gt 0) {
 else {
     'skipped'
 }
-$umSummary = if ($umPackages.Count -gt 0) {
-    '`' + ($umPackages -join ' ') + '`' + " (x64, arm64; support lint: $umLintSupport)"
-}
-else {
-    'skipped'
-}
-
 $packageSummary = if ($runPackage) { 'x64, arm64 (release, unsigned)' } else { 'skipped' }
 
 $summaryLines = @(
@@ -384,7 +319,6 @@ $summaryLines = @(
     "- **Changed files**: $($normalizedFiles.Count)",
     "- **Host workspace**: $hostSummary",
     "- **KMDF drivers**: $kmSummary",
-    "- **UMDF drivers**: $umSummary",
     "- **Driver package**: $packageSummary"
 )
 
@@ -412,8 +346,6 @@ if ($PassThru) {
         RunDrivers    = $runDrivers
         KmPackages    = $kmPackages
         KmLintSupport = $kmLintSupport
-        UmPackages    = $umPackages
-        UmLintSupport = $umLintSupport
         DriverMatrix  = $driverMatrixJson
         RunPackage    = $runPackage
     }

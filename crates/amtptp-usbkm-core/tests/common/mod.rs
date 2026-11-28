@@ -217,7 +217,10 @@ pub fn to_legacy_c_u32(bytes: &[u8], is_t2_13: bool) -> Vec<u8> {
 
     assert_eq!(&patched[f3_reset..f3_reset + 6], &GLOBAL_RESET);
     assert_eq!(&patched[f5_reset..f5_reset + 6], &GLOBAL_RESET);
-    assert_eq!(&patched[scan_time_reset..scan_time_reset + 6], &GLOBAL_RESET);
+    assert_eq!(
+        &patched[scan_time_reset..scan_time_reset + 6],
+        &GLOBAL_RESET
+    );
     assert_eq!(patched[input_mode_max_offset], PTP_COLLECTION_WINDOWS);
 
     let mut out = Vec::with_capacity(C_REPORT_DESCRIPTOR_LEN);
@@ -294,6 +297,7 @@ pub fn replay_descriptor_ioctl(r: &Record) -> &'static str {
         }
         other @ (InternalIoctl::ReadReport
         | InternalIoctl::GetFeature
+        | InternalIoctl::GetString
         | InternalIoctl::SetFeature
         | InternalIoctl::NotSupported) => {
             panic!("{id}: unexpected route {other:?}");
@@ -331,14 +335,21 @@ pub fn replay_descriptor_ioctl(r: &Record) -> &'static str {
                 "{id}: report descriptor"
             );
             let is_t2_13 = matches!(state.config().identification, 0x027a | 0x027b);
-            assert_eq!(
-                to_legacy_c_u32(&out[..REPORT_DESCRIPTOR_LEN], is_t2_13),
-                expected[..C_REPORT_DESCRIPTOR_LEN],
-                "{id}: legacy C projection"
-            );
+            if state.config().firmware == amtptp_usbkm_core::config::Firmware::T2 {
+                assert_eq!(
+                    to_legacy_c_u32(&out[..REPORT_DESCRIPTOR_LEN], is_t2_13),
+                    expected[..C_REPORT_DESCRIPTOR_LEN],
+                    "{id}: legacy C projection"
+                );
+            } else {
+                assert_eq!(&out[..REPORT_DESCRIPTOR_LEN], &state.config().descriptor);
+            }
+
             assert!(
                 out[REPORT_DESCRIPTOR_LEN..].iter().all(|&b| b == prefill)
-                    && expected[C_REPORT_DESCRIPTOR_LEN..].iter().all(|&b| b == prefill),
+                    && expected[C_REPORT_DESCRIPTOR_LEN..]
+                        .iter()
+                        .all(|&b| b == prefill),
                 "{id}: trailing prefill"
             );
         }

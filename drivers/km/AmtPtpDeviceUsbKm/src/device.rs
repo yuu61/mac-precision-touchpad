@@ -5,19 +5,23 @@
 //!   `DeviceInit` (error trace + verifier break, no other effect); it is not called here (spec B12, P2).
 //! - `CreateDevice`: PnP/power callbacks `PrepareHardware`, `D0Entry`, `D0Exit` only (nothing else is set: no
 //!   power policy, file object, I/O type or request attributes, so a filter inherits them from the lower
-//!   device object); `WdfDeviceCreate` with the `DEVICE_CONTEXT`; the context's initial state; the device
-//!   interface; the queues. The first failure is returned (WDF deletes the device).
+//!   device object); `WdfDeviceCreate` with the `DEVICE_CONTEXT`; the context's initial state, locks, recovery
+//!   work item and queues. The first failure is returned (WDF deletes the device).
 //! - `PrepareHardware` / `D0Entry` / `D0Exit`: the core's sequencing over [`UsbIo`].
 //!
 //! Not present, as in C: `ReleaseHardware`, `SelfManagedIo`*, `SurpriseRemoval`, QueryRemove/Stop, power policy
 //! callbacks, idle/wake settings.
 
-use amtptp_usbkm_core::lifecycle::{self, DEVICE_INTERFACE_GUID};
+use amtptp_usbkm_core::lifecycle;
+use core::sync::atomic::Ordering;
 use tracelogging as tlg;
-use wdf_support::init::{object_attributes_init_context_type, pnppower_event_callbacks_init};
+use wdf_support::init::{
+    object_attributes_init, object_attributes_init_context_type, pnppower_event_callbacks_init,
+    workitem_config_init,
+};
 use wdf_support::ntstatus::{NT_SUCCESS, STATUS_INVALID_DEVICE_STATE};
 use wdk_sys::{
-    GUID, NTSTATUS, PWDFDEVICE_INIT, WDF_POWER_DEVICE_STATE, WDFCMRESLIST, WDFDEVICE, WDFDRIVER,
+    NTSTATUS, PWDFDEVICE_INIT, WDF_POWER_DEVICE_STATE, WDFCMRESLIST, WDFDEVICE, WDFDRIVER,
     call_unsafe_wdf_function_binding,
 };
 
@@ -26,14 +30,6 @@ use crate::context::{DEVICE_CONTEXT_TYPE_INFO, DeviceContext, device_get_context
 use crate::queue::queue_initialize;
 use crate::trace::{KW_DRIVER, power_state_name};
 use crate::usb::UsbIo;
-
-/// `GUID_DEVINTERFACE_AmtPtpDeviceUsbKm` {4aa332cc-5777-4afd-aa4e-95387330612a} (Public.h:22-24).
-static GUID_DEVINTERFACE_AMTPTPDEVICEUSBKM: GUID = GUID {
-    Data1: DEVICE_INTERFACE_GUID.data1,
-    Data2: DEVICE_INTERFACE_GUID.data2,
-    Data3: DEVICE_INTERFACE_GUID.data3,
-    Data4: DEVICE_INTERFACE_GUID.data4,
-};
 
 /// `AmtPtpDeviceUsbKmEvtDeviceAdd` (Driver.c:98-143). `PASSIVE_LEVEL`, `PAGE` as in C.
 #[unsafe(link_section = "PAGE")]
@@ -154,28 +150,41 @@ unsafe fn create_device(mut device_init: PWDFDEVICE_INIT) -> NTSTATUS {
         return status;
     }
 
-    // SAFETY: live device; the GUID is a 'static; NULL reference string as in C.
+    let mut config = workitem_config_init(Some(recover_mode));
+    config.AutomaticSerialization = 0;
+    let mut attributes = object_attributes_init();
+    attributes.ParentObject = device.cast();
+    let mut item = core::ptr::null_mut();
+    // SAFETY: parent device is live, callback and output storage are initialized.
     let status = unsafe {
         call_unsafe_wdf_function_binding!(
-            WdfDeviceCreateDeviceInterface,
-            device,
-            &raw const GUID_DEVINTERFACE_AMTPTPDEVICEUSBKM,
-            core::ptr::null()
+            WdfWorkItemCreate,
+            &raw mut config,
+            &raw mut attributes,
+            &raw mut item
         )
     };
     if !NT_SUCCESS(status) {
-        tlg::write_event!(
-            PROVIDER,
-            "WdfDeviceCreateDeviceInterfaceFailed",
-            level(Error),
-            keyword(KW_DRIVER),
-            win_ntstatus("Status", &status)
-        );
         return status;
     }
+    context.mode_recovery.store(item, Ordering::Release);
 
     // SAFETY: live device whose context was initialized above; PASSIVE_LEVEL.
     unsafe { queue_initialize(device, context) }
+}
+
+/// Restore the device's raw packet format after the interrupt reader saw a mouse packet.
+unsafe extern "C" fn recover_mode(item: wdk_sys::WDFWORKITEM) {
+    // SAFETY: DeviceAdd created this work item with the WDFDEVICE as its parent.
+    let device: WDFDEVICE =
+        unsafe { call_unsafe_wdf_function_binding!(WdfWorkItemGetParentObject, item) }.cast();
+    // SAFETY: parent stays live through this passive callback.
+    if let Some(context) = unsafe { DeviceContext::of(device) } {
+        // SAFETY: device owns the context and the work item executes at PASSIVE_LEVEL.
+        let mut io = unsafe { UsbIo::new(device, context) };
+        amtptp_usbkm_core::wellspring::recover_mode(&context.state, &mut io);
+        context.recovery_pending.store(false, Ordering::Release);
+    }
 }
 
 /// `AmtPtpDeviceUsbKmEvtDevicePrepareHardware` (Device.c:130-272). `PASSIVE_LEVEL`, `PAGE` as in C. The
@@ -195,7 +204,11 @@ unsafe extern "C" fn evt_device_prepare_hardware(
     let mut io = unsafe { UsbIo::new(device, context) };
     let status = lifecycle::prepare_hardware(&context.state, &mut io);
     // SAFETY: live device context; spinlock created in `create_device`; no WDF calls inside.
-    unsafe { context.contacts.with(amtptp_usbkm_core::input::ContactTracker::reset) };
+    unsafe {
+        context
+            .contacts
+            .with(amtptp_usbkm_core::input::ContactTracker::reset);
+    };
     let config = context.state.config();
     let pipe = context.state.interrupt_pipe().map_or(-1, i32::from);
     tlg::write_event!(
@@ -232,7 +245,11 @@ unsafe extern "C" fn evt_device_d0_entry(
     // SAFETY: `device` owns `context`; D0Entry runs at PASSIVE_LEVEL.
     let mut io = unsafe { UsbIo::new(device, context) };
     // SAFETY: live device context; spinlock created in `create_device`; no WDF calls inside.
-    unsafe { context.contacts.with(amtptp_usbkm_core::input::ContactTracker::reset) };
+    unsafe {
+        context
+            .contacts
+            .with(amtptp_usbkm_core::input::ContactTracker::reset);
+    };
     let status = lifecycle::d0_entry(&context.state, &mut io);
     let wellspring = context.state.wellspring_mode_on();
     if NT_SUCCESS(status) {
@@ -279,8 +296,19 @@ unsafe extern "C" fn evt_device_d0_exit(
     // SAFETY: `device` owns `context`; D0Exit runs at PASSIVE_LEVEL.
     let mut io = unsafe { UsbIo::new(device, context) };
     let outcome = lifecycle::d0_exit(&context.state, &mut io);
+    // SAFETY: reader stopped and the work item is a live device child. No mode lock is held.
+    unsafe {
+        call_unsafe_wdf_function_binding!(
+            WdfWorkItemFlush,
+            context.mode_recovery.load(Ordering::Acquire)
+        );
+    }
     // SAFETY: live device context; spinlock created in `create_device`; no WDF calls inside.
-    unsafe { context.contacts.with(amtptp_usbkm_core::input::ContactTracker::reset) };
+    unsafe {
+        context
+            .contacts
+            .with(amtptp_usbkm_core::input::ContactTracker::reset);
+    };
     let mode_switch_status = outcome.mode_switch_status;
     if !NT_SUCCESS(mode_switch_status) {
         tlg::write_event!(

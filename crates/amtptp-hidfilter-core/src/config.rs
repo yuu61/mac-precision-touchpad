@@ -27,16 +27,6 @@ pub const TRANSPORT_RETRY_DUE_TIME: i64 = rel_timeout_in_sec(3);
 /// after two of them and froze input for 3 s. The limit is far above such runs.
 pub const MAX_IMMEDIATE_READ_RETRIES: u32 = 8;
 
-/// `GUID_DEVICEINTERFACE_AmtPtpHidFilter` `{FF969022-3111-4441-8F88-875440172C2E}` (Device.h:7-9), as
-/// (Data1, Data2, Data3, Data4). Registered with no reference string; no handler serves it (HF-B28,
-/// preserved).
-pub const DEVICE_INTERFACE_GUID: (u32, u16, u16, [u8; 8]) = (
-    0xFF96_9022,
-    0x3111,
-    0x4441,
-    [0x8F, 0x88, 0x87, 0x54, 0x40, 0x17, 0x2C, 0x2E],
-);
-
 /// `PTP_LIST_POOL_TAG` `'LTPA'` (Driver.h:32): the MSVC multi-character constant 0x4C545041, which
 /// reads "APTL" in memory. Pool tag of the lookaside list (`NonPagedPoolNx`, entry size
 /// [`crate::REPORT_BUFFER_SIZE`]).

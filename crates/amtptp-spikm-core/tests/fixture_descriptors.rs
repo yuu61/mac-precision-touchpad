@@ -31,7 +31,7 @@ const FW_RETRIEVE: &str = "framework: output retrieval failed (outlen 0 / < 32)"
 const FW_COPY: &str = "framework: WdfMemoryCopyFromBuffer too small";
 
 const C_REPORT_DESCRIPTOR_LEN: usize = 501;
-const REPORT_DESCRIPTOR_DELTA: usize = REPORT_DESCRIPTOR_LEN - C_REPORT_DESCRIPTOR_LEN;
+const REPORT_DESCRIPTOR_DELTA: usize = C_REPORT_DESCRIPTOR_LEN - REPORT_DESCRIPTOR_LEN;
 
 fn config_for(pid: u16, rt: u32, ver: u16, inj: &str) -> DeviceConfig {
     let mut cfg = DeviceConfig::new();
@@ -54,7 +54,7 @@ fn config_for(pid: u16, rt: u32, ver: u16, inj: &str) -> DeviceConfig {
     cfg
 }
 
-/// Projects a clean 519-byte SPI report descriptor back to the 501-byte C descriptor so every
+/// Projects a clean 496-byte SPI report descriptor back to the 501-byte C descriptor so every
 /// non-fix byte is cross-checked against the C fixture.
 fn to_legacy_c_spi(bytes: &[u8], family: Option<Family>) -> Vec<u8> {
     let mut patched = bytes.to_vec();
@@ -76,14 +76,18 @@ fn to_legacy_c_spi(bytes: &[u8], family: Option<Family>) -> Vec<u8> {
         TOUCHPAD_TLC_HEADER_LEN + 2 * step + (FINGER_COLLECTION_SPI_LEN - 1 - GLOBAL_RESET.len());
     let f5_reset =
         TOUCHPAD_TLC_HEADER_LEN + 4 * step + (FINGER_COLLECTION_SPI_LEN - 1 - GLOBAL_RESET.len());
-    let tail_start = TOUCHPAD_TLC_HEADER_LEN + 5 * FINGER_COLLECTION_SPI_LEN + 4 * FINGER_SEPARATOR_LEN;
+    let tail_start =
+        TOUCHPAD_TLC_HEADER_LEN + 5 * FINGER_COLLECTION_SPI_LEN + 4 * FINGER_SEPARATOR_LEN;
     let scan_time_reset = tail_start + 21;
     let cfg_tlc_start = tail_start + 88;
     let input_mode_max_offset = cfg_tlc_start + 17;
 
     assert_eq!(&patched[f3_reset..f3_reset + 6], &GLOBAL_RESET);
     assert_eq!(&patched[f5_reset..f5_reset + 6], &GLOBAL_RESET);
-    assert_eq!(&patched[scan_time_reset..scan_time_reset + 6], &GLOBAL_RESET);
+    assert_eq!(
+        &patched[scan_time_reset..scan_time_reset + 6],
+        &GLOBAL_RESET
+    );
     assert_eq!(patched[input_mode_max_offset], PTP_COLLECTION_WINDOWS);
 
     let mut out = Vec::with_capacity(C_REPORT_DESCRIPTOR_LEN);
@@ -111,7 +115,7 @@ fn descriptors_and_attributes() {
         let outlen = if kind == InternalIoctl::GetReportDescriptor
             && (C_REPORT_DESCRIPTOR_LEN - 1..=C_REPORT_DESCRIPTOR_LEN + 1).contains(&c_outlen)
         {
-            c_outlen + REPORT_DESCRIPTOR_DELTA
+            c_outlen - REPORT_DESCRIPTOR_DELTA
         } else {
             c_outlen
         };
@@ -174,12 +178,12 @@ fn descriptors_and_attributes() {
             assert_ne!(r.get("inj"), "-", "{ctx}");
         }
         assert_eq!(status, r.status("status"), "{ctx}: status");
-        let expected_info = if status == STATUS_SUCCESS && kind == InternalIoctl::GetReportDescriptor
-        {
-            r.dec::<usize>("info") + REPORT_DESCRIPTOR_DELTA
-        } else {
-            r.dec::<usize>("info")
-        };
+        let expected_info =
+            if status == STATUS_SUCCESS && kind == InternalIoctl::GetReportDescriptor {
+                r.dec::<usize>("info") - REPORT_DESCRIPTOR_DELTA
+            } else {
+                r.dec::<usize>("info")
+            };
         assert_eq!(info, expected_info, "{ctx}: info");
         assert_eq!(
             r.dec::<u32>("infoset"),
@@ -210,7 +214,7 @@ fn descriptors_and_attributes() {
                 );
                 assert_eq!(
                     to_hex(&projected),
-                    to_hex(&expected[..C_REPORT_DESCRIPTOR_LEN]),
+                    to_hex(&expected[..C_REPORT_DESCRIPTOR_LEN - 23]),
                     "{ctx}: legacy C projection"
                 );
                 assert_eq!(

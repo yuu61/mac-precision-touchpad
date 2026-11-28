@@ -13,21 +13,19 @@
 //! | `configure_continuous_reader` | `WDF_USB_CONTINUOUS_READER_CONFIG_INIT` + `WdfUsbTargetPipeConfigContinuousReader` (Interrupt.c:54-65) |
 //! | `start_pipe` / `stop_pipe` | `WdfIoTargetStart` / `WdfIoTargetStop(.., WdfIoTargetCancelSentIo)` on `WdfUsbTargetPipeGetIoTarget` (Device.c:325, 383) |
 //! | `query_performance_frequency` | Cache the QPC frequency at D0 entry |
-//! | `allocate_transfer_buffer` | `WdfMemoryCreate(WDF_NO_OBJECT_ATTRIBUTES, NonPagedPoolNx, 'PTPC', 4, ..)` (Device.c:530; P2 B3/B27) |
 //! | `control_transfer` | `WdfUsbTargetDeviceSendControlTransferSynchronously(UsbDevice, WDF_NO_HANDLE, NULL, ..)` (Device.c:566, 607) |
 //!
 //! IRQL: everything here is `PASSIVE_LEVEL` (`PrepareHardware`, `D0Entry`, `D0Exit`, and `SET_FEATURE`, which
 //! hidclass sends at `PASSIVE_LEVEL`). None of it is in a `PAGE` section, because D0Entry/D0Exit and the
 //! I/O path call it from non-paged code (as in C).
 
-use core::ptr::{self, NonNull};
+use core::ptr;
 
 use amtptp_usbkm_core::lifecycle::{ContinuousReaderConfig, UsbHardware, UsbPipeInfo, UsbPipeType};
 use amtptp_usbkm_core::state::UsbDeviceIds;
 use amtptp_usbkm_core::status::NtStatus;
 use amtptp_usbkm_core::wellspring::{
-    ControlTransfer, POOL_TAG_PTP_CONTROL, TRANSFER_BUFFER_POOL_TYPE, UsbSetupPacket,
-    WELLSPRING_DATA_LEN,
+    ControlTransfer, ModeSwitch, UsbSetupPacket, WELLSPRING_DATA_LEN,
 };
 use tracelogging as tlg;
 use wdf_support::init::{
@@ -35,14 +33,12 @@ use wdf_support::init::{
     usb_device_information_init, usb_device_select_config_params_init_single_interface,
     usb_pipe_information_init,
 };
-use wdf_support::ntstatus::{
-    NT_SUCCESS, STATUS_INSUFFICIENT_RESOURCES, STATUS_INVALID_DEVICE_STATE,
-};
+use wdf_support::ntstatus::{NT_SUCCESS, STATUS_INVALID_DEVICE_STATE};
 use wdk_sys::{
-    _POOL_TYPE, _WDF_IO_TARGET_SENT_IO_ACTION, _WDF_USB_DEVICE_TRAITS, _WDF_USB_PIPE_TYPE,
-    PVOID, ULONG, USB_DEVICE_DESCRIPTOR, WDF_NO_HANDLE, WDF_NO_OBJECT_ATTRIBUTES,
-    WDF_USB_CONTROL_SETUP_PACKET, WDFDEVICE, WDFIOTARGET, WDFIOTARGET__, WDFMEMORY, WDFREQUEST__,
-    WDFUSBPIPE, call_unsafe_wdf_function_binding,
+    _WDF_IO_TARGET_SENT_IO_ACTION, _WDF_USB_DEVICE_TRAITS, _WDF_USB_PIPE_TYPE, ULONG,
+    USB_DEVICE_DESCRIPTOR, WDF_NO_HANDLE, WDF_NO_OBJECT_ATTRIBUTES, WDF_USB_CONTROL_SETUP_PACKET,
+    WDFDEVICE, WDFIOTARGET, WDFIOTARGET__, WDFREQUEST__, WDFUSBPIPE,
+    call_unsafe_wdf_function_binding,
 };
 
 use crate::PROVIDER;
@@ -50,8 +46,6 @@ use crate::context::DeviceContext;
 use crate::interrupt::{evt_usb_interrupt_pipe_read_complete, evt_usb_interrupt_readers_failed};
 use crate::trace::KW_DEVICE;
 
-// The pool the transfer buffer comes from: the core's choice (B27) is the WDK's NonPagedPoolNx.
-const _: () = assert!(TRANSFER_BUFFER_POOL_TYPE == _POOL_TYPE::NonPagedPoolNx);
 // The memory descriptor length (`wLength`) fits the ULONG field.
 const TRANSFER_LENGTH: ULONG = {
     assert!(WELLSPRING_DATA_LEN <= ULONG::MAX as usize);
@@ -90,79 +84,23 @@ impl<'a> UsbIo<'a> {
     }
 }
 
-/// The 4-byte wellspring transfer buffer: a `WDFMEMORY` from non-paged pool, deleted on drop
-/// (`WdfObjectDelete(bufHandle)` at the C `cleanup:` label, only for a real allocation: B4 fixed).
-pub(crate) struct TransferBuffer {
-    memory: WDFMEMORY,
-    buffer: NonNull<[u8; WELLSPRING_DATA_LEN]>,
-}
-
-impl AsMut<[u8; WELLSPRING_DATA_LEN]> for TransferBuffer {
-    fn as_mut(&mut self) -> &mut [u8; WELLSPRING_DATA_LEN] {
-        // SAFETY: `buffer` is the WELLSPRING_DATA_LEN-byte buffer of `memory` (WdfMemoryCreate with that
-        // size), which stays allocated until `drop`; `&mut self` makes this the only reference to it.
-        unsafe { self.buffer.as_mut() }
-    }
-}
-
-impl Drop for TransferBuffer {
-    fn drop(&mut self) {
-        // SAFETY: `memory` is the valid WDFMEMORY created by `allocate_transfer_buffer` (parent: the
-        // driver, WDF_NO_OBJECT_ATTRIBUTES), deleted exactly once here; no reference into its buffer
-        // outlives `self`.
-        unsafe { call_unsafe_wdf_function_binding!(WdfObjectDelete, self.memory.cast()) };
-    }
-}
-
 impl ControlTransfer for UsbIo<'_> {
-    type Buffer = TransferBuffer;
-
-    fn serialized<R, F: FnOnce(&mut Self) -> R>(&mut self, f: F) -> R {
-        let context = self.context;
-        // SAFETY: the lock was created in `create_device` before any callback could run; every caller
-        // of the core's mode-switch sequences runs at PASSIVE_LEVEL (UsbIo::new contract); the core
-        // never nests `serialized`, and nothing a control transfer waits for takes this lock.
-        unsafe { context.mode_switch_lock.with(|| f(self)) }
-    }
-
-    fn allocate_transfer_buffer(&mut self) -> Result<TransferBuffer, NtStatus> {
-        let mut memory: WDFMEMORY = ptr::null_mut();
-        let mut buffer: PVOID = ptr::null_mut();
-        // SAFETY: valid out-pointers; WDF_NO_OBJECT_ATTRIBUTES as in C. NonPagedPoolNx instead of the C
-        // PagedPool (B27: this is a URB transfer buffer) and the full wLength (4) instead of um_size (2)
-        // (B3). Callable at <= DISPATCH_LEVEL.
-        let status = unsafe {
-            call_unsafe_wdf_function_binding!(
-                WdfMemoryCreate,
-                WDF_NO_OBJECT_ATTRIBUTES,
-                TRANSFER_BUFFER_POOL_TYPE,
-                POOL_TAG_PTP_CONTROL,
-                WELLSPRING_DATA_LEN,
-                &raw mut memory,
-                &raw mut buffer
-            )
-        };
-        if !NT_SUCCESS(status) {
-            tlg::write_event!(
-                PROVIDER,
-                "WellspringBufferAllocationFailed",
-                level(Error),
-                keyword(KW_DEVICE),
-                win_ntstatus("Status", &status)
-            );
-            return Err(status);
+    fn serialized<R, F: FnOnce(&mut ModeSwitch<'_>) -> R>(&mut self, f: F) -> R {
+        // SAFETY: DeviceAdd initialized the lock. All mode switches run at PASSIVE_LEVEL.
+        // The device context and its nonpaged transfer buffer outlive the synchronous I/O.
+        unsafe {
+            self.context.mode_switch_lock.with(|buffer| {
+                f(&mut |register, on| {
+                    register.set_mode(buffer, on, |setup, data| self.control_transfer(setup, data))
+                })
+            })
         }
-        let Some(buffer) = NonNull::new(buffer.cast::<[u8; WELLSPRING_DATA_LEN]>()) else {
-            // Impossible: WdfMemoryCreate succeeded without a buffer. Release the object.
-            // SAFETY: `memory` was just created by WdfMemoryCreate and is not used afterwards.
-            unsafe { call_unsafe_wdf_function_binding!(WdfObjectDelete, memory.cast()) };
-            return Err(STATUS_INSUFFICIENT_RESOURCES);
-        };
-        Ok(TransferBuffer { memory, buffer })
     }
+}
 
+impl UsbIo<'_> {
     fn control_transfer(
-        &mut self,
+        &self,
         setup: &UsbSetupPacket,
         data: &mut [u8; WELLSPRING_DATA_LEN],
     ) -> NtStatus {

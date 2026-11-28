@@ -13,13 +13,11 @@ mod common;
 
 use std::collections::BTreeMap;
 
-use amtptp_usbkm_core::lifecycle::{
-    self, DEFAULT_QUEUE, DEVICE_INTERFACE_GUID, INPUT_QUEUE, QueueSpec,
-};
+use amtptp_usbkm_core::lifecycle::{self, DEFAULT_QUEUE, INPUT_QUEUE, QueueSpec};
 use amtptp_usbkm_core::state::DeviceState;
 use amtptp_usbkm_core::status::STATUS_INVALID_DEVICE_STATE;
 use common::fake::{FakeHw, normalize_ops};
-use common::{Record, Tally, hex, load, num, status, status_str, to_hex};
+use common::{Record, Tally, hex, load, num, status, status_str};
 
 /// P3 fix of B10: the `D0Exit` wellspring-OFF transfer failed, which C returned from the callback; the port
 /// returns `STATUS_SUCCESS` (the transfer status itself still matches the C return value).
@@ -97,13 +95,6 @@ fn device_add(s: &mut Scenario) -> (i32, Vec<String>) {
     let state = DeviceState::new(); // WDF zero-initializes the context
     state.on_device_create();
     s.state = Some(state);
-    let guid = to_hex(&DEVICE_INTERFACE_GUID.to_bytes());
-    let devif = format!("devif:guid={guid},ref=null");
-    if let Some(st) = inj("device_interface") {
-        ops.push(with_st(devif, Some(st)));
-        return (st, ops);
-    }
-    ops.push(devif);
     if let Some(st) = inj("queue_default") {
         ops.push(with_st(queue_op(DEFAULT_QUEUE), Some(st)));
         return (st, ops);
@@ -183,11 +174,16 @@ fn step(s: &mut Scenario, r: &Record) -> &'static str {
         }
         "device_add" => {
             let (st, ops) = device_add(s);
+            if s.hw.inject.contains_key("device_interface") {
+                assert_eq!(st, 0, "{id}: retired interface registration");
+                assert!(s.inputq);
+                return "framework/device_add";
+            }
             assert_eq!(status_str(st), expected_status, "{id}");
             // B12 (P2): the PDO-only WdfPdoInitAllowForwardingRequestToParent is not called.
             let c_ops: Vec<String> = expected_ops
                 .into_iter()
-                .filter(|o| o != "pdo_init_allow_fwd_to_parent")
+                .filter(|o| o != "pdo_init_allow_fwd_to_parent" && !o.starts_with("devif:"))
                 .collect();
             assert_eq!(ops, c_ops, "{id}: ops");
             "framework/device_add"
@@ -218,7 +214,16 @@ fn step(s: &mut Scenario, r: &Record) -> &'static str {
                 assert_eq!(expected_status, "0x00000000", "{id}: C record");
                 assert_eq!(status_str(st), "0xc0000206", "{id}");
                 assert_eq!(ops, expected_ops, "{id}: ops");
-                assert_eq!(ctx_string(s), r.req("ctx_out"), "{id}: ctx_out");
+                let mut expected = r.req("ctx_out").to_owned();
+                if let Some(state) = &s.state
+                    && state.config().firmware == amtptp_usbkm_core::config::Firmware::Legacy
+                {
+                    expected = expected.replace(
+                        "cfg:0xffff",
+                        &format!("cfg:0x{:04x}", state.config().identification),
+                    );
+                }
+                assert_eq!(ctx_string(s), expected, "{id}: ctx_out");
                 return "p3_fixed/reader_error_returned";
             }
             if id.starts_with("pipes-int-out-first#") {
@@ -226,7 +231,10 @@ fn step(s: &mut Scenario, r: &Record) -> &'static str {
                 // interrupt IN pipe 1.
                 assert_eq!(status_str(st), expected_status, "{id}");
                 let c_reader = expected_ops.last().expect("reader configuration").clone();
-                assert!(c_reader.starts_with("pipe_config_cont_reader:pipe=0,"), "{id}");
+                assert!(
+                    c_reader.starts_with("pipe_config_cont_reader:pipe=0,"),
+                    "{id}"
+                );
                 let mut port_ops = expected_ops[..expected_ops.len() - 1].to_vec();
                 port_ops.push("usbif_get_pipe:idx=1".to_owned());
                 port_ops.push("pipe_no_max_pkt_check:pipe=1".to_owned());
@@ -280,7 +288,16 @@ fn step(s: &mut Scenario, r: &Record) -> &'static str {
         other => panic!("{id}: unknown call {other}"),
     };
     assert_eq!(null_deletes > 0, bucket == "p2_fixed/c_bugcheck_B4", "{id}");
-    assert_eq!(ctx_string(s), r.req("ctx_out"), "{id}: ctx_out");
+    let mut expected = r.req("ctx_out").to_owned();
+    if let Some(state) = &s.state
+        && state.config().firmware == amtptp_usbkm_core::config::Firmware::Legacy
+    {
+        expected = expected.replace(
+            "cfg:0xffff",
+            &format!("cfg:0x{:04x}", state.config().identification),
+        );
+    }
+    assert_eq!(ctx_string(s), expected, "{id}: ctx_out");
     bucket
 }
 

@@ -1,5 +1,5 @@
 //! Windows Precision Touchpad (PTP) HID building blocks shared by the four AmtPtp drivers
-//! (`AmtPtpDeviceUsbUm`, `AmtPtpDeviceUsbKm`, `AmtPtpDeviceSpiKm`, `AmtPtpHidFilter`).
+//! (`AmtPtpDeviceUsbKm`, `AmtPtpDeviceSpiKm`, `AmtPtpHidFilter`).
 //!
 //! Everything here is hardware-independent and `no_std`. It has no WDK dependency and is host-testable:
 //!
@@ -25,8 +25,8 @@
 //! A core crate owns its per-family axis values and builds its descriptors at compile time:
 //!
 //! ```
-//! use ptp_hid::descriptor::{Axes, REPORT_DESCRIPTOR_U32_ID_UMAPP_LEN, report_descriptor_u32_id_umapp};
-//! use ptp_hid::hidport::HID_DESCRIPTOR_U32_ID_UMAPP;
+//! use ptp_hid::descriptor::{Axes, REPORT_DESCRIPTOR_U32_ID_LEN, report_descriptor_u32_id};
+//! use ptp_hid::hidport::HID_DESCRIPTOR_U32_ID;
 //! use ptp_hid::input::{PtpContact, PtpReport};
 //!
 //! const MT2: Axes = Axes {
@@ -35,11 +35,11 @@
 //!     y_physical_max: 1149,
 //!     y_logical_max: 5065,
 //! };
-//! pub static REPORT_DESCRIPTOR: [u8; REPORT_DESCRIPTOR_U32_ID_UMAPP_LEN] =
-//!     report_descriptor_u32_id_umapp(MT2);
+//! pub static REPORT_DESCRIPTOR: [u8; REPORT_DESCRIPTOR_U32_ID_LEN] =
+//!     report_descriptor_u32_id(MT2);
 //!
-//! assert_eq!(REPORT_DESCRIPTOR.len(), 534);
-//! assert_eq!(HID_DESCRIPTOR_U32_ID_UMAPP, [0x09, 0x21, 0x00, 0x01, 0x00, 0x01, 0x22, 0x16, 0x02]);
+//! assert_eq!(REPORT_DESCRIPTOR.len(), 511);
+//! assert_eq!(HID_DESCRIPTOR_U32_ID, [0x09, 0x21, 0x00, 0x01, 0x00, 0x01, 0x22, 0xff, 0x01]);
 //!
 //! let mut report = PtpReport { contact_count: 1, ..PtpReport::EMPTY };
 //! report.contacts[0] = PtpContact { confidence: true, tip_switch: true, contact_id: 0, x: 100, y: 200 };

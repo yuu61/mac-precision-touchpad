@@ -26,14 +26,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "amtptp-usbum-core"
-version = "0.1.0"
-dependencies = [
- "bcm5974",
- "ptp-hid",
-]
-
-[[package]]
 name = "bcm5974"
 version = "0.1.0"
 dependencies = [
@@ -51,5 +43,4 @@ dependencies = [
  "amtptp-hidfilter-core",
  "amtptp-spikm-core",
  "amtptp-usbkm-core",
- "amtptp-usbum-core",
 ]

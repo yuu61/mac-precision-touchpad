@@ -41,7 +41,7 @@
 //! **`AddDevice`** (`WdfFdoInitSetFilter`; no `WdfPdoInitAllowForwardingRequestToParent`): the lookaside list
 //! uses [`wire::LOWER_READ_BUFFER_LEN`] and [`wire::POOL_TAG`] (parent: the device); the passive-level
 //! one-shot timer has period [`runtime::RECOVERY_TIMER_PERIOD`]; no local I/O target gives
-//! [`wire::NO_IO_TARGET_STATUS`]; the device interface is [`wire::DEVICE_INTERFACE_GUID`]; the context
+//! [`wire::NO_IO_TARGET_STATUS`]; the context
 //! starts as [`runtime::DeviceRuntime::new`] / [`device::SharedDeviceConfig::new`].
 //!
 //! **`PrepareHardware`**:
@@ -57,8 +57,7 @@
 //! **`D0Entry`**: `runtime.on_d0_entry(freq)`, where `freq` is what `KeQueryPerformanceCounter(&mut freq)`
 //! writes to its frequency output.
 //!
-//! **`SelfManagedIoInit` / `SelfManagedIoRestart`** (one function): fill a [`wire::SetStatePacket`] in place
-//! (`fill(true)`), then send its 255 bytes with `WdfIoTargetSendInternalIoctlSynchronously`
+//! **`SelfManagedIoInit` / `SelfManagedIoRestart`** (one function): use [`wire::with_set_state_packet`] to send the 255 bytes with `WdfIoTargetSendInternalIoctlSynchronously`
 //! and [`wire::SET_STATE_IOCTL`], with no request handle, output, or options. Then call
 //! `runtime.on_self_managed_io_init_or_restart(tracker, status, || freq)`; if the outcome has
 //! `start_recovery_timer: Some(due)`, `WdfTimerStart(timer, due)`; if it is `configured`, issue the backlog

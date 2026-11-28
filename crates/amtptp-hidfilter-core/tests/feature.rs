@@ -9,8 +9,10 @@
 
 mod common;
 
-use amtptp_hidfilter_core::{DeviceState, dispatch_internal_ioctl};
+use amtptp_hidfilter_core::DeviceState;
+use common::dispatch::dispatch_internal_ioctl;
 use common::*;
+
 use ptp_hid::common::REPORTID_PTPHQA;
 use ptp_hid::feature::{HQA_REPORT, HQA_REPORT_LEN};
 

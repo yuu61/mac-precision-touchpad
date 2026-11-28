@@ -12,9 +12,11 @@ mod common;
 
 use amtptp_hidfilter_core::{
     Bcm5974Param, DeviceSnapshot, DeviceState, HID_VID_APPLE_USB, REPORT_BUFFER_SIZE, ReadTicket,
-    STATUS_SUCCESS, complete_lower_read, multitouch_report_id,
+    STATUS_SUCCESS, multitouch_report_id,
 };
+use common::pipeline::complete_lower_read;
 use common::*;
+
 use ptp_hid::common::MAX_FINGERS;
 use ptp_hid::input::{PTP_REPORT_LEN, PTP_REPORT_SCAN_TIME_OFFSET};
 
@@ -34,7 +36,11 @@ fn port_act<'a>(r: &Rec, c_act: &'a str) -> (&'a str, Option<&'static str>) {
         return (c_act, None);
     }
     let diverge = |act: &'a str, bucket| {
-        if act == c_act { (c_act, None) } else { (act, Some(bucket)) }
+        if act == c_act {
+            (c_act, None)
+        } else {
+            (act, Some(bucket))
+        }
     };
     if information > REPORT_BUFFER_SIZE as i128 {
         return diverge("timer3s", OVERSIZE_P3);
@@ -341,6 +347,9 @@ fn lower_read_scan_time_uses_counter_instead_of_frequency() {
         );
         assert_eq!(m.uppers[req].completed, Some((0, PTP_REPORT_LEN)));
         let offset = PTP_REPORT_SCAN_TIME_OFFSET;
-        assert_eq!(m.uppers[req].buf[offset..offset + 2], expected.to_le_bytes());
+        assert_eq!(
+            m.uppers[req].buf[offset..offset + 2],
+            expected.to_le_bytes()
+        );
     }
 }

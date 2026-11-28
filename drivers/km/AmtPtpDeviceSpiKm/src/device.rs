@@ -12,8 +12,8 @@ use amtptp_spikm_core::runtime::{
     RECOVERY_TIMER_PERIOD, ReadTracker, SuspendedReads,
 };
 use amtptp_spikm_core::wire::{
-    DEVICE_INTERFACE_GUID, LOWER_ATTRIBUTES_IOCTL, LOWER_ATTRIBUTES_LEN, LOWER_READ_BUFFER_LEN,
-    NO_IO_TARGET_STATUS, POOL_TAG, SET_STATE_IOCTL, SET_STATE_PACKET_LEN, SetStatePacket,
+    LOWER_ATTRIBUTES_IOCTL, LOWER_ATTRIBUTES_LEN, LOWER_READ_BUFFER_LEN, NO_IO_TARGET_STATUS,
+    POOL_TAG, SET_STATE_IOCTL, SET_STATE_PACKET_LEN, with_set_state_packet,
 };
 use tracelogging as tlg;
 use wdf_support::declare_context_type;
@@ -27,10 +27,10 @@ use wdf_support::request::Request;
 use wdf_support::sync::SpinLocked;
 use wdf_support::time::query_performance_frequency;
 use wdk_sys::{
-    _POOL_TYPE, _WDF_EXECUTION_LEVEL, GUID, NTSTATUS, PWDFDEVICE_INIT, ULONG,
-    UNICODE_STRING, WDF_NO_OBJECT_ATTRIBUTES, WDF_POWER_DEVICE_STATE, WDFCMRESLIST, WDFDEVICE,
-    WDFIOTARGET__, WDFKEY, WDFLOOKASIDE, WDFLOOKASIDE__, WDFQUEUE, WDFQUEUE__,
-    WDFREQUEST, WDFREQUEST__, WDFTIMER, WDFTIMER__, call_unsafe_wdf_function_binding,
+    _POOL_TYPE, _WDF_EXECUTION_LEVEL, NTSTATUS, PWDFDEVICE_INIT, ULONG, UNICODE_STRING,
+    WDF_NO_OBJECT_ATTRIBUTES, WDF_POWER_DEVICE_STATE, WDFCMRESLIST, WDFDEVICE, WDFIOTARGET__,
+    WDFKEY, WDFLOOKASIDE, WDFLOOKASIDE__, WDFQUEUE, WDFQUEUE__, WDFREQUEST, WDFREQUEST__, WDFTIMER,
+    WDFTIMER__, call_unsafe_wdf_function_binding,
 };
 
 use crate::{PROVIDER, input, keyword, queue};
@@ -132,14 +132,6 @@ pub(crate) unsafe fn device_context<'a>(device: WDFDEVICE) -> Option<&'a DeviceC
     // a `&mut` afterwards, and lives as long as the device.
     unsafe { context.as_ref() }
 }
-
-/// `GUID_DEVINTERFACE_AmtPtpDeviceSpiKm` {f271e39d-d211-4a6e-a439-63e51940d210} (Public.h:22-24).
-static DEVICE_INTERFACE_CLASS_GUID: GUID = GUID {
-    Data1: DEVICE_INTERFACE_GUID.data1,
-    Data2: DEVICE_INTERFACE_GUID.data2,
-    Data3: DEVICE_INTERFACE_GUID.data3,
-    Data4: DEVICE_INTERFACE_GUID.data4,
-};
 
 /// `AmtPtpDeviceSpiKmCreateDevice` (Device.c:24-164), `PASSIVE_LEVEL` (`PAGE`, as in C).
 ///
@@ -287,24 +279,8 @@ unsafe fn initialize_device(device: WDFDEVICE, context: *mut DeviceContext) -> N
 
     // DeviceStatus = D3: already set by DeviceContext::new().
 
-    // SAFETY: valid device; the GUID is a 'static; no reference string (C: NULL).
-    let status = unsafe {
-        call_unsafe_wdf_function_binding!(
-            WdfDeviceCreateDeviceInterface,
-            device,
-            &raw const DEVICE_INTERFACE_CLASS_GUID,
-            core::ptr::null()
-        )
-    };
-    if !NT_SUCCESS(status) {
-        trace_create_device_failure(b"WdfDeviceCreateDeviceInterface", status);
-        return status;
-    }
-
     // SAFETY: valid device; `hid_queue` is writable per the function contract.
-    unsafe {
-        queue::queue_initialize(device, (&raw mut (*context).hid_queue).cast::<WDFQUEUE>())
-    }
+    unsafe { queue::queue_initialize(device, (&raw mut (*context).hid_queue).cast::<WDFQUEUE>()) }
 }
 
 /// Error trace for the device-creation steps.
@@ -530,9 +506,7 @@ unsafe extern "C" fn evt_device_d0_entry(
     };
     // SAFETY: live device context at PASSIVE_LEVEL.
     unsafe { context.with_contacts(|_, contacts| contacts.reset()) };
-    context
-        .runtime
-        .on_d0_entry(query_performance_frequency())
+    context.runtime.on_d0_entry(query_performance_frequency())
 }
 
 /// `EvtDeviceSelfManagedIoSuspend` (not in C): runs before every `D0Exit` (power-down, resource
@@ -697,7 +671,11 @@ unsafe extern "C" fn evt_device_self_managed_io_init_or_restart(device: WDFDEVIC
     // SAFETY: the context belongs to a live device; PASSIVE_LEVEL.
     let outcome = unsafe {
         context.with_reads(|runtime, reads| {
-            runtime.on_self_managed_io_init_or_restart(reads, set_state, query_performance_frequency)
+            runtime.on_self_managed_io_init_or_restart(
+                reads,
+                set_state,
+                query_performance_frequency,
+            )
         })
     };
     if outcome.configured {
@@ -736,29 +714,32 @@ unsafe extern "C" fn evt_device_self_managed_io_init_or_restart(device: WDFDEVIC
 /// # Safety
 /// `PASSIVE_LEVEL` (synchronous send). `context` belongs to a live device.
 unsafe fn spi_set_state(context: &DeviceContext, desired_state: bool) -> NTSTATUS {
-    let mut packet = SetStatePacket::zeroed();
-    packet.fill(desired_state);
-    let mut input =
-        memory_descriptor_init_buffer(packet.as_mut_ptr().cast(), SET_STATE_PACKET_DESCRIPTOR_LEN);
-    // Not in C (no options): bound the wait for a lower driver that never completes (B-3).
-    let mut options = sync_send_options(0);
-    // SAFETY: PASSIVE_LEVEL (caller contract); valid local I/O target; `input`
-    // describes `packet`, which is neither moved nor dropped before this
-    // synchronous call returns (its self-pointer stays valid; on a timeout the
-    // framework waits for the cancelled request); request, output and
-    // bytes-returned NULL, as in C.
-    let status = unsafe {
-        call_unsafe_wdf_function_binding!(
-            WdfIoTargetSendInternalIoctlSynchronously,
-            context.spi_trackpad_io_target.get(),
-            null_mut(),
-            SET_STATE_IOCTL,
-            &raw mut input,
-            null_mut(),
-            &raw mut options,
-            null_mut()
-        )
-    };
+    let status = with_set_state_packet(desired_state, |packet| {
+        let mut input = memory_descriptor_init_buffer(
+            packet.as_ptr().cast_mut().cast(),
+            SET_STATE_PACKET_DESCRIPTOR_LEN,
+        );
+        // Not in C (no options): bound the wait for a lower driver that never completes (B-3).
+        let mut options = sync_send_options(0);
+        // SAFETY: PASSIVE_LEVEL (caller contract); valid local I/O target; `input`
+        // describes `packet`, which is neither moved nor dropped before this
+        // synchronous call returns (its self-pointer stays valid; on a timeout the
+        // framework waits for the cancelled request); request, output and
+        // bytes-returned NULL, as in C.
+        unsafe {
+            call_unsafe_wdf_function_binding!(
+                WdfIoTargetSendInternalIoctlSynchronously,
+                context.spi_trackpad_io_target.get(),
+                null_mut(),
+                SET_STATE_IOCTL,
+                &raw mut input,
+                null_mut(),
+                &raw mut options,
+                null_mut()
+            )
+        }
+    })
+    .unwrap_or(wdf_support::ntstatus::STATUS_INVALID_DEVICE_STATE);
     if NT_SUCCESS(status) {
         tlg::write_event!(
             PROVIDER,
@@ -803,7 +784,8 @@ unsafe extern "C" fn power_recovery_timer_callback(timer: WDFTIMER) {
         return;
     };
     // SAFETY: the context belongs to a live device; PASSIVE_LEVEL.
-    let Some(ticket) = (unsafe { context.with_reads(|runtime, reads| runtime.begin_recovery(reads)) })
+    let Some(ticket) =
+        (unsafe { context.with_reads(|runtime, reads| runtime.begin_recovery(reads)) })
     else {
         tlg::write_event!(
             PROVIDER,

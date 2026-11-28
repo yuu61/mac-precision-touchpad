@@ -12,29 +12,11 @@ use ptp_hid::common::{
     REPORTID_PTPHQA, REPORTID_REPORTMODE,
 };
 use ptp_hid::feature::{
-    DeviceCapsReport, INPUT_MODE_OFFSET, SelectiveReportBits,
-    write_hqa_report,
+    DeviceCapsReport, INPUT_MODE_OFFSET, SelectiveReportBits, write_hqa_report,
 };
 
-use crate::device::HID_XFER_PACKET_LEN;
-use crate::status::{
-    NtStatus, STATUS_BUFFER_TOO_SMALL, STATUS_INVALID_BUFFER_SIZE, STATUS_NOT_SUPPORTED,
-    STATUS_SUCCESS,
-};
-
-/// The first check of both handlers: the IOCTL's transfer buffer (`OutputBufferLength` for GET,
-/// `InputBufferLength` for SET) must hold a `HID_XFER_PACKET` (16 bytes), else
-/// `STATUS_BUFFER_TOO_SMALL`. It runs before the `UserBuffer` NULL check.
-///
-/// # Errors
-/// Returns `STATUS_BUFFER_TOO_SMALL` if the transfer buffer is shorter than a HID packet.
-pub const fn check_xfer_length(transfer_length: usize) -> Result<(), NtStatus> {
-    if transfer_length < HID_XFER_PACKET_LEN {
-        Err(STATUS_BUFFER_TOO_SMALL)
-    } else {
-        Ok(())
-    }
-}
+use crate::status::{NtStatus, STATUS_INVALID_BUFFER_SIZE, STATUS_NOT_SUPPORTED, STATUS_SUCCESS};
+pub use ptp_hid::hidport::check_xfer_length;
 
 /// `GET_FEATURE` for `report_id` into `report_buffer` (the `reportBufferLen` bytes at `reportBuffer`).
 ///
@@ -111,6 +93,7 @@ pub fn decode_set_feature(report_id: u8, report_buffer: &[u8]) -> Result<Feature
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::status::STATUS_BUFFER_TOO_SMALL;
 
     #[test]
     fn spec_d5_vectors() {

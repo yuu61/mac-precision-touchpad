@@ -2,11 +2,8 @@
 //! (Bluetooth; the USB transport is supported but no INF binds it) into a Windows Precision Touchpad.
 //! Port of the C driver `src/AmtPtpHidFilter` (spec `hidfilter.md`).
 //!
-//! All hardware-independent logic (IOCTL routing, feature reports, descriptors, the read pipeline,
-//! the mode switch, the PnP/power sequences, the detour's checks and `AddDevice`'s failure handling)
-//! lives in `amtptp_hidfilter_core`, which owns the C call **sequences** and is replayed against the
-//! C oracle fixtures. This crate is the thin WDF glue: every WDF callback is one call into the core,
-//! and the core's I/O traits are implemented here with one WDF or kernel call per method.
+//! The core decodes reports, maintains transport state and selects the next action after
+//! a lower read completes. This driver owns the WDF requests, timers and PnP callbacks.
 //!
 //! | C file | Rust module |
 //! |---|---|
@@ -24,6 +21,10 @@
 //! Tracing: `TraceLogging` provider `AmtPtpHidFilterTraceProvider` with the C driver's WPP control
 //! GUID; the keywords reuse the WPP flag bits (`TRACE_DRIVER` 0x1 ... `TRACE_INPUT` 0x10).
 #![no_std]
+#![expect(
+    clippy::self_named_module_files,
+    reason = "Keep device.rs and io.rs beside their submodule directories."
+)]
 
 extern crate wdk_panic; // #[panic_handler]: a panic is a bugcheck (0x52504E43).
 

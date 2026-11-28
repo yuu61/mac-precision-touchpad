@@ -1,6 +1,0 @@
-# Required by wdk-build for UMDF too (configure_wdk_binary_build fails with
-# StaticCrtNotEnabled otherwise). Do not override with RUSTFLAGS /
-# CARGO_ENCODED_RUSTFLAGS: those replace [build] rustflags and silently drop
-# +crt-static.
-[build]
-rustflags = ["-C", "target-feature=+crt-static"]

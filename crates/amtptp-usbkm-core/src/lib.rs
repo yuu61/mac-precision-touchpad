@@ -1,4 +1,4 @@
-//! Hardware-independent logic of the `AmtPtpDeviceUsbKm` (KMDF, Apple T2 USB trackpad) driver.
+//! Hardware-independent logic of the `AmtPtpDeviceUsbKm` (KMDF, Wellspring, T2 and USB Magic Trackpad 2) driver.
 //!
 //! The C driver (`src/AmtPtpDeviceUsbKm`) is a KMDF lower filter under `mshidkmdf` that acts as the HID
 //! minidriver of interface 2 of the T2 keyboard/trackpad. Everything it does that does not need WDF is
@@ -13,7 +13,7 @@
 //!   [`wellspring::ControlTransfer`].
 //! - [`input`]: reader packet → 50-byte PTP input report, `ScanTime`, and `READ_REPORT` completion.
 //! - [`lifecycle`]: `PrepareHardware` / `D0Entry` / `D0Exit` sequencing over [`lifecycle::UsbHardware`], the
-//!   readers-failed and `EvtIoStop` decisions, and the queue / reader / device-interface configuration.
+//!   readers-failed and `EvtIoStop` decisions, and the queue and reader configuration.
 //! - [`status`]: the NTSTATUS values and the [`status::Completion`] (status + Information) type.
 //! - [`output`]: the request output buffer as written by `WdfMemoryCopyFromBuffer` ([`output::OutputMemory`]).
 //!
@@ -28,8 +28,7 @@
 //!
 //! - **`EvtDriverDeviceAdd`**: `WdfFdoInitSetFilter`; PnP callbacks PrepareHardware/D0Entry/D0Exit only;
 //!   `WdfDeviceCreate` with the context, `ptr.write(DeviceState::new())`, then
-//!   [`state::DeviceState::on_device_create`]; `WdfDeviceCreateDeviceInterface`
-//!   ([`lifecycle::DEVICE_INTERFACE_GUID`]); the queues [`lifecycle::DEFAULT_QUEUE`] and
+//!   [`state::DeviceState::on_device_create`], the recovery work item and the queues [`lifecycle::DEFAULT_QUEUE`] and
 //!   [`lifecycle::INPUT_QUEUE`]. Return the first failure. (Do not call
 //!   `WdfPdoInitAllowForwardingRequestToParent`: spec B12.)
 //! - **`EvtDevicePrepareHardware` / `EvtDeviceD0Entry` / `EvtDeviceD0Exit`**: implement
@@ -42,6 +41,7 @@
 //!     [`hid::get_hid_descriptor_to`] / [`hid::get_report_descriptor_to`];
 //!   - attributes: `WdfRequestRetrieveOutputBuffer(.., 32, ..)` → [`hid::get_device_attributes`] with
 //!     [`state::DeviceState::usb_device_ids`];
+//!   - strings: query the USB descriptor in the requested language and include the NUL terminator;
 //!   - `READ_REPORT`: `WdfRequestForwardToIoQueue(InputQueue)`; on failure complete with
 //!     [`hid::read_report_forward_failed`];
 //!   - `GET/SET_FEATURE`: [`feature::get_feature`] / [`feature::set_feature`] with the request's

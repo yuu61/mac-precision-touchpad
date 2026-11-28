@@ -3,7 +3,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
-    [ValidateSet('km', 'um')]
+    [ValidateSet('km')]
     [string]$Workspace,
 
     [Parameter(Mandatory)]

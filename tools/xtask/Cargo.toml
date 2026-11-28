@@ -14,7 +14,6 @@ publish.workspace = true
 amtptp-hidfilter-core = { path = "../../crates/amtptp-hidfilter-core" }
 amtptp-spikm-core = { path = "../../crates/amtptp-spikm-core" }
 amtptp-usbkm-core = { path = "../../crates/amtptp-usbkm-core" }
-amtptp-usbum-core = { path = "../../crates/amtptp-usbum-core" }
 
 [lints]
 workspace = true
