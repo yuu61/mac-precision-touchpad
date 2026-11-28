@@ -5,10 +5,10 @@ Usage: cargo xtask <command> [options]
 
 Commands:
   build      Build the driver workspace drivers/km (KMDF).
-  package    Build, then assemble, stamp, catalog, verify (and optionally sign)
+  package    Set the version, build, then assemble, verify, catalog and optionally sign
              the driver package (packaging/AmtPtpDevice.inx, all four drivers)
              under target/package/<arch>/AmtPtpDevice/.
-  test       Run host tests and strict Clippy checks across all three
+  test       Run host tests and strict Clippy checks in the host and KMDF
              workspaces, including the shared driver support crates.
   help       Show this text.
 
@@ -17,8 +17,8 @@ Options (build, package):
   --release                   Use the release profile (default: dev/debug).
 
 Options (package only):
-  --driver-version a.b.c.d    DriverVer version (each part 0-65535). Default: stampinf's
-                              '*' (current time h.m.s.ms).
+  --driver-version a.b.c.d    Version for the INF and driver binaries (each part 0-65535).
+                              Default: current local time h.m.s.ms, sampled once by stampinf.
   --sign <args...>            Sign with signtool. EVERYTHING after --sign is passed to
                               `signtool sign` verbatim (so --sign must come last), e.g.
                               --sign /sha1 <thumbprint> /tr http://timestamp.digicert.com /td sha256
@@ -200,7 +200,7 @@ fn parse_options(args: &[String], package: bool) -> Result<Options, String> {
             }
             "--driver-version" if package => {
                 let v = value("a.b.c.d")?;
-                validate_driver_version(&v)?;
+                parse_driver_version(&v)?;
                 o.driver_version = Some(v);
             }
             "--sign" if package => {
@@ -232,20 +232,24 @@ fn parse_options(args: &[String], package: bool) -> Result<Options, String> {
     Ok(o)
 }
 
-/// `DriverVer` version: four dot-separated 16-bit numbers.
-pub fn validate_driver_version(v: &str) -> Result<(), String> {
-    let parts: Vec<&str> = v.split('.').collect();
-    let ok = parts.len() == 4
-        && parts.iter().all(|p| {
-            !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) && p.parse::<u16>().is_ok()
-        });
-    if ok {
-        Ok(())
-    } else {
-        Err(format!(
-            "invalid --driver-version `{v}`: expected a.b.c.d with each part a number 0-65535"
-        ))
+/// Parse the four 16-bit components of a Windows driver version.
+pub fn parse_driver_version(v: &str) -> Result<[u16; 4], String> {
+    let invalid = || {
+        format!("invalid driver version `{v}`: expected a.b.c.d with each part a number 0-65535")
+    };
+    let mut parts = v.split('.');
+    let mut version = [0; 4];
+    for part in &mut version {
+        let value = parts.next().ok_or_else(&invalid)?;
+        if !value.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(invalid());
+        }
+        *part = value.parse().map_err(|e| format!("{} ({e})", invalid()))?;
     }
+    if parts.next().is_some() {
+        return Err(invalid());
+    }
+    Ok(version)
 }
 
 #[cfg(test)]
@@ -312,15 +316,22 @@ mod tests {
 
     #[test]
     fn driver_version_validation() {
-        validate_driver_version("0.0.0.0").unwrap();
-        validate_driver_version("19.0.0.200").unwrap();
-        validate_driver_version("65535.65535.65535.65535").unwrap();
-        assert!(validate_driver_version("65536.0.0.0").is_err());
-        assert!(validate_driver_version("1.2.3").is_err());
-        assert!(validate_driver_version("1.2.3.4.5").is_err());
-        assert!(validate_driver_version("1.2..4").is_err());
-        assert!(validate_driver_version("1.2.3.+4").is_err());
-        assert!(validate_driver_version("*").is_err());
+        assert_eq!(parse_driver_version("0.0.0.0").unwrap(), [0; 4]);
+        assert_eq!(parse_driver_version("19.0.0.200").unwrap(), [19, 0, 0, 200]);
+        assert_eq!(
+            parse_driver_version("65535.65535.65535.65535").unwrap(),
+            [u16::MAX; 4]
+        );
+        for invalid in [
+            "65536.0.0.0",
+            "1.2.3",
+            "1.2.3.4.5",
+            "1.2..4",
+            "1.2.3.+4",
+            "*",
+        ] {
+            parse_driver_version(invalid).unwrap_err();
+        }
     }
 
     #[test]

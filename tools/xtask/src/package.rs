@@ -19,9 +19,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::cli::{Arch, PackageOpts};
-use crate::drivers;
-use crate::paths::{package_arch_dir, repo_root};
+use crate::cli::{Arch, PackageOpts, parse_driver_version};
+use crate::drivers::{self, DriverBuild};
+use crate::paths::{package_arch_dir, repo_root, root_target_dir};
 use crate::process;
 use crate::wdk::{Tools, Wdk};
 
@@ -72,6 +72,65 @@ struct Context<'a> {
     tools: Tools,
     signtool: Option<PathBuf>,
     kmdf: String,
+    driver_ver: &'a DriverVer,
+    build: DriverBuild<'a>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct DriverVer {
+    date: String,
+    version: String,
+}
+
+impl DriverVer {
+    fn from_inf(text: &str) -> Result<Self, String> {
+        let value = text
+            .lines()
+            .map(strip_inf_comment)
+            .filter_map(|line| line.split_once('='))
+            .find_map(|(key, value)| {
+                key.trim()
+                    .eq_ignore_ascii_case("DriverVer")
+                    .then_some(value)
+            })
+            .ok_or("no DriverVer in stamped INF")?;
+        let (date, version) = value
+            .split_once(',')
+            .filter(|(date, _)| !date.trim().is_empty())
+            .ok_or_else(|| format!("DriverVer = `{value}` was not stamped (date,version)"))?;
+        let [a, b, c, d] = parse_driver_version(version.trim())?;
+        Ok(Self {
+            date: date.trim().to_owned(),
+            version: format!("{a}.{b}.{c}.{d}"),
+        })
+    }
+}
+
+/// Stamp a minimal INF once so all architectures use the same local date and
+/// version, even if the driver builds run across midnight.
+fn resolve_driver_ver(
+    stampinf: &Path,
+    scratch: &Path,
+    version: Option<&str>,
+) -> Result<DriverVer, String> {
+    write(
+        scratch,
+        "[Version]\r\nSignature = \"$WINDOWS NT$\"\r\nDriverVer =\r\n",
+    )?;
+    let mut cmd = Command::new(stampinf);
+    cmd.arg("-f")
+        .arg(scratch)
+        .args(["-d", "*", "-v", version.unwrap_or("*")])
+        .env_remove("PRIVATE_DRIVER_PACKAGE");
+    let result = process::run(&mut cmd, "resolve DriverVer").and_then(|()| {
+        let stamped = fs::read_to_string(scratch)
+            .map_err(|e| format!("cannot read {}: {e}", scratch.display()))?;
+        DriverVer::from_inf(&stamped)
+    });
+    let removed = fs::remove_file(scratch);
+    let driver_ver = result?;
+    removed.map_err(|e| format!("cannot remove {}: {e}", scratch.display()))?;
+    Ok(driver_ver)
 }
 
 pub fn package(opts: &PackageOpts) -> Result<(), String> {
@@ -96,13 +155,39 @@ pub fn package(opts: &PackageOpts) -> Result<(), String> {
         println!("xtask: signtool: {}", s.display());
     }
 
-    drivers::build_drivers(&opts.arches, opts.release)?;
+    let package_root = root_target_dir().join("package");
+    fs::create_dir_all(&package_root)
+        .map_err(|e| format!("cannot create {}: {e}", package_root.display()))?;
+    // Both the packaging build cache and the final package directories are
+    // shared by invocations. Hold the lock until all copies and catalogs finish.
+    let lock = package_root.join(".lock");
+    let package_lock = fs::File::options()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock)
+        .map_err(|e| format!("cannot open {}: {e}", lock.display()))?;
+    package_lock
+        .try_lock()
+        .map_err(|e| format!("cannot lock {} for packaging: {e}", lock.display()))?;
+    let driver_ver = resolve_driver_ver(
+        &tools.stampinf,
+        &package_root.join(".driver-version.inf"),
+        opts.driver_version.as_deref(),
+    )?;
+    let build = DriverBuild {
+        release: opts.release,
+        package_version: Some(&driver_ver.version),
+    };
+    drivers::build_drivers(&opts.arches, build)?;
 
     let cx = Context {
         opts,
         tools,
         signtool,
         kmdf,
+        driver_ver: &driver_ver,
+        build,
     };
     for &arch in &opts.arches {
         package_one(&cx, arch).map_err(|e| format!("[{} {PACKAGE}] {e}", arch.name()))?;
@@ -174,7 +259,7 @@ fn package_one(cx: &Context<'_>, arch: Arch) -> Result<(), String> {
     // 1. Binaries (KMDF .dll -> .sys) and their PDBs.
     let mut payload = Vec::new();
     for b in &BINARIES {
-        let out = drivers::output_dir(arch, opts.release);
+        let out = cx.build.output_dir(arch);
         let dll = out.join(format!("{}.dll", b.name));
         process::require_file(&dll, " (expected from the drivers/km build)")?;
         let dest = pkg.join(b.packaged_name());
@@ -195,26 +280,27 @@ fn package_one(cx: &Context<'_>, arch: Arch) -> Result<(), String> {
     write(&pkg.join(&inf_file), &to_crlf(&text))?;
 
     // 3. stampinf: $ARCH$, $KMDFVERSION$, DriverVer, CatalogFile.
-    let version = opts.driver_version.as_deref().unwrap_or("*");
     let mut cmd = Command::new(&cx.tools.stampinf);
-    cmd.current_dir(&pkg).args([
-        "-f",
-        &inf_file,
-        "-d",
-        "*",
-        "-a",
-        arch.stampinf_arch(),
-        "-c",
-        &cat_file,
-        "-v",
-        version,
-        "-k",
-        &cx.kmdf,
-    ]);
+    cmd.current_dir(&pkg)
+        .env_remove("PRIVATE_DRIVER_PACKAGE")
+        .args([
+            "-f",
+            &inf_file,
+            "-d",
+            &cx.driver_ver.date,
+            "-a",
+            arch.stampinf_arch(),
+            "-c",
+            &cat_file,
+            "-v",
+            &cx.driver_ver.version,
+            "-k",
+            &cx.kmdf,
+        ]);
     process::run(&mut cmd, "stampinf")?;
     let stamped = fs::read_to_string(pkg.join(&inf_file))
         .map_err(|e| format!("cannot read stamped {inf_file}: {e}"))?;
-    check_stamped(&stamped, &cx.kmdf, &cat_file)
+    check_stamped(&stamped, &cx.kmdf, &cat_file, cx.driver_ver)
         .map_err(|e| format!("stampinf output check failed for {inf_file}: {e}"))?;
 
     // 4. Verify the entire stamped INF against Windows Driver requirements.
@@ -227,7 +313,7 @@ fn package_one(cx: &Context<'_>, arch: Arch) -> Result<(), String> {
         sign(signtool, args, &payload)?;
     }
 
-    // 6. Inf2Cat. stampinf -d * writes the LOCAL date; /uselocaltime keeps
+    // 6. Inf2Cat. The DriverVer date is local; /uselocaltime keeps
     //    Inf2Cat from rejecting it as future-dated east of UTC.
     let mut cmd = Command::new(&cx.tools.inf2cat);
     cmd.arg(format!("/driver:{}", pkg.display()))
@@ -327,10 +413,9 @@ fn unreplaced_token(line: &str) -> Option<&str> {
 }
 
 /// Sanity-check stampinf's output: every keyword replaced, `DriverVer` and
-/// `CatalogFile` set, framework versions as requested.
-fn check_stamped(text: &str, kmdf: &str, cat: &str) -> Result<(), String> {
+/// `CatalogFile` set, and the driver and framework versions as requested.
+fn check_stamped(text: &str, kmdf: &str, cat: &str, expected: &DriverVer) -> Result<(), String> {
     let mut problems = Vec::new();
-    let mut driver_ver = None;
     let mut catalog = None;
     for (n, raw) in text.lines().enumerate() {
         let line = strip_inf_comment(raw).trim();
@@ -342,7 +427,6 @@ fn check_stamped(text: &str, kmdf: &str, cat: &str) -> Result<(), String> {
         };
         let value = value.trim();
         match key.trim().to_ascii_lowercase().as_str() {
-            "driverver" => driver_ver = Some(value.to_owned()),
             "catalogfile" => catalog = Some(value.to_owned()),
             "kmdflibraryversion" if value != kmdf => problems.push(format!(
                 "line {}: KmdfLibraryVersion = {value}, expected {kmdf}",
@@ -351,10 +435,13 @@ fn check_stamped(text: &str, kmdf: &str, cat: &str) -> Result<(), String> {
             _ => {}
         }
     }
-    match &driver_ver {
-        Some(v) if v.contains(',') => {}
-        Some(v) => problems.push(format!("DriverVer = `{v}` was not stamped (date,version)")),
-        None => problems.push("no DriverVer".to_owned()),
+    match DriverVer::from_inf(text) {
+        Ok(found) if found == *expected => {}
+        Ok(found) => problems.push(format!(
+            "DriverVer = {},{}, expected {},{}",
+            found.date, found.version, expected.date, expected.version
+        )),
+        Err(error) => problems.push(error),
     }
     if catalog.as_deref() != Some(cat) {
         problems.push(format!("CatalogFile = {catalog:?}, expected {cat}"));
@@ -422,13 +509,21 @@ mod tests {
                     DriverVer = 11/26/2026,1.2.3.4\n[Manufacturer]\n\
                     %M%=Standard,NTamd64.10.0...16299 ; NT$ARCH$ in a comment is fine\n\
                     [w]\nKmdfLibraryVersion = 1.23\n";
-        assert_eq!(check_stamped(good, "1.23", "A.cat"), Ok(()));
-        assert!(check_stamped(good, "1.25", "A.cat").is_err());
-        assert!(check_stamped(good, "1.23", "B.cat").is_err());
+        let expected = DriverVer {
+            date: "11/26/2026".to_owned(),
+            version: "1.2.3.4".to_owned(),
+        };
+        assert_eq!(check_stamped(good, "1.23", "A.cat", &expected), Ok(()));
+        assert!(check_stamped(good, "1.25", "A.cat", &expected).is_err());
+        assert!(check_stamped(good, "1.23", "B.cat", &expected).is_err());
         let unstamped = good.replace("NTamd64", "NT$ARCH$");
-        assert!(check_stamped(&unstamped, "1.23", "A.cat").is_err());
+        assert!(check_stamped(&unstamped, "1.23", "A.cat", &expected).is_err());
         let no_ver = good.replace("DriverVer = 11/26/2026,1.2.3.4", "DriverVer =");
-        assert!(check_stamped(&no_ver, "1.23", "A.cat").is_err());
+        assert!(check_stamped(&no_ver, "1.23", "A.cat", &expected).is_err());
+        let wrong_version = good.replace("1.2.3.4", "1.2.3.5");
+        assert!(check_stamped(&wrong_version, "1.23", "A.cat", &expected).is_err());
+        let wrong_date = good.replace("11/26/2026", "11/27/2026");
+        assert!(check_stamped(&wrong_date, "1.23", "A.cat", &expected).is_err());
     }
 
     #[test]

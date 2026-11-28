@@ -36,12 +36,16 @@ fn run(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         cli::Command::Build(opts) => {
-            drivers::build_drivers(&opts.arches, opts.release)?;
+            let build = drivers::DriverBuild {
+                release: opts.release,
+                package_version: None,
+            };
+            drivers::build_drivers(&opts.arches, build)?;
             for &arch in &opts.arches {
                 println!(
                     "xtask: [{}] drivers/km -> {}",
                     arch.name(),
-                    drivers::output_dir(arch, opts.release).display()
+                    build.output_dir(arch).display()
                 );
             }
             Ok(())

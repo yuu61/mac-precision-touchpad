@@ -1,12 +1,11 @@
-//! Compile a Win32 resource script (`.rc`) with the Windows SDK `rc.exe` and link
-//! the resulting `.res` into the cdylib that is being built.
+//! Generate and link a KMDF driver's Win32 VERSIONINFO resource.
 //!
 //! For use from a driver crate's `build.rs` only:
 //!
 //! ```no_run
 //! fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     wdk_build::configure_wdk_binary_build()?;
-//!     rc_embed::compile_and_link("Resource.rc")?;
+//!     rc_embed::embed_driver_version("Example.sys", "Example driver")?;
 //!     Ok(())
 //! }
 //! ```
@@ -17,12 +16,10 @@
 //! - `rc.exe` is `<WDKContentRoot>/bin/<sdk>/<host-arch>/rc.exe` (the directory
 //!   `wdk_build::cargo_make::setup_path` would put on `PATH`); if it is missing,
 //!   `rc.exe` from `PATH` is tried.
-//! - Include path: the `.rc` file's own directory (for `resource.h`), then the
-//!   SDK `um` (`winres.h`) and `shared` directories. wdk-build's KMDF include
-//!   list has no `um`, so both are added explicitly for every driver model.
+//! - The generated script includes `winres.h` from the SDK's `um` and
+//!   `shared` directories.
 //! - `_DEBUG` is defined for the `dev` profile (Cargo `PROFILE=debug`), as Visual
-//!   Studio does for a Debug configuration, so `#ifdef _DEBUG` blocks (e.g.
-//!   `FILEFLAGS 0x1L`) behave like the C build.
+//!   Studio does for a Debug configuration, so only debug builds set `VS_FF_DEBUG`.
 //! - The `.res` is handed to `link.exe` with `cargo::rustc-cdylib-link-arg`;
 //!   `link.exe` converts it (cvtres) for the target machine, so the same `.res`
 //!   works for x64 and ARM64 and for `/DRIVER` images.
@@ -34,7 +31,7 @@ use std::{
     process::Command,
 };
 
-/// Error returned by [`compile_and_link`].
+/// Error preparing or compiling the driver version resource.
 #[derive(Debug)]
 pub struct RcError(String);
 
@@ -117,39 +114,91 @@ fn locate_sdk() -> Result<(PathBuf, PathBuf, PathBuf), RcError> {
     Ok((um, shared, rc))
 }
 
-/// Compiles `rc_file` (relative to `CARGO_MANIFEST_DIR`, or absolute) into
-/// `$OUT_DIR/<stem>.res` and links it into the cdylib of the calling package.
+/// Generates `$OUT_DIR/version.rc`, compiles it with the SDK, and links the
+/// resulting resource into the calling driver's cdylib.
 ///
-/// Emits `cargo::rerun-if-changed` for the `.rc` file and every `*.h` next to it.
+/// `AMTPTP_DRIVER_VERSION` is the package version supplied by xtask. A standalone
+/// Cargo build uses the driver crate's major, minor and patch versions with a zero revision.
 ///
 /// # Errors
-/// Returns an error if the WDK/SDK cannot be located, `rc.exe` cannot be started,
-/// or `rc.exe` reports a failure (its output is forwarded to Cargo's log).
-pub fn compile_and_link<P: AsRef<Path>>(rc_file: P) -> Result<PathBuf, Box<dyn Error>> {
-    let manifest_dir = env_path("CARGO_MANIFEST_DIR")?;
+/// Returns an error if the version is invalid, the generated script cannot be
+/// written, the SDK cannot be located, or `rc.exe` fails.
+pub fn embed_driver_version(filename: &str, description: &str) -> Result<(), Box<dyn Error>> {
+    println!("cargo::rerun-if-changed=build.rs");
+    println!("cargo::rerun-if-env-changed=AMTPTP_DRIVER_VERSION");
     let out_dir = env_path("OUT_DIR")?;
-    let rc_file = manifest_dir.join(rc_file);
-    let rc_dir = rc_file
-        .parent()
-        .ok_or_else(|| err(format!("{} has no parent directory", rc_file.display())))?
-        .to_path_buf();
-    let stem = rc_file
-        .file_stem()
-        .ok_or_else(|| err(format!("{} has no file name", rc_file.display())))?;
-
-    println!("cargo::rerun-if-changed={}", rc_file.display());
-    for entry in fs::read_dir(&rc_dir)? {
-        let path = entry?.path();
-        if path
-            .extension()
-            .is_some_and(|e| e.eq_ignore_ascii_case("h"))
-        {
-            println!("cargo::rerun-if-changed={}", path.display());
-        }
+    let rc_file = out_dir.join("version.rc");
+    let version = match env::var("AMTPTP_DRIVER_VERSION") {
+        Ok(version) => version,
+        Err(env::VarError::NotPresent) => format!(
+            "{}.{}.{}.0",
+            env::var("CARGO_PKG_VERSION_MAJOR")?,
+            env::var("CARGO_PKG_VERSION_MINOR")?,
+            env::var("CARGO_PKG_VERSION_PATCH")?
+        ),
+        Err(e) => return Err(e.into()),
+    };
+    let mut fields = version.split('.');
+    let mut numbers = [0_u16; 4];
+    let invalid = || {
+        err(format!(
+            "invalid VERSIONINFO version `{version}`: expected four u16 components"
+        ))
+    };
+    for number in &mut numbers {
+        *number = fields
+            .next()
+            .and_then(|field| field.parse().ok())
+            .ok_or_else(&invalid)?;
     }
+    if fields.next().is_some() {
+        return Err(invalid().into());
+    }
+    let [a, b, c, d] = numbers;
+    let script = format!(
+        r#"#include "winres.h"
+
+LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION {a}, {b}, {c}, {d}
+PRODUCTVERSION {a}, {b}, {c}, {d}
+FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+#ifdef _DEBUG
+FILEFLAGS VS_FF_DEBUG
+#else
+FILEFLAGS 0
+#endif
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_DRV
+FILESUBTYPE VFT2_DRV_SYSTEM
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName", "Bingxing Wang"
+            VALUE "FileDescription", "{description}"
+            VALUE "FileVersion", "{a}.{b}.{c}.{d}"
+            VALUE "InternalName", "{filename}"
+            VALUE "LegalCopyright", "Copyright (C) 2018-2019 Bingxing Wang and project contributors"
+            VALUE "OriginalFilename", "{filename}"
+            VALUE "ProductName", "Apple Precision Touchpad Driver Component"
+            VALUE "ProductVersion", "{a}.{b}.{c}.{d}"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
+"#
+    );
+    fs::write(&rc_file, script)
+        .map_err(|e| err(format!("cannot write {}: {e}", rc_file.display())))?;
 
     let (um, shared, rc_exe) = locate_sdk()?;
-    let res = out_dir.join(stem).with_extension("res");
+    let res = out_dir.join("version.res");
 
     let mut command = Command::new(&rc_exe);
     command.arg("/nologo");
@@ -157,8 +206,6 @@ pub fn compile_and_link<P: AsRef<Path>>(rc_file: P) -> Result<PathBuf, Box<dyn E
         command.args(["/d", "_DEBUG"]);
     }
     command
-        .arg("/I")
-        .arg(&rc_dir)
         .arg("/I")
         .arg(&um)
         .arg("/I")
@@ -183,5 +230,5 @@ pub fn compile_and_link<P: AsRef<Path>>(rc_file: P) -> Result<PathBuf, Box<dyn E
     }
 
     println!("cargo::rustc-cdylib-link-arg={}", res.display());
-    Ok(res)
+    Ok(())
 }

@@ -34,11 +34,28 @@ fn driver_dir() -> PathBuf {
     repo_root().join("drivers/km")
 }
 
-pub fn output_dir(arch: Arch, release: bool) -> PathBuf {
-    driver_dir()
-        .join("target")
-        .join(arch.triple())
-        .join(if release { "release" } else { "debug" })
+/// Packaging uses its own Cargo target directory because a plain build
+/// embeds the crate version instead of the package version.
+#[derive(Clone, Copy)]
+pub struct DriverBuild<'a> {
+    pub release: bool,
+    pub package_version: Option<&'a str>,
+}
+
+impl DriverBuild<'_> {
+    fn target_dir(self) -> PathBuf {
+        let target = driver_dir().join("target");
+        match self.package_version {
+            Some(_) => target.join("packaging"),
+            None => target,
+        }
+    }
+
+    pub fn output_dir(self, arch: Arch) -> PathBuf {
+        self.target_dir()
+            .join(arch.triple())
+            .join(if self.release { "release" } else { "debug" })
+    }
 }
 
 /// The framework version for stampinf, read from the workspace's
@@ -103,6 +120,7 @@ fn cargo_program() -> OsString {
 fn driver_cargo() -> Command {
     let mut cmd = Command::new(cargo_program());
     cmd.current_dir(driver_dir());
+    cmd.env_remove("AMTPTP_DRIVER_VERSION");
     for var in DRIVER_TARGET_ENV.into_iter().chain(RUSTFLAGS_ENV) {
         if env::var_os(var).is_some() {
             println!("xtask: note: not passing {var} to the KMDF build");
@@ -126,11 +144,16 @@ fn driver_cargo() -> Command {
 }
 
 /// `cargo build --target <triple> [--release]` in each workspace, per arch.
-pub fn build_drivers(arches: &[Arch], release: bool) -> Result<(), String> {
+pub fn build_drivers(arches: &[Arch], build: DriverBuild<'_>) -> Result<(), String> {
     for &arch in arches {
         let mut cmd = driver_cargo();
         cmd.args(["build", "--target", arch.triple()]);
-        if release {
+        if let Some(version) = build.package_version {
+            cmd.arg("--target-dir")
+                .arg(build.target_dir())
+                .env("AMTPTP_DRIVER_VERSION", version);
+        }
+        if build.release {
             cmd.arg("--release");
         }
         process::run(

@@ -59,8 +59,10 @@ cargo xtask help
     `+crt-static` rustflags. So xtask removes `CARGO_TARGET_DIR`, `CARGO_BUILD_TARGET_DIR`,
     `CARGO_BUILD_TARGET`, `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS` and `CARGO_BUILD_RUSTFLAGS`
     from the driver builds' environment.
-- `package`: builds the KMDF workspace first. There is one package, `packaging/AmtPtpDevice.inx`
-  with all four drivers (see [One INF](#one-inf)). Then, for each arch:
+- `package`: resolves one local date and version with StampInf and then builds the KMDF drivers
+  with that version. It uses `drivers/km/target/packaging/` for build output so plain Cargo builds
+  can use the crate version in their own build directory. The one package template is
+  `packaging/AmtPtpDevice.inx` (see [One INF](#one-inf)). Then, for each arch:
   1. It empties `target/package/<arch>/AmtPtpDevice/` and `target/package/<arch>/AmtPtpDevice.symbols/`,
      so no stale `.cat`, `.inf` or `.pdb` is left. It also removes, when they exist, the shared
      `target/package/<arch>/symbols/` directory and the standalone `AmtPtpHidFilter/` and
@@ -70,18 +72,18 @@ cargo xtask help
      `target/package/<arch>/AmtPtpDevice.symbols/`.
   3. It writes `packaging/AmtPtpDevice.inx` as `AmtPtpDevice.inf` with CRLF line endings. The
      `.inx` is LF in git.
-  4. It runs `stampinf -f <inf> -d * -a amd64|arm64 -c AmtPtpDevice.cat -v <version|*> -k 1.31`.
+  4. It runs `stampinf -f <inf> -d <date> -a amd64|arm64 -c AmtPtpDevice.cat -v <version> -k 1.31`.
      The KMDF version comes from the workspace metadata in `drivers/km/Cargo.toml`.
-  5. It checks the stamped file: no `$KEYWORD$` left, `DriverVer` and `CatalogFile` set, and every
-     `KmdfLibraryVersion` value as requested.
+  5. It checks that the stamped file contains the selected `DriverVer`, the expected
+     `CatalogFile` and `KmdfLibraryVersion` values, and no unexpanded keywords.
   6. It runs `InfVerif /w <inf>` on the entire stamped INF. A Windows Driver validation error stops
      packaging before signing or catalog creation.
   7. With `--sign`, it signs the binaries.
   8. It runs `Inf2Cat /driver:<dir> /os:<list> /uselocaltime` and checks that the `.cat` exists.
      Inf2Cat writes the catalog name in lower case; xtask renames it to the `CatalogFile`
      spelling.
-     - `/uselocaltime` is needed because `stampinf -d *` writes the local date, while Inf2Cat
-       checks in UTC by default. East of UTC it would otherwise reject a fresh DriverVer as
+     - `/uselocaltime` makes Inf2Cat use the same time zone as the package date. East of UTC,
+       the default UTC check could reject a fresh DriverVer as
        future-dated.
      - OS list for x64: `10_VB_X64,ServerFE_X64,10_CO_X64,10_NI_X64,10_GE_X64,Server2025_X64`.
      - OS list for arm64: `10_VB_ARM64,10_CO_ARM64,10_NI_ARM64,10_GE_ARM64`.
@@ -90,9 +92,14 @@ cargo xtask help
   9. With `--sign`, it signs the `.cat`.
   - Any failing step stops the run with a message naming the tool, its exit code and the full
     command line (with signtool's `/p` value redacted). The exit status is non-zero.
-- `--driver-version a.b.c.d`: the DriverVer version, with each part from 0 to 65535. The default
-  is stampinf's `*`, which is the current time `h.m.s.ms`. The DriverVer date is always the
-  current date.
+- `--driver-version a.b.c.d` sets both the INF `DriverVer` and the numeric and string file and
+  product versions in every SYS file. Each component is 0 to 65535. Without this option, StampInf
+  samples the local time as `h.m.s.ms` at the start of the command. The local date and version
+  are shared by both architectures in an `--arch all` build. The explicit package options take
+  precedence over the StampInf `PRIVATE_DRIVER_PACKAGE` environment override.
+- `rc-embed` generates `OUT_DIR/version.rc` and links the compiled resource into each KMDF
+  image as `VFT_DRV`. It rebuilds when the package version changes. Plain driver builds,
+  including `cargo xtask build`, use the crate version as `major.minor.patch.0`.
 - `test`: runs these steps, all of them, then reports every failure:
   - `cargo test --workspace` in the host workspace (core crates and xtask);
   - Clippy on all host targets, including integration tests.
@@ -294,16 +301,16 @@ The following comparison and verification records describe the original port. St
     for x64 and ARM64, scoped to the packages a change affects;
   - the **Driver package** job, for x64 and ARM64, whenever a driver, the INF template or xtask
     changes: `cargo xtask package --arch <arch> --release`, unsigned. It links the KMDF drivers,
-    compiles the `Resource.rc` files and runs stampinf, `InfVerif /w` and Inf2Cat, which Clippy
-    alone never exercises. The kit comes from the same NuGet packages as the Clippy jobs;
+    compiles the generated version resources and runs stampinf, `InfVerif /w` and Inf2Cat.
+    The job also checks the four SYS files' version resources against the stamped INF.
+    The kit comes from the same NuGet packages as the Clippy jobs.
     `.github/scripts/rust-ci.ps1 -PackagingTools` also extracts the WDK's `bin` and `tools`
     directories (stampinf, Inf2Cat, InfVerif) from the x64 WDK package.
 - The replacement is `cargo xtask package`.
   - `ReleaseSigned` becomes `--release --sign ...`.
   - The pipeline DriverVer becomes `--driver-version a.b.c.d`.
   - Debug/Release `TestSign` becomes `--sign` with a test certificate.
-- The "For developers" section of README.md (KMDF 1.23/1.15, UMDF 2.15, "DDK 2004",
-  `ReleaseSigned`) and the badge are updated in the integration phase, not here.
+- The root README documents the current Rust build and links to the Rust CI workflow.
 
 ## Verification record
 
